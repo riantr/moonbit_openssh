@@ -1,0 +1,53 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/hmac_sha512"
+
+// Values
+pub fn be64_to_8(FixedArray[Byte], Int, UInt64) -> Unit
+
+pub fn be8_to_64(FixedArray[Byte], Int) -> UInt64
+
+pub fn big_sigma0(UInt64) -> UInt64
+
+pub fn big_sigma1(UInt64) -> UInt64
+
+pub let block_len : Int
+
+pub let block_size : Int
+
+pub fn ch(UInt64, UInt64, UInt64) -> UInt64
+
+pub let hash_len : Int
+
+pub fn hmac_sha512(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let init_h : FixedArray[UInt64]
+
+pub let k512 : FixedArray[UInt64]
+
+pub fn maj(UInt64, UInt64, UInt64) -> UInt64
+
+pub let output_size : Int
+
+pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int, UInt64) -> Unit
+
+pub fn rotr(Int, UInt64) -> UInt64
+
+pub fn serialize_state(FixedArray[UInt64]) -> FixedArray[Byte]
+
+pub fn sha512(FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn small_sigma0(UInt64) -> UInt64
+
+pub fn small_sigma1(UInt64) -> UInt64
+
+pub fn transform(FixedArray[UInt64], FixedArray[UInt64]) -> Unit
+
+pub fn update(FixedArray[UInt64], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

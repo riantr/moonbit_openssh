@@ -1,0 +1,41 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/x25519"
+
+// Values
+pub fn fe_add(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub let fe_len : Int
+
+pub fn fe_mult(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub fn fe_mult121665(FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub fn fe_select(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt], FixedArray[UInt], UInt) -> Unit
+
+pub fn fe_square(FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub fn fe_squeeze(FixedArray[UInt]) -> Unit
+
+pub fn fe_sub(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub fn freeze(FixedArray[UInt]) -> Unit
+
+pub let ge_len : Int
+
+pub fn mainloop(FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub let minusp : FixedArray[UInt]
+
+pub fn recip(FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub let scalar_len : Int
+
+pub fn x25519(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

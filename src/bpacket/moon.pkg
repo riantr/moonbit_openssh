@@ -1,0 +1,1 @@
+// SSH binary packet protocol (RFC 4253 §6 + OpenSSH packet.c)

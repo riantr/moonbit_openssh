@@ -1,0 +1,117 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/ed25519"
+
+// Values
+pub fn be64_to_8(FixedArray[Byte], Int, UInt64) -> Unit
+
+pub fn be8_to_64(FixedArray[Byte], Int) -> UInt64
+
+pub fn big_sigma0(UInt64) -> UInt64
+
+pub fn big_sigma1(UInt64) -> UInt64
+
+pub let block_len : Int
+
+pub fn ch(UInt64, UInt64, UInt64) -> UInt64
+
+pub fn fe_add(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_cmov(FixedArray[UInt64], FixedArray[UInt64], UInt64) -> Unit
+
+pub fn fe_getparity(FixedArray[UInt64]) -> UInt64
+
+pub fn fe_invert(FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_iseq_vartime(FixedArray[UInt64], FixedArray[UInt64]) -> Bool
+
+pub fn fe_iszero_vartime(FixedArray[UInt64]) -> Bool
+
+pub fn fe_mul(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_neg(FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_one() -> FixedArray[UInt64]
+
+pub fn fe_pack(FixedArray[UInt64]) -> FixedArray[Byte]
+
+pub fn fe_pow2523(FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_setone(FixedArray[UInt64]) -> Unit
+
+pub fn fe_setzero(FixedArray[UInt64]) -> Unit
+
+pub fn fe_square(FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_sub(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn fe_unpack(FixedArray[Byte]) -> FixedArray[UInt64]
+
+pub fn fe_zero() -> FixedArray[UInt64]
+
+pub fn ge_double_scalarmult_vartime(FixedArray[FixedArray[UInt64]], FixedArray[UInt64], FixedArray[FixedArray[UInt64]], FixedArray[UInt64]) -> FixedArray[FixedArray[UInt64]]
+
+pub fn ge_isneutral_vartime(FixedArray[FixedArray[UInt64]]) -> Bool
+
+pub fn ge_pack(FixedArray[FixedArray[UInt64]]) -> FixedArray[Byte]
+
+pub fn ge_scalarmult_base(FixedArray[UInt64]) -> FixedArray[FixedArray[UInt64]]
+
+pub fn ge_setneutral() -> FixedArray[FixedArray[UInt64]]
+
+pub fn ge_unpackneg_vartime(FixedArray[Byte]) -> (FixedArray[FixedArray[UInt64]], Bool)
+
+pub let hash_len : Int
+
+pub let init_h : FixedArray[UInt64]
+
+pub let k512 : FixedArray[UInt64]
+
+pub fn keypair_from_seed(FixedArray[Byte]) -> (FixedArray[Byte], FixedArray[Byte])
+
+pub fn maj(UInt64, UInt64, UInt64) -> UInt64
+
+pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int, UInt64) -> Unit
+
+pub fn rotr(Int, UInt64) -> UInt64
+
+pub fn sc_2interleave2(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn sc_add(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn sc_from32bytes(FixedArray[Byte]) -> FixedArray[UInt64]
+
+pub fn sc_from64bytes(FixedArray[Byte]) -> FixedArray[UInt64]
+
+pub fn sc_is_in_range(FixedArray[UInt64]) -> Bool
+
+pub fn sc_is_in_range_bytes(FixedArray[Byte]) -> Bool
+
+pub fn sc_mul(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
+
+pub fn sc_to32bytes(FixedArray[UInt64]) -> FixedArray[Byte]
+
+pub fn sc_window3(FixedArray[UInt64]) -> FixedArray[Int]
+
+pub fn serialize_state(FixedArray[UInt64]) -> FixedArray[Byte]
+
+pub fn sha512(FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn sign(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn small_sigma0(UInt64) -> UInt64
+
+pub fn small_sigma1(UInt64) -> UInt64
+
+pub fn transform(FixedArray[UInt64], FixedArray[UInt64]) -> Unit
+
+pub fn update(FixedArray[UInt64], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+
+pub fn verify(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> Bool
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

@@ -1,0 +1,47 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/sha256"
+
+// Values
+pub fn be32_to_8(FixedArray[Byte], Int, UInt) -> Unit
+
+pub fn be8_to_32(FixedArray[Byte], Int) -> UInt
+
+pub let block_len : Int
+
+pub fn ch(UInt, UInt, UInt) -> UInt
+
+pub let hash_len : Int
+
+pub let init_H : FixedArray[UInt]
+
+pub let k256 : FixedArray[UInt]
+
+pub fn maj(UInt, UInt, UInt) -> UInt
+
+pub fn pad(FixedArray[UInt], FixedArray[Byte], Int, UInt64) -> Unit
+
+pub fn rotr(Int, UInt) -> UInt
+
+pub fn serialize_state(FixedArray[UInt]) -> FixedArray[Byte]
+
+pub fn sha256(FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn sigma0_big(UInt) -> UInt
+
+pub fn sigma0_small(UInt) -> UInt
+
+pub fn sigma1_big(UInt) -> UInt
+
+pub fn sigma1_small(UInt) -> UInt
+
+pub fn transform(FixedArray[UInt], FixedArray[UInt]) -> Unit
+
+pub fn update(FixedArray[UInt], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

@@ -1,0 +1,6 @@
+///| Ed25519 数字签名算法
+///| 对应 RFC 8032 + OpenSSH ed25519.c (TweetNaCl ref10)
+///|
+///| 注:本文件直接 inline 了 SHA-512 实现(因为 moon 0.1.20260608 不支持跨包 import,
+///|     ed25519 包内含 sha512_* 同名模块)。这样不依赖外部包。
+///|     3rd inline: src/sha512/, src/hmac_sha512/sha512_*.mbt, src/ed25519/sha512_*.mbt

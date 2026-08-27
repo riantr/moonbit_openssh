@@ -1,0 +1,29 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/poly1305"
+
+// Values
+pub fn add_block(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte], Bool) -> (UInt, UInt, UInt, UInt, UInt)
+
+pub let block_len : Int
+
+pub fn clamp_key(FixedArray[Byte]) -> (UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt)
+
+pub fn finalize(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let key_len : Int
+
+pub let limb_count : Int
+
+pub fn mul_mod(UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt, UInt)
+
+pub fn poly1305_auth(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let tag_len : Int
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

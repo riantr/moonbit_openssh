@@ -1,0 +1,80 @@
+# === Build outputs ===
+
+# MoonBit
+_build/
+target/
+.moonagent/
+*.mi
+*.mo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# === Compiled / binary artifacts ===
+
+# C / C++ build outputs
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+
+# JavaScript / TypeScript
+node_modules/
+*.js.map
+*.tsbuildinfo
+
+# Rust / Cargo
+target/
+Cargo.lock
+
+# === Generated / transient files ===
+
+# MoonBit test sandboxes
+_test_sb_*/
+
+# Debug-only directories (kept on disk for reference, not committed)
+src/test_nested/
+
+# Python bytecode / compiled
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs (transient debugging output)
+*.log
+_*.log
+_*.txt
+_*.done
+_hmac_sha512_*.log
+_sha256_*.done
+
+# Backup files
+*.bak
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor configs (optional per-project)
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === Third-party vendored source (keep) ===
+# Do NOT ignore *.c, *.h, *.py, *.json in src/ and verify_c/ etc.

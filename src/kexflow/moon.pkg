@@ -1,0 +1,8 @@
+// SSH kexgen client flow (kexgen.c/kex.c subset) — wires kexc25519 +
+// hostkey + bpacket into a full curve25519-sha256 / ssh-ed25519 /
+// chacha20-poly1305@openssh.com handshake.
+import {
+  "openssh/openssh_moonbit/src/hostkey",
+  "openssh/openssh_moonbit/src/kexc25519",
+  "openssh/openssh_moonbit/src/bpacket",
+}

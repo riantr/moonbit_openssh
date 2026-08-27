@@ -1,0 +1,124 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/bpacket"
+
+// Values
+pub const MAX_PACKET_SIZE : Int = 262144
+
+pub const MIN_PACKET_LENGTH : Int = 5
+
+pub const MSG_NEWKEYS : Byte = b'\x15'
+
+pub fn add_block(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte], Bool) -> (UInt, UInt, UInt, UInt, UInt)
+
+pub let block_len : Int
+
+pub fn chacha_block(FixedArray[UInt]) -> FixedArray[UInt]
+
+pub fn clamp_key(FixedArray[Byte]) -> (UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt)
+
+pub fn finalize(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let key_128_len : Int
+
+pub let key_256_len : Int
+
+pub let limb_count : Int
+
+pub fn mul_mod(UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt, UInt)
+
+pub let nonce_len : Int
+
+pub fn poly1305_auth(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let poly_block_len : Int
+
+pub let poly_key_len : Int
+
+pub let poly_tag_len : Int
+
+pub fn quarterround(UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt)
+
+pub fn rotl32(UInt, Int) -> UInt
+
+pub let state_len : Int
+
+pub fn u32_to_8_le(FixedArray[Byte], Int, UInt) -> Unit
+
+pub fn u8_to_32_le(FixedArray[Byte], Int) -> UInt
+
+// Errors
+
+// Types and methods
+pub struct ChaChaState {
+  // private fields
+}
+pub fn ChaChaState::new128(FixedArray[Byte]) -> Self
+pub fn ChaChaState::new256(FixedArray[Byte]) -> Self
+pub fn ChaChaState::process(Self, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn ChaChaState::set_iv(Self, FixedArray[Byte], counter? : UInt64) -> Self
+
+pub struct ChachaPolyCtx {
+  // private fields
+}
+pub fn ChachaPolyCtx::crypt(Self, UInt, FixedArray[Byte], Int, Int, Bool) -> FixedArray[Byte]?
+pub fn ChachaPolyCtx::get_length(Self, UInt, FixedArray[Byte]) -> UInt
+pub fn ChachaPolyCtx::new64(FixedArray[Byte]) -> Self
+
+pub enum EmitResult {
+  Ok(SentPacket)
+  SeqnrWrapFatal
+}
+
+pub(all) enum Mode {
+  Unencrypted
+  Aead(ChachaPolyCtx)
+}
+
+pub enum PacketError {
+  BadLength(UInt)
+  AlignError(UInt)
+  AuthFailed
+  BadPadlen(UInt)
+  PadOverflow(UInt)
+  EmptyPayload
+  BadType(UInt)
+  SeqnrWrapInitial
+}
+
+pub struct RecvCtx {
+  // private fields
+}
+pub fn RecvCtx::make(Mode, UInt, Bool, Bool) -> Self
+pub fn RecvCtx::new() -> Self
+pub fn RecvCtx::recv(Self, FixedArray[Byte]) -> RecvResult
+pub fn RecvCtx::seqnr(Self) -> UInt
+pub fn RecvCtx::set_mode(Self, Mode) -> Unit
+
+pub enum RecvEvent {
+  NeedMore
+  Packet(UInt, Byte, FixedArray[Byte])
+  Failed(PacketError)
+}
+
+pub struct RecvResult {
+  consumed : Int
+  event : RecvEvent
+}
+
+pub struct SendCtx {
+  // private fields
+}
+pub fn SendCtx::emit(Self, Byte, FixedArray[Byte], FixedArray[Byte]) -> EmitResult
+pub fn SendCtx::make(Mode, UInt, Bool, Bool) -> Self
+pub fn SendCtx::new() -> Self
+pub fn SendCtx::seqnr(Self) -> UInt
+pub fn SendCtx::set_mode(Self, Mode) -> Unit
+
+pub struct SentPacket {
+  frame : FixedArray[Byte]
+  wire : FixedArray[Byte]
+}
+
+// Type aliases
+
+// Traits

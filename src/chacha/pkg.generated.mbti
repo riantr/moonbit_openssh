@@ -1,0 +1,38 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/chacha"
+
+// Values
+pub let block_len : Int
+
+pub fn chacha_block(FixedArray[UInt]) -> FixedArray[UInt]
+
+pub let key_128_len : Int
+
+pub let key_256_len : Int
+
+pub let nonce_len : Int
+
+pub fn quarterround(UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt)
+
+pub fn rotl32(UInt, Int) -> UInt
+
+pub let state_len : Int
+
+pub fn u32_to_8_le(FixedArray[Byte], Int, UInt) -> Unit
+
+pub fn u8_to_32_le(FixedArray[Byte], Int) -> UInt
+
+// Errors
+
+// Types and methods
+pub struct ChaChaState {
+  // private fields
+}
+pub fn ChaChaState::new128(FixedArray[Byte]) -> Self
+pub fn ChaChaState::new256(FixedArray[Byte]) -> Self
+pub fn ChaChaState::process(Self, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn ChaChaState::set_iv(Self, FixedArray[Byte], counter? : UInt64) -> Self
+
+// Type aliases
+
+// Traits
