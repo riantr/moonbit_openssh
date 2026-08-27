@@ -55,3 +55,19 @@ test "fips_180_4_test_3_56bytes" {
     assert_eq(h[i], expected[i])
   }
 }
+
+///|
+test "fips_180_4_B2_T1_64a_boundary" {
+  // FIPS 180-4 § B.2: 64 bytes of 'a' (single 512-bit block boundary)
+  // ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
+  let msg : FixedArray[Byte] = FixedArray::make(64, b'\x61')
+  let expected : FixedArray[Byte] = [
+    0xff, 0xe0, 0x54, 0xfe, 0x7a, 0xe0, 0xcb, 0x6d, 0xc6, 0x5c, 0x3a, 0xf9, 0xb6,
+    0x1d, 0x52, 0x09, 0xf4, 0x39, 0x85, 0x1d, 0xb4, 0x3d, 0x0b, 0xa5, 0x99, 0x73,
+    0x37, 0xdf, 0x15, 0x46, 0x68, 0xeb,
+  ]
+  let h = sha256(msg)
+  for i = 0; i < 32; i = i + 1 {
+    assert_eq(h[i], expected[i])
+  }
+}
