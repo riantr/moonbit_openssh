@@ -1,0 +1,19 @@
+///| cmd/ssh_full_ws Loop #23 SSH client full write path with WebSocket (wasm-only)
+//|
+/// 跑 ssh_client_full_unencrypted_ws:
+///   connect → VERSION → KEXINIT → KEXECDH_INIT → NEWKEYS
+///   → USERAUTH_REQUEST "password" (final)
+///   → 1 ws.send 后收 7 个 post-auth server replies (concat buffer)
+///   → 解析 USERAUTH_SUCCESS + OPEN_CONFIRMATION + CHANNEL_SUCCESS + DATA + EOF + exit-status + CLOSE
+//|
+/// 仅 wasm-gc target 编译(因为 ws_socket 是 wasm-only extern library)
+//|
+/// 输出 5 行 hex dump (stdout / exit_code / remote_channel / sent / recv)
+
+import {
+  "openssh/openssh_moonbit/src/sshwire",
+  "openssh/openssh_moonbit/src/kexflow",
+  "openssh/openssh_moonbit/src/ws_socket",
+}
+
+pkgtype(kind: "executable")

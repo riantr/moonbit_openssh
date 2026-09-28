@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSH-WASM Demo (Loop #23 Full Write, ws)</title>
+  <style>
+    body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+    h1 { color: #569cd6; }
+    pre { background: #252526; border: 1px solid #3c3c3c; padding: 12px; overflow-x: auto; white-space: pre-wrap; }
+    .success { color: #4ec9b0; }
+    .info { color: #9cdcfe; }
+    .error { color: #f48771; }
+  </style>
+</head>
+<body>
+  <h1>SSH-WASM Demo: Full Write Path (Loop #23)</h1>
+  <p class="info">浏览器 MoonBit SSH client (wasm-gc) → WebSocket → mock_ssh_server_v2_v2 (port 2224)</p>
+  <pre id="out">Loading wasm-gc...</pre>
+  <script type="module">
+    // Loop #23 G3: 浏览器 MoonBit SSH client (cmd/ssh_full_ws/main.mbt wasm-gc)
+    //   通过 ws_shim + spectest::print_char shim 跑完整 write 侧
+    //   MoonBit main() 完成后打印 stdout + exit_code + remote_channel 到 #out
+    const out = document.getElementById('out');
+    out.textContent = '';
+    const log = (s) => { out.textContent += s + '\n'; };
+
+    let stdoutAccumulator = '';
+    const memory = new WebAssembly.Memory({ initial: 2, maximum: 10 });
+
+    // ===== ws_shim: MoonBit extern ws_* 同步阻塞读 =====
+    const wsInstances = new Map();
+    const wsBuffers = new Map();
+    let wsNextHandle = 1;
+
+    function ws_wait_for_bytes_sync(handle, n) {
+      const buf = wsBuffers.get(handle);
+      if (!buf) throw new Error(`ws_wait: invalid handle ${handle}`);
+      const start = Date.now();
+      while (true) {
+        let total = 0;
+        for (const chunk of buf) total += chunk.length;
+        if (total >= n) return;
+        if (Date.now() - start > 5000) throw new Error(`ws_wait: timeout ${n}B`);
+      }
+    }
+
+    const moonbit_socket = {
+      ws_connect: (urlPtr, urlLen) => {
+        const memView = new Uint8Array(memory.buffer);
+        const url = new TextDecoder().decode(memView.subarray(urlPtr, urlPtr + urlLen));
+        const ws = new WebSocket(url);
+        ws.binaryType = 'arraybuffer';
+        const handle = wsNextHandle++;
+        wsInstances.set(handle, ws);
+        wsBuffers.set(handle, []);
+        ws.onmessage = (e) => {
+          const bytes = new Uint8Array(e.data);
+          wsBuffers.get(handle).push(bytes);
+        };
+        // 同步阻塞等 ws.onopen
+        while (ws.readyState !== WebSocket.OPEN) {}
+        log(`[ws_shim] connected handle=${handle}`);
+        return handle;
+      },
+      ws_send: (handle, ptr, len) => {
+        const ws = wsInstances.get(handle);
+        if (!ws) throw new Error(`ws_send: invalid handle ${handle}`);
+        const memView = new Uint8Array(memory.buffer);
+        ws.send(memView.slice(ptr, ptr + len));
+        log(`[ws_shim] handle=${handle} send ${len}B`);
+        return 0;
+      },
+      ws_recv_into: (handle, ptr, n) => {
+        const buf = wsBuffers.get(handle);
+        if (!buf) throw new Error(`ws_recv_into: invalid handle ${handle}`);
+        ws_wait_for_bytes_sync(handle, n);
+        let remaining = n;
+        let writeOffset = ptr;
+        const memView = new Uint8Array(memory.buffer);
+        while (remaining > 0) {
+          const chunk = buf[0];
+          if (chunk.length <= remaining) {
+            memView.set(chunk, writeOffset);
+            writeOffset += chunk.length;
+            remaining -= chunk.length;
+            buf.shift();
+          } else {
+            memView.set(chunk.subarray(0, remaining), writeOffset);
+            buf[0] = chunk.subarray(remaining);
+            remaining = 0;
+          }
+        }
+        return n;
+      },
+      ws_close: (handle) => {
+        const ws = wsInstances.get(handle);
+        if (ws) ws.close();
+        return 0;
+      },
+    };
+
+    // ===== spectest::print_char shim (MoonBit runtime stdout) =====
+    const spectest = {
+      print_char: (ch) => {
+        stdoutAccumulator += String.fromCharCode(ch);
+      },
+    };
+
+    // ===== load ssh_full_ws.wasm + run =====
+    try {
+      log('[demo] fetching ssh_full_ws.wasm...');
+      const resp = await fetch('_wasm/ssh_full_ws.wasm');
+      if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
+      const bytes = await resp.arrayBuffer();
+      log(`[demo] fetched ${bytes.byteLength}B`);
+
+      const module = await WebAssembly.compile(bytes);
+      const instance = await WebAssembly.instantiate(module, {
+        moonbit_socket,
+        spectest,
+        env: { memory },
+      });
+
+      log('[demo] instantiated, calling _start (MoonBit main)...');
+
+      // _start 是同步阻塞 — main() 内调 ws_socket.read_n 会卡在 ws_wait_for_bytes_sync
+      // 用 setTimeout 让 mock server 有时间响应
+      setTimeout(() => {
+        try {
+          instance.exports._start();
+        } catch (e) {
+          log(`[demo] _start error: ${e.message}`);
+        }
+      }, 100);
+
+      // 等 MoonBit main() 完成 (USERAUTH_REQUEST 后 server 2s 内 close,~3s 全部完成)
+      await new Promise((r) => setTimeout(r, 6000));
+
+      log('[demo] === MoonBit main() output ===');
+      log(stdoutAccumulator);
+      log('[demo] === end ===');
+    } catch (e) {
+      log(`[demo] ✗ FAIL: ${e.message}`);
+      log(`[demo] Stack: ${e.stack}`);
+    }
+  </script>
+</body>
+</html>
