@@ -1,0 +1,10 @@
+///| ssh_config 解析 (OpenSSH ssh_config(5) subset)
+///|
+/// Loop #24: 从零实现
+///   - fnmatch: OpenSSH match_pattern 简化 (?, *)
+///   - parser: ssh_config 行级解析 (comment + Host + keyword=value)
+///   - match: 给定 hostname 找首个匹配 section
+///
+/// 参考 OpenSSH match.c + readconf.c (openbsd 风格)
+
+pkgtype(kind: "library")

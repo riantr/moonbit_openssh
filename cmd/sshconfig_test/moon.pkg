@@ -1,0 +1,9 @@
+///| cmd/sshconfig_test — Loop #24 ssh_config fnmatch/parser/match byte-exact 测试
+///
+/// 输出 10 行 byte-exact,跨 4 target × 2 mode
+
+import {
+  "openssh/openssh_moonbit/src/sshconfig",
+}
+
+pkgtype(kind: "executable")
