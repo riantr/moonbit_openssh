@@ -1,0 +1,18 @@
+///| cmd/ssh_full Loop #22 SSH client write 侧完整协议闭环 demo
+///|
+/// 跑 ssh_client_full_unencrypted:
+///   VERSION → KEXINIT → KEXECDH_INIT → NEWKEYS
+///   → USERAUTH_REQUEST "password" (final, mock 简化为跳过 probe)
+///   → CHANNEL_OPEN session + CHANNEL_REQUEST exec
+///   → 收 USERAUTH_SUCCESS + CHANNEL_OPEN_CONFIRMATION
+///   → 收 CHANNEL_SUCCESS + CHANNEL_DATA + EOF + exit-status + CLOSE
+///|
+/// 输出 8 行 hex dump + 协议字段,跨 4 target byte-exact
+
+import {
+  "openssh/openssh_moonbit/src/sshclient",
+  "openssh/openssh_moonbit/src/socket",
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "executable")
