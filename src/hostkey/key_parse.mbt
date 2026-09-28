@@ -77,7 +77,7 @@ priv struct HkCursor {
 
 ///|
 fn HkCursor::new(bytes : FixedArray[Byte]) -> HkCursor {
-  { bytes, off: 0, err: None }
+  { bytes, off: 0, err: None, }
 }
 
 ///|

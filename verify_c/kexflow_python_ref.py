@@ -192,6 +192,34 @@ def match_list(client: str, server: str) -> str:
 
 # ============================================================ kex_gen_hash (kexgen.c:62-65)
 
+def mpint_encode(v: bytes) -> bytes:
+    """Encode bytes as SSH2 mpint (u32 len + bytes, with leading zero if MSB set)."""
+    # Strip leading zeros
+    start = 0
+    while start < len(v) and v[start] == 0:
+        start += 1
+    v_stripped = v[start:]
+    # Check if MSB of first byte is set (needs sign extension)
+    prepend = False
+    if v_stripped and (v_stripped[0] & 0x80):
+        prepend = True
+    # Length = stripped length + (1 if prepending sign byte else 0)
+    length = len(v_stripped) + (1 if prepend else 0)
+    # Build: u32(length) + [0x00 if prepending] + v_stripped
+    out = struct.pack('>I', length)
+    if prepend:
+        out += b'\x00'
+    out += v_stripped
+    return out
+
+def ssh_put_string_with_fake_header(payload: bytes, msg_type: int) -> bytes:
+    """
+    Fake header for kex_gen_hash: u32(|payload|+1) + u8(msg_type) + payload
+    (OpenSSH kexgen.c:67-82 uses sshbuf_put_u32(len+1) + sshbuf_put_u8(SSH2_MSG_KEXINIT) + sshbuf_putb(payload))
+    """
+    length = len(payload) + 1  # +1 for the msg_type byte we're adding
+    return struct.pack('>I', length) + bytes([msg_type]) + payload
+
 def kex_gen_hash(
     V_C: bytes, V_S: bytes,
     I_C: bytes, I_S: bytes,   # full payloads (starting at cookie)
@@ -200,36 +228,79 @@ def kex_gen_hash(
     K: bytes,
 ) -> bytes:
     """
-    kexgen.c kex_gen_hash:
+    kexgen.c:48-96 kex_gen_hash:
     H = SHA256(
-      V_C || V_S || I_C || I_S || K_S || e || f || K
+      string(V_C) ||
+      string(V_S) ||
+      [u32(|I_C|+1) + u8(SSH2_MSG_KEXINIT) + I_C]  ← fake header
+      [u32(|I_S|+1) + u8(SSH2_MSG_KEXINIT) + I_S]  ← fake header
+      string(K_S) ||
+      string(e) ||
+      string(f) ||
+      mpint(K)                       ← shared secret as mpint
     )
-    where each item is RFC 4251 string: u32(len) || data.
     """
     h = hashlib.sha256()
-    for item in [V_C, V_S, I_C, I_S, K_S, e, f, K]:
-        h.update(struct.pack('>I', len(item)))
-        h.update(item)
+    # string(V_C): u32(len) || V_C
+    h.update(struct.pack('>I', len(V_C)))
+    h.update(V_C)
+    # string(V_S): u32(len) || V_S
+    h.update(struct.pack('>I', len(V_S)))
+    h.update(V_S)
+    # fake header for I_C: u32(|I_C|+1) + u8(SSH2_MSG_KEXINIT=20) + I_C
+    h.update(ssh_put_string_with_fake_header(I_C, 20))
+    # fake header for I_S: u32(|I_S|+1) + u8(SSH2_MSG_KEXINIT=20) + I_S
+    h.update(ssh_put_string_with_fake_header(I_S, 20))
+    # string(K_S): u32(len) || K_S
+    h.update(struct.pack('>I', len(K_S)))
+    h.update(K_S)
+    # string(e): u32(len) || e
+    h.update(struct.pack('>I', len(e)))
+    h.update(e)
+    # string(f): u32(len) || f
+    h.update(struct.pack('>I', len(f)))
+    h.update(f)
+    # mpint(K): mpint-encoded shared secret
+    h.update(mpint_encode(K))
     return h.digest()
 
 # ============================================================ derive_keys (kex.c:1132-1177)
 
+def derive_single(letter: bytes, need: int, K: bytes, H: bytes,
+                  session_id: bytes) -> bytes:
+    """
+    kex.c derive_key: K1 = SHA256(K || H || letter || session_id),
+    Kn = SHA256(K || H || K1 || ... || Kn-1) (extended, no session_id).
+    Returns `need` bytes (chained SHA256 for need > 32).
+    """
+    blocks = (need + 31) // 32
+    digest = bytearray()
+    # K1 = SHA256(K || H || letter || session_id)
+    buf = K + H + letter + session_id
+    d = hashlib.sha256(buf).digest()
+    digest += d
+    have = 32
+    # Kn = SHA256(K || H || digest[0..have)) — no session_id
+    while have < need:
+        buf = K + H + bytes(digest[:have])
+        d = hashlib.sha256(buf).digest()
+        digest += d
+        have += 32
+    return bytes(digest[:need])
+
 def derive_keys(K: bytes, H: bytes, session_id: bytes, need: int) -> dict:
     """
-    kex.c kex_derive_keys:
-      K1 = SHA256(K || H || 'A' || session_id)
-      Kn = SHA256(K || H || K1 || ... || Kn-1 || letter || session_id)
-    Returns {A,B,C,D,E,F} bytes (each truncated to `need`).
+    kex.c kex_derive_keys: 6 keys A..F, each `need` bytes.
+    A/B=IV, C/D=enc, E/F=MAC (MoonBit kexc25519 layout).
     """
-    letters = [b'A', b'B', b'C', b'D', b'E', b'F']
-    prev = b''
-    result = {}
-    for letter in letters:
-        chunk = K + H + prev + letter + session_id
-        ki = hashlib.sha256(chunk).digest()[:need]
-        result[letter.decode()] = ki
-        prev = ki
-    return result
+    return {
+        'A': derive_single(b'A', need, K, H, session_id),
+        'B': derive_single(b'B', need, K, H, session_id),
+        'C': derive_single(b'C', need, K, H, session_id),
+        'D': derive_single(b'D', need, K, H, session_id),
+        'E': derive_single(b'E', need, K, H, session_id),
+        'F': derive_single(b'F', need, K, H, session_id),
+    }
 
 # ============================================================ build sig blob
 
@@ -289,6 +360,7 @@ def run_reference(
     }
 
 def emit_vectors(out=sys.stdout):
+    """Emit all V1-V5 vectors. Out can be a file object or stdout."""
     print('=== Loop #12 KEX Flow triple-blind reference ===', file=out)
 
     # --- deterministic inputs
@@ -332,7 +404,13 @@ def emit_vectors(out=sys.stdout):
     print(f'V1_kex_algs = {p["kex_algs"].decode("ascii")}', file=out)
     print(f'V1_hostkey_algs = {p["hostkey_algs"].decode("ascii")}', file=out)
     print(f'V1_enc_ctos = {p["enc_ctos"].decode("ascii")}', file=out)
+    print(f'V1_enc_stoc = {p["enc_stoc"].decode("ascii")}', file=out)
     print(f'V1_mac_ctos = {p["mac_ctos"].decode("ascii")}', file=out)
+    print(f'V1_mac_stoc = {p["mac_stoc"].decode("ascii")}', file=out)
+    print(f'V1_comp_ctos = {p["comp_ctos"].decode("ascii")}', file=out)
+    print(f'V1_comp_stoc = {p["comp_stoc"].decode("ascii")}', file=out)
+    print(f'V1_lang_ctos = {p["lang_ctos"].decode("ascii")}', file=out)
+    print(f'V1_lang_stoc = {p["lang_stoc"].decode("ascii")}', file=out)
 
     # --- negotiate (first-match)
     kex_alg = match_list(p['kex_algs'].decode('ascii'), SERVER_KEX)
@@ -382,6 +460,8 @@ def emit_vectors(out=sys.stdout):
     print(f'V3_H_hex = {H.hex()}', file=out)
     print(f'V3_session_id_hex = {session_id.hex()}', file=out)
     print(f'V3_server_f_hex = {f_pub.hex()}', file=out)
+    print(f'V3_server_I_S_hex = {I_S.hex()}', file=out)
+    print(f'V3_K_S_blob_hex = {K_S.hex()}', file=out)
     print(f'V3_K_hex = {K.hex()}', file=out)
     print(f'V3_sig_blob_hex = {sig_blob.hex()}', file=out)
     print(f'V3_reply_msg_hex = {reply_msg.hex()}', file=out)
@@ -403,8 +483,9 @@ def emit_vectors(out=sys.stdout):
     print(f'V3_key64_stoc_hex = {key64_stoc.hex()}', file=out)
 
     # --- V4: AEAD first frame (seq=0, client→server)
+    # 7-byte payload 恰好与 bpacket block alignment 匹配
     test_hdr = struct.pack('>I', 0xDEADBEEF)
-    test_pld = b'ping'
+    test_pld = b'7bytes!'  # 7 bytes → 8 byte block (含 1-byte msg_type)
     v4_wire = ssh_wrap_encrypt(key64_ctos, 0, test_hdr, test_pld)
     dec = ssh_wrap_decrypt(key64_ctos, 0, v4_wire)
     assert dec == test_hdr + test_pld, f"V4 roundtrip failed: {dec!r}"

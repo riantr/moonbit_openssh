@@ -1,0 +1,120 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/kexflow"
+
+import {
+  "openssh/openssh_moonbit/src/kexc25519",
+  "openssh/openssh_moonbit/src/knownhosts",
+}
+
+// Values
+pub const KEX_COOKIE_LEN : Int = 16
+
+pub const KX_MSG_KEXINIT : Byte = b'\x14'
+
+pub const KX_MSG_KEX_ECDH_INIT : Byte = b'\x1e'
+
+pub const KX_MSG_KEX_ECDH_REPLY : Byte = b'\x1f'
+
+pub const KX_MSG_NEWKEYS : Byte = b'\x15'
+
+pub fn flow_on_reply(StartedFlow, FlowConfig, Proposal, FixedArray[Byte], FixedArray[Byte]) -> ReplyOutcome
+
+pub fn flow_start(FlowConfig, Proposal) -> StartedFlow
+
+pub fn kexinit_payload(FixedArray[Byte], Proposal) -> FixedArray[Byte]
+
+pub fn negotiate(Proposal, PeerKexInit) -> Result[Negotiated, NegotiationError]
+
+pub fn parse_kexinit(FixedArray[Byte]) -> PeerKexInit?
+
+// Errors
+
+// Types and methods
+pub(all) struct Established {
+  session_id : FixedArray[Byte]
+  keys : @kexc25519.DerivedKeys
+  newkeys_msg : FixedArray[Byte]
+}
+
+pub(all) struct FlowConfig {
+  version_client : FixedArray[Byte]
+  version_server : FixedArray[Byte]
+  cookie : FixedArray[Byte]
+  client_seed : FixedArray[Byte]
+  strict_kex : Bool
+  hostname : String
+  host_port : Int
+  knownhosts_entries : Array[@knownhosts.KnownHostEntry]
+}
+pub fn FlowConfig::make(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], Bool, String, Int, Array[@knownhosts.KnownHostEntry]) -> Self
+
+pub(all) enum FlowError {
+  ProtocolError
+  NoAgreement(NegotiationError)
+  HostkeyInvalid
+  SignatureInvalid
+  SharedSecretInvalid
+  HostKeyMismatch(String)
+  HostKeyUnknown(String)
+}
+
+pub(all) struct Negotiated {
+  kex_alg : String
+  hostkey_alg : String
+  cipher_ctos : String
+  cipher_stoc : String
+  comp_ctos : String
+  comp_stoc : String
+}
+
+pub(all) enum NegotiationError {
+  NoKexAlg
+  NoHostkeyAlg
+  NoCipherAlg
+  NoCompAlg
+}
+
+pub(all) struct PeerKexInit {
+  cookie : FixedArray[Byte]
+  kex_algs : String
+  hostkey_algs : String
+  enc_ctos : String
+  enc_stoc : String
+  mac_ctos : String
+  mac_stoc : String
+  comp_ctos : String
+  comp_stoc : String
+  lang_ctos : String
+  lang_stoc : String
+  follows : Bool
+}
+
+pub(all) struct Proposal {
+  kex_algs : String
+  hostkey_algs : String
+  enc_ctos : String
+  enc_stoc : String
+  mac_ctos : String
+  mac_stoc : String
+  comp_ctos : String
+  comp_stoc : String
+  lang_ctos : String
+  lang_stoc : String
+}
+pub fn Proposal::default_client(Bool) -> Self
+
+pub(all) enum ReplyOutcome {
+  Established(Established)
+  Failed(FlowError)
+}
+
+pub(all) struct StartedFlow {
+  ic_payload : FixedArray[Byte]
+  e_pub : FixedArray[Byte]
+  init_msg : FixedArray[Byte]
+  cfg_snapshot_strict : Bool
+}
+
+// Type aliases
+
+// Traits

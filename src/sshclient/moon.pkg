@@ -1,0 +1,10 @@
+///| SSH client flow — RFC 4253/4252/4254 (kex + userauth + channel)
+///| Loop #19: NEWKEYS 后启用 chacha20-poly1305 真实加密 (bpacket SendCtx/RecvCtx)
+import {
+  "openssh/openssh_moonbit/src/socket",
+  "openssh/openssh_moonbit/src/sshwire",
+  "openssh/openssh_moonbit/src/kexflow",
+  "openssh/openssh_moonbit/src/bpacket",
+}
+
+pkgtype(kind: "library")

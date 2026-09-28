@@ -1,5 +1,13 @@
-// import {
-//   "openssh/openssh_moonbit" @lib,
-// }
+///| cmd/main SSH-WASM-SSH demo executable
+///|
+/// Loop #17: SSH crypto demo (4 target byte-exact)
+/// Loop #18: + SSH wire framing + mock client flow (kex + auth + channel)
+import {
+  "openssh/openssh_moonbit/src/x25519",
+  "openssh/openssh_moonbit/src/kexflow",
+  "openssh/openssh_moonbit/src/socket",
+  "openssh/openssh_moonbit/src/sshwire",
+  "openssh/openssh_moonbit/src/sshclient",
+}
 
 pkgtype(kind: "executable")

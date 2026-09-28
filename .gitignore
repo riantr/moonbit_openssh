@@ -4,6 +4,7 @@
 _build/
 target/
 .moonagent/
+.mooncakes/
 *.mi
 *.mo
 

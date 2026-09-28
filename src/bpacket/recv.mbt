@@ -19,7 +19,7 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
     // (明文其实 4 字节即可判长,这里选择行为等价)。
     let min_hdr = if aadlen > 0 { 4 } else { bs }
     if input.length() < min_hdr {
-      return { consumed: 0, event: NeedMore }
+      return { consumed: 0, event: NeedMore, }
     }
     let plen : UInt = match self.mode {
       Aead(ctx) => ctx.get_length(self.seqnr, input)
@@ -28,7 +28,7 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
     // packet.c:1660-1669 / 1687-1698:packlen < 1+4 或 > PACKET_MAX_SIZE
     if plen < MIN_PACKET_LENGTH.reinterpret_as_uint() ||
       plen > MAX_PACKET_SIZE.reinterpret_as_uint() {
-      return { consumed: 0, event: Failed(BadLength(plen)) }
+      return { consumed: 0, event: Failed(BadLength(plen)), }
     }
     self.packlen = plen
   }
@@ -46,7 +46,7 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
   }
   let total = aadlen + need + authlen // = 4 + packlen + authlen(两模式通用)
   if input.length() < total {
-    return { consumed: 0, event: NeedMore }
+    return { consumed: 0, event: NeedMore, }
   }
   // ---- 阶段 3:解密(packet.c:1736-1754)----
   // EtM 先验 MAC 属范围外;AEAD 的 tag 校验在 crypt 内部先行(先验后解)。
@@ -55,34 +55,34 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
     Aead(ctx) =>
       match ctx.crypt(self.seqnr, input, aadlen, need, false) {
         Some(p) => p
-        None => return { consumed: 0, event: Failed(AuthFailed) }
+        None => return { consumed: 0, event: Failed(AuthFailed), }
       }
   }
   // ---- 序号推进(C 行序:1778-1788 在 padlen/type 解析之前)----
   let seqnr_used = self.seqnr
   match bump_seqnr(self.seqnr, self.initial_kex) {
-    None => return { consumed: 0, event: Failed(SeqnrWrapInitial) }
+    None => return { consumed: 0, event: Failed(SeqnrWrapInitial), }
     Some(next) => self.seqnr = next
   }
   // ---- 解析(统一布局 [len u32][padlen][payload][padding],padlen 恒在 @[4])----
   let padlen = pt[4].to_uint()
   // packet.c:1793-1799
   if padlen < 4U {
-    return { consumed: 0, event: Failed(BadPadlen(padlen)) }
+    return { consumed: 0, event: Failed(BadPadlen(padlen)), }
   }
   // sshbuf_consume_end 失败路径的显式化:padlen 不能吃掉 type 字节
   if padlen > self.packlen - 1U {
-    return { consumed: 0, event: Failed(PadOverflow(padlen)) }
+    return { consumed: 0, event: Failed(PadOverflow(padlen)), }
   }
   let payload_len = packlen_int - 1 - padlen.reinterpret_as_int() // 含 type 字节
   if payload_len < 1 {
     // C 中 sshbuf_get_u8 对空缓冲失败(SSH_ERR 内部错误路径)
-    return { consumed: 0, event: Failed(EmptyPayload) }
+    return { consumed: 0, event: Failed(EmptyPayload), }
   }
   let msg_type = pt[5]
   // packet.c:1828-1834:type < SSH2_MSG_MIN(=1)
   if msg_type == b'\x00' {
-    return { consumed: 0, event: Failed(BadType(msg_type.to_uint())) }
+    return { consumed: 0, event: Failed(BadType(msg_type.to_uint())), }
   }
   let out : FixedArray[Byte] = FixedArray::make(payload_len - 1, b'\x00')
   for i = 0; i < payload_len - 1; i = i + 1 {
@@ -93,5 +93,5 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
   if self.strict_kex && msg_type == MSG_NEWKEYS {
     self.seqnr = 0U
   }
-  { consumed: total, event: Packet(seqnr_used, msg_type, out) }
+  { consumed: total, event: Packet(seqnr_used, msg_type, out), }
 }

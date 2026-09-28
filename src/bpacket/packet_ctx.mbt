@@ -89,7 +89,7 @@ pub fn SendCtx::make(
   strict_kex : Bool,
   initial_kex : Bool,
 ) -> SendCtx {
-  { mode, seqnr, strict_kex, initial_kex }
+  { mode, seqnr, strict_kex, initial_kex, }
 }
 
 ///|
@@ -121,7 +121,7 @@ pub fn RecvCtx::make(
   strict_kex : Bool,
   initial_kex : Bool,
 ) -> RecvCtx {
-  { mode, seqnr, packlen: 0U, strict_kex, initial_kex }
+  { mode, seqnr, packlen: 0U, strict_kex, initial_kex, }
 }
 
 ///|

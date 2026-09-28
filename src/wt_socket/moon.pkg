@@ -1,0 +1,7 @@
+///| WebTransport Socket — 浏览器 SSH demo 用
+///|
+/// 类似 ws_socket 但走 WebTransport API (HTTP/3 + QUIC)
+/// Loop #21: extern wasm 接口 ready for browser demo
+/// Loop #22+: 接真 HTTP/3 server (cloudflare/quiche)
+
+pkgtype(kind: "library")

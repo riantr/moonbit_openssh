@@ -100,5 +100,5 @@ pub fn SendCtx::emit(
   if self.strict_kex && msg_type == MSG_NEWKEYS {
     self.seqnr = 0U
   }
-  Ok({ frame, wire })
+  Ok({ frame, wire, })
 }

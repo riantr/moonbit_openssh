@@ -91,7 +91,8 @@ fn pf_u32(v : Int) -> FixedArray[Byte] {
   a
 }
 
-///| RFC 4251 string(cstring 同布局)
+///|
+/// RFC 4251 string(cstring 同布局)
 fn pf_wstr(b : FixedArray[Byte]) -> FixedArray[Byte] {
   pf_cat([pf_u32(b.length()), b])
 }
@@ -107,8 +108,16 @@ pub fn kexinit_payload(
     abort("kexinit_payload: cookie must be \{KEX_COOKIE_LEN} bytes")
   }
   let fields : Array[String] = [
-    p.kex_algs, p.hostkey_algs, p.enc_ctos, p.enc_stoc, p.mac_ctos,
-    p.mac_stoc, p.comp_ctos, p.comp_stoc, p.lang_ctos, p.lang_stoc,
+    p.kex_algs,
+    p.hostkey_algs,
+    p.enc_ctos,
+    p.enc_stoc,
+    p.mac_ctos,
+    p.mac_stoc,
+    p.comp_ctos,
+    p.comp_stoc,
+    p.lang_ctos,
+    p.lang_stoc,
   ]
   let parts : Array[FixedArray[Byte]] = [cookie]
   for i = 0; i < fields.length(); i = i + 1 {
@@ -145,7 +154,7 @@ priv struct PfCursor {
 
 ///|
 fn PfCursor::new(bytes : FixedArray[Byte]) -> PfCursor {
-  { bytes, off: 0, bad: false }
+  { bytes, off: 0, bad: false, }
 }
 
 ///|
@@ -170,10 +179,9 @@ fn PfCursor::read_string(self : PfCursor) -> FixedArray[Byte] {
     return FixedArray::make(0, b'\x00')
   }
   let len = ((self.bytes[self.off].to_uint() << 24) |
-      (self.bytes[self.off + 1].to_uint() << 16) |
-      (self.bytes[self.off + 2].to_uint() << 8) |
-      self.bytes[self.off + 3].to_uint())
-    .reinterpret_as_int()
+  (self.bytes[self.off + 1].to_uint() << 16) |
+  (self.bytes[self.off + 2].to_uint() << 8) |
+  self.bytes[self.off + 3].to_uint()).reinterpret_as_int()
   self.take(len)
 }
 
@@ -194,10 +202,10 @@ fn PfCursor::read_u32(self : PfCursor) -> Int {
     self.bad = true
     return 0
   }
-  let v = ((self.bytes[self.off].to_int() << 24) |
-      (self.bytes[self.off + 1].to_int() << 16) |
-      (self.bytes[self.off + 2].to_int() << 8) |
-      self.bytes[self.off + 3].to_int())
+  let v = (self.bytes[self.off].to_int() << 24) |
+    (self.bytes[self.off + 1].to_int() << 16) |
+    (self.bytes[self.off + 2].to_int() << 8) |
+    self.bytes[self.off + 3].to_int()
   self.off = self.off + 4
   v
 }
@@ -215,38 +223,64 @@ fn pf_bytes_to_string(b : FixedArray[Byte]) -> String {
 ///|
 /// 解析失败(短 buffer / 尾随残余)→ None
 pub fn parse_kexinit(payload : FixedArray[Byte]) -> PeerKexInit? {
-  let c = PfCursor::new(payload)
-  let cookie = c.take(KEX_COOKIE_LEN)
-  let f1 = c.read_string()
-  let f2 = c.read_string()
-  let f3 = c.read_string()
-  let f4 = c.read_string()
-  let f5 = c.read_string()
-  let f6 = c.read_string()
-  let f7 = c.read_string()
-  let f8 = c.read_string()
-  let f9 = c.read_string()
-  let f10 = c.read_string()
-  let follows = c.read_u8()
-  let _reserved = c.read_u32()
-  if c.bad {
+  let len = payload.length()
+  if len < KEX_COOKIE_LEN + 1 {
     return None
   }
-  if c.off != payload.length() {
-    return None // 尾随残余
+  // cookie(16)
+  let cookie : FixedArray[Byte] = FixedArray::make(KEX_COOKIE_LEN, b'\x00')
+  for i = 0; i < KEX_COOKIE_LEN; i = i + 1 {
+    cookie[i] = payload[i]
+  }
+  let mut off = KEX_COOKIE_LEN
+  // 10 strings
+  let strs : Array[FixedArray[Byte]] = []
+  for _i = 0; _i < 10; _i = _i + 1 {
+    if off + 4 > len {
+      return None
+    }
+    let slen = ((payload[off].to_uint() << 24) |
+    (payload[off + 1].to_uint() << 16) |
+    (payload[off + 2].to_uint() << 8) |
+    payload[off + 3].to_uint()).reinterpret_as_int()
+    off = off + 4
+    if slen < 0 || off + slen > len {
+      return None
+    }
+    let s : FixedArray[Byte] = FixedArray::make(slen, b'\x00')
+    for j = 0; j < slen; j = j + 1 {
+      s[j] = payload[off + j]
+    }
+    off = off + slen
+    strs.push(s)
+  }
+  // u8 follows
+  if off >= len {
+    return None
+  }
+  let follows = payload[off].to_int()
+  off = off + 1
+  // u32 reserved
+  if off + 4 > len {
+    return None
+  }
+  off = off + 4
+  // 尾随残余检查
+  if off != len {
+    return None
   }
   Some({
     cookie,
-    kex_algs: pf_bytes_to_string(f1),
-    hostkey_algs: pf_bytes_to_string(f2),
-    enc_ctos: pf_bytes_to_string(f3),
-    enc_stoc: pf_bytes_to_string(f4),
-    mac_ctos: pf_bytes_to_string(f5),
-    mac_stoc: pf_bytes_to_string(f6),
-    comp_ctos: pf_bytes_to_string(f7),
-    comp_stoc: pf_bytes_to_string(f8),
-    lang_ctos: pf_bytes_to_string(f9),
-    lang_stoc: pf_bytes_to_string(f10),
+    kex_algs: pf_bytes_to_string(strs[0]),
+    hostkey_algs: pf_bytes_to_string(strs[1]),
+    enc_ctos: pf_bytes_to_string(strs[2]),
+    enc_stoc: pf_bytes_to_string(strs[3]),
+    mac_ctos: pf_bytes_to_string(strs[4]),
+    mac_stoc: pf_bytes_to_string(strs[5]),
+    comp_ctos: pf_bytes_to_string(strs[6]),
+    comp_stoc: pf_bytes_to_string(strs[7]),
+    lang_ctos: pf_bytes_to_string(strs[8]),
+    lang_stoc: pf_bytes_to_string(strs[9]),
     follows: follows != 0,
   })
 }

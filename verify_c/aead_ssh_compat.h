@@ -16,10 +16,17 @@ typedef uint8_t u_char;
 typedef unsigned int u_int;
 
 /* ssherr.h codes used by cipher-chachapoly.c (values arbitrary, only
- * compared against themselves in this harness) */
+ * compared against themselves in this harness).
+ * Guarded so we can coexist with kex_c25519_compat.h which already defines them. */
+#ifndef SSH_ERR_INTERNAL_ERROR
 #define SSH_ERR_INTERNAL_ERROR      (-1)
+#endif
+#ifndef SSH_ERR_MESSAGE_INCOMPLETE
 #define SSH_ERR_MESSAGE_INCOMPLETE  (-2)
+#endif
+#ifndef SSH_ERR_MAC_INVALID
 #define SSH_ERR_MAC_INVALID         (-3)
+#endif
 
 /* misc.h byte-poke/peek macros, big-endian, same semantics as OpenSSH.
  * POKE_U64 zero-extends its argument to 64 bit before storing - this is

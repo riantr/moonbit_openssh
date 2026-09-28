@@ -13,7 +13,7 @@ pub struct KxBuf {
 ///|
 pub fn KxBuf::new() -> KxBuf {
   let arr : Array[Byte] = []
-  { data: arr }
+  { data: arr, }
 }
 
 ///|

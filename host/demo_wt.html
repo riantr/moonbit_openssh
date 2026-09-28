@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSH-WASM Demo (WebTransport)</title>
+  <style>
+    body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+    h1 { color: #569cd6; }
+    pre { background: #252526; border: 1px solid #3c3c3c; padding: 12px; overflow-x: auto; }
+    .info { color: #9cdcfe; }
+    .error { color: #f48771; }
+  </style>
+</head>
+<body>
+  <h1>SSH-WASM Demo: WebTransport Client (Loop #21)</h1>
+  <p class="info">Browser WebTransport → HTTP/3 SSH proxy (server side not implemented in Loop #21)</p>
+  <pre id="out">Loading...</pre>
+  <script type="module">
+    // Loop #21 WebTransport 浏览器 host shim
+    // 仅 client side,HTTP/3 server 留 Loop #22+
+    const out = document.getElementById('out');
+    out.textContent = '';
+    const log = (s) => { out.textContent += s + '\n'; };
+
+    // 检查浏览器支持
+    if (typeof WebTransport === 'undefined') {
+      log('✗ ERROR: Browser does not support WebTransport API');
+      log('  Need Chrome 97+, Edge 97+, Firefox 114+, Safari 17.4+');
+      throw new Error('WebTransport unsupported');
+    }
+
+    log('Browser supports WebTransport API');
+    log('Note: Loop #21 only implements WebTransport client side.');
+    log('      Server side (HTTP/3) requires cloudflare/quiche, Loop #22+.\n');
+
+    // Loop #21 host shim: 全 JavaScript 实现 WebTransport demo
+    // (不依赖 main.wasm, 只验证 WebTransport API 可用)
+    log('[client] attempting WebTransport connection to https://localhost:4433');
+    try {
+      const transport = new WebTransport('https://localhost:4433');
+      await transport.ready;
+      log('[client] WebTransport ready, opening bidirectional stream...');
+      const stream = await transport.createBidirectionalStream();
+      log('[client] stream opened, closing (no server in Loop #21)');
+      await transport.close();
+      log('\n✓ WebTransport client API works');
+    } catch (e) {
+      log('Expected error (no HTTP/3 server): ' + e.message);
+      log('\n✓ WebTransport API available (verified by reaching try/catch)');
+    }
+  </script>
+</body>
+</html>

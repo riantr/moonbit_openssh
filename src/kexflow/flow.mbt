@@ -1,47 +1,61 @@
-///| kexgen 客户端流程(input_kex_gen_reply 精确序转写)
+///| kexgen 瀹㈡埛绔祦绋?input_kex_gen_reply 绮剧‘搴忚浆鍐?
 ///
-/// 对应 OpenSSH kexgen.c :99-127(kex_gen_client)/:131-233
-/// (input_kex_gen_reply)与 kex.c choose_conf 时序。
-/// 纯消息层:帧封装/加密切换归 bpacket 与调用方(architect §3)。
-
-///| SSH2_MSG_KEXINIT(ssh2.h)
+/// 瀵瑰簲 OpenSSH kexgen.c :99-127(kex_gen_client)/:131-233
+/// (input_kex_gen_reply)涓?kex.c choose_conf 鏃跺簭銆?/// 绾秷鎭眰:甯у皝瑁?鍔犲瘑鍒囨崲褰?bpacket 涓庤皟鐢ㄦ柟(architect 搂3)銆?
+///|
+/// SSH2_MSG_KEXINIT(ssh2.h)
 pub const KX_MSG_KEXINIT : Byte = b'\x14'
 
-///| SSH2_MSG_KEX_ECDH_INIT(ssh2.h)
+///|
+/// SSH2_MSG_KEX_ECDH_INIT(ssh2.h)
 pub const KX_MSG_KEX_ECDH_INIT : Byte = b'\x1e'
 
-///| SSH2_MSG_KEX_ECDH_REPLY(ssh2.h)
+///|
+/// SSH2_MSG_KEX_ECDH_REPLY(ssh2.h)
 pub const KX_MSG_KEX_ECDH_REPLY : Byte = b'\x1f'
 
-///| SSH2_MSG_NEWKEYS(ssh2.h;与 bpacket.MSG_NEWKEYS 同值,消息层自持常量)
+///|
+/// SSH2_MSG_NEWKEYS(ssh2.h;涓?bpacket.MSG_NEWKEYS 鍚屽€?娑堟伅灞傝嚜鎸佸父閲?
 pub const KX_MSG_NEWKEYS : Byte = b'\x15'
 
 ///|
-/// chachapoly 方向密钥总长(cipher.c 表:key_len=64=chacha32+poly头32;
-/// AEAD 下 iv_len=0、mac 不用 → we_need=64,kex.c choose_enc MAXIMUM 逻辑)
+/// chachapoly 鏂瑰悜瀵嗛挜鎬婚暱(cipher.c 琛?key_len=64=chacha32+poly澶?2;
+/// AEAD 涓?iv_len=0銆乵ac 涓嶇敤 鈫?we_need=64,kex.c choose_enc MAXIMUM 閫昏緫)
 const FLOW_WE_NEED : Int = 64
 
-///| 流程错误(扁平五值,决策 D2)
+///|
+/// 娴佺▼閿欒(鎵佸钩涓冨€?Loop #13 鏂板 HostKeyMismatch/HostKeyUnknown)
 pub(all) enum FlowError {
-  /// 提案/消息结构问题(短 buffer、尾随残余、msg type 错、协商结果非本子集)
+  /// 鎻愭/娑堟伅缁撴瀯闂(鐭?buffer銆佸熬闅忔畫浣欍€乵sg type 閿欍€佸崗鍟嗙粨鏋滈潪鏈瓙闆?
   ProtocolError
-  /// 对端提案与我方无公共算法(navigator §1 match_list 分类)
+  /// 瀵圭鎻愭涓庢垜鏂规棤鍏叡绠楁硶(navigator 搂1 match_list 鍒嗙被)
   NoAgreement(NegotiationError)
-  /// K_S blob 解析失败(hostkey from_blob 拒绝)
+  /// K_S blob 瑙ｆ瀽澶辫触(hostkey from_blob 鎷掔粷)
   HostkeyInvalid
-  /// 验签失败(含 alg TypeMismatch / trailing / len 域 / 密码学失败)
+  /// 楠岀澶辫触(鍚?alg TypeMismatch / trailing / len 鍩?/ 瀵嗙爜瀛﹀け璐?
   SignatureInvalid
-  /// x25519 共享密钥全零(KEY_INVALID_EC_VALUE)
+  /// x25519 鍏变韩瀵嗛挜鍏ㄩ浂(KEY_INVALID_EC_VALUE)
   SharedSecretInvalid
+  /// hostname 鍛戒腑浣?key 瀛楄妭涓嶅尮閰?Loop #13 鎺ュ叆)
+  HostKeyMismatch(String)
+  /// strict_kex 涓?hostname 鏈湪 known_hosts(Loop #13 鎺ュ叆)
+  HostKeyUnknown(String)
 }
 
-///| 客户端配置(cookie 注入式确定性,决策 D5)
+///|
+/// 客户端配置(cookie 注入式确定性,决策 D5)
 pub(all) struct FlowConfig {
   version_client : FixedArray[Byte] // V_C(不含换行)
   version_server : FixedArray[Byte] // V_S(不含换行)
   cookie : FixedArray[Byte] // 16B
   client_seed : FixedArray[Byte] // x25519 标量种子(32B,API 内 clamp)
   strict_kex : Bool
+  /// Loop #13 接入:用于 host_key_check
+  hostname : String
+  /// Loop #14 接入:调用方的连接端口 0 = SSH default 22
+  host_port : Int
+  /// Loop #13 接入:known_hosts 条目;空数组 = 跳过检查
+  knownhosts_entries : Array[@knownhosts.KnownHostEntry]
 }
 
 ///|
@@ -51,26 +65,24 @@ pub fn FlowConfig::make(
   cookie : FixedArray[Byte],
   client_seed : FixedArray[Byte],
   strict_kex : Bool,
+  hostname : String,
+  host_port : Int,
+  knownhosts_entries : Array[@knownhosts.KnownHostEntry],
 ) -> FlowConfig {
-  if cookie.length() != KEX_COOKIE_LEN {
-    abort("FlowConfig: cookie must be \{KEX_COOKIE_LEN} bytes")
-  }
-  if client_seed.length() != 32 {
-    abort("FlowConfig: client_seed must be 32 bytes")
-  }
-  { version_client, version_server, cookie, client_seed, strict_kex }
-}
-
-///| start() 产物:我方 I_C + e + 待发 INIT 消息体
-pub(all) struct StartedFlow {
-  ic_payload : FixedArray[Byte] // 我方 KEXINIT payload(type 后)= I_C
-  e_pub : FixedArray[Byte] // 客户端临时公钥 32B
-  init_msg : FixedArray[Byte] // type30 ‖ string(e)(帧层之前的消息体)
-  cfg_snapshot_strict : Bool // 供调用方构造 bpacket ctx(strict 透传)
+  { version_client, version_server, cookie, client_seed, strict_kex, hostname, host_port, knownhosts_entries, }
 }
 
 ///|
-/// kex_gen_client:生成临时对并发 INIT(kexgen.c:99-127)
+/// start() 浜х墿:鎴戞柟 I_C + e + 寰呭彂 INIT 娑堟伅浣嶃€嶉〉?
+pub(all) struct StartedFlow {
+  ic_payload : FixedArray[Byte] // 鎴戞柟 KEXINIT payload(type 鍚?= I_C
+  e_pub : FixedArray[Byte] // 瀹㈡埛绔复鏃跺叕閽?32B
+  init_msg : FixedArray[Byte] // type30 鈥?string(e)(甯у眰涔嬪墠鐨勬秷鎭綋)
+  cfg_snapshot_strict : Bool // 渚涜皟鐢ㄦ柟鏋勯€?bpacket ctx(strict 閫忎紶)
+}
+
+///|
+/// kex_gen_client:鐢熸垚涓存椂瀵瑰苟鍙?INIT(kexgen.c:99-127)
 pub fn flow_start(cfg : FlowConfig, my : Proposal) -> StartedFlow {
   let ic = kexinit_payload(cfg.cookie, my)
   let e = @kexc25519.c25519_keygen(cfg.client_seed)
@@ -78,14 +90,15 @@ pub fn flow_start(cfg : FlowConfig, my : Proposal) -> StartedFlow {
     FixedArray::from_array([KX_MSG_KEX_ECDH_INIT]),
     kf_wstr(e),
   ])
-  { ic_payload: ic, e_pub: e, init_msg, cfg_snapshot_strict: cfg.strict_kex }
+  { ic_payload: ic, e_pub: e, init_msg, cfg_snapshot_strict: cfg.strict_kex, }
 }
 
-///| 成功产物
+///|
+/// 鎴愬姛浜х墿
 pub(all) struct Established {
-  session_id : FixedArray[Byte] // initial:kex_derive_keys 存 H(kex.c:1143)
-  keys : @kexc25519.DerivedKeys // 六密钥(AEAD 只消费 enc_ctos/stoc)
-  newkeys_msg : FixedArray[Byte] // type21 空体
+  session_id : FixedArray[Byte] // initial:kex_derive_keys 瀛?H(kex.c:1143)
+  keys : @kexc25519.DerivedKeys // 鍏瘑閽?AEAD 鍙秷璐?enc_ctos/stoc)
+  newkeys_msg : FixedArray[Byte] // type21 绌轰綋
 }
 
 ///|
@@ -136,9 +149,9 @@ fn kf_bytes_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   true
 }
 
-///| REPLY 处理(input_kex_gen_reply:131-233 一一对应):
-/// 协商(C 在 input_kexinit 内先完成)→ 解析三段 → hostkey 解析 →
-/// 共享密钥(全零拒)→ H → sshkey_verify → 派生。
+///|
+/// REPLY 澶勭悊(input_kex_gen_reply:131-233 涓€涓€瀵瑰簲):
+/// 鍗忓晢(C 鍦?input_kexinit 鍐呭厛瀹屾垚)鈫?瑙ｆ瀽涓夋 鈫?hostkey 瑙ｆ瀽 鈫?/// 鍏变韩瀵嗛挜(鍏ㄩ浂鎷?鈫?H 鈫?sshkey_verify 鈫?娲剧敓銆?
 pub fn flow_on_reply(
   started : StartedFlow,
   cfg : FlowConfig,
@@ -146,7 +159,7 @@ pub fn flow_on_reply(
   peer_ic_payload : FixedArray[Byte],
   reply_msg : FixedArray[Byte],
 ) -> ReplyOutcome {
-  // ---- kex_input_kexinit + kex_choose_conf(REPLY 前的时序)----
+  // ---- kex_input_kexinit + kex_choose_conf(REPLY 鍓嶇殑鏃跺簭)----
   let peer_init = match parse_kexinit(peer_ic_payload) {
     Some(p) => p
     None => return Failed(ProtocolError)
@@ -155,35 +168,33 @@ pub fn flow_on_reply(
     Ok(n) => n
     Err(e) => return Failed(NoAgreement(e))
   }
-  // 子集单算法:协商出的 hostkey 必须是本实现支持的 ssh-ed25519
+  // 瀛愰泦鍗曠畻娉?鍗忓晢鍑虹殑 hostkey 蹇呴』鏄湰瀹炵幇鏀寔鐨?ssh-ed25519
   if neg.kex_alg != "curve25519-sha256" || neg.hostkey_alg != "ssh-ed25519" {
     return Failed(ProtocolError)
   }
   // ---- input_kex_gen_reply ----
-  // msg type 字节必须为 31(:135 dispatch 保证;此处显式校验)
+  // msg type 瀛楄妭蹇呴』涓?31(:135 dispatch 淇濊瘉;姝ゅ鏄惧紡鏍￠獙)
   if reply_msg.length() < 1 || reply_msg[0] != KX_MSG_KEX_ECDH_REPLY {
     return Failed(ProtocolError)
   }
   let body = kf_slice(reply_msg, 1, reply_msg.length())
   let rep = match @kexc25519.parse_reply(body) {
     Some(r) => r
-    None => return Failed(ProtocolError) // 尾随/长度违规(:163 get_end 等)
+    None => return Failed(ProtocolError) // 灏鹃殢/闀垮害杩濊(:163 get_end 绛?
   }
   // :138-152 sshkey_fromb + kex_verify_host_key
-  // (信任回调范围外:接受任何可解析的 ed25519 主机钥,navigator §6)
+  // (淇′换鍥炶皟鑼冨洿澶?鎺ュ彈浠讳綍鍙В鏋愮殑 ed25519 涓绘満閽?navigator 搂6)
   let hostkey = match @hostkey.HostKey::from_blob(rep.hostkey_blob) {
     @hostkey.Parsed(@hostkey.Ed25519Key(pk)) => pk
     _ => return Failed(HostkeyInvalid)
   }
-  // :156-186 c25519_dec:共享密钥 mpint(全零在 Loop#9 已拒 → None)
-  let shared_mpint = match @kexc25519.c25519_shared_key_mpint(
-      cfg.client_seed,
-      rep.server_pub,
-    ) {
+  // :156-186 c25519_dec:鍏变韩瀵嗛挜 mpint(鍏ㄩ浂鍦?Loop#9 宸叉嫆 鈫?None)
+  let shared_mpint = match
+    @kexc25519.c25519_shared_key_mpint(cfg.client_seed, rep.server_pub) {
     Some(k) => k
     None => return Failed(SharedSecretInvalid)
   }
-  // :188-204 kex_gen_hash → H
+  // :188-204 kex_gen_hash 鈫?H
   let inputs = @kexc25519.ExchangeInputs::make(
     cfg.version_client,
     cfg.version_server,
@@ -197,20 +208,33 @@ pub fn flow_on_reply(
     rep.server_pub,
     shared_mpint,
   )
-  // :206-210 sshkey_verify(hostkey_alg 协商值已限定 ed25519;
-  //   sig 内 alg 精确匹配由 hostkey 层负责 → TypeMismatch 归并 SignatureInvalid)
-  match @hostkey.HostKey::verify(
-      @hostkey.Ed25519Key(hostkey),
-      h,
-      rep.sig_blob,
-    ) {
+  // :206-210 sshkey_verify(hostkey_alg 鍗忓晢鍊煎凡闄愬畾 ed25519;
+  //   sig 鍐?alg 绮剧‘鍖归厤鐢?hostkey 灞傝礋璐?鈫?TypeMismatch 褰掑苟 SignatureInvalid)
+  match
+    @hostkey.HostKey::verify(@hostkey.Ed25519Key(hostkey), h, rep.sig_blob) {
     @hostkey.Accepted => ()
     _ => return Failed(SignatureInvalid)
   }
-  // :212-213 kex_derive_keys(initial:session_id=H)+ NEWKEYS 组包
+  // ---- Loop #13 step 6.5: host_key_check ----
+  // 入参 cfg.knownhosts_entries 可空（空数组 = 跳过检查）; bytesters_hostname 必须非空
+  if cfg.knownhosts_entries.length() > 0 {
+    let host_status = @knownhosts.check_host_key_strict(
+      cfg.knownhosts_entries, cfg.hostname, cfg.host_port, rep.hostkey_blob, cfg.strict_kex,
+    )
+    match host_status {
+      @knownhosts.Ok => ()
+      @knownhosts.Mismatch => return Failed(HostKeyMismatch(cfg.hostname))
+      @knownhosts.Unknown =>
+        if cfg.strict_kex {
+          return Failed(HostKeyUnknown(cfg.hostname))
+        }
+      @knownhosts.InvalidEntry => return Failed(ProtocolError)
+    }
+  }
+  // :212-213 kex_derive_keys(initial:session_id=H)+ NEWKEYS 缁勫寘
   let keys = @kexc25519.derive_keys(shared_mpint, h, FLOW_WE_NEED)
   if !kf_bytes_eq(keys.session_id, h) {
-    // initial 场景恒等;防御性断言(派生层契约漂移即暴露)
+    // initial 鍦烘櫙鎭掔瓑;闃插尽鎬ф柇瑷€(娲剧敓灞傚绾︽紓绉诲嵆鏆撮湶)
     return Failed(ProtocolError)
   }
   Established({
@@ -221,7 +245,11 @@ pub fn flow_on_reply(
 }
 
 ///|
-fn kf_slice(src : FixedArray[Byte], start : Int, end_ : Int) -> FixedArray[Byte] {
+fn kf_slice(
+  src : FixedArray[Byte],
+  start : Int,
+  end_ : Int,
+) -> FixedArray[Byte] {
   let n = end_ - start
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {

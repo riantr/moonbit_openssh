@@ -37,7 +37,7 @@ pub fn ChachaPolyCtx::new64(key : FixedArray[Byte]) -> ChachaPolyCtx {
     main_key[i] = key[i]
     header_key[i] = key[32 + i]
   }
-  { main_key, header_key }
+  { main_key, header_key, }
 }
 
 ///| seqnr → 8 字节大端(对应 C POKE_U64)

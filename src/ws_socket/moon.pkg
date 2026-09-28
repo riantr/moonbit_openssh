@@ -1,0 +1,6 @@
+///| WebSocket Socket — 浏览器 SSH demo 用
+///|
+/// 独立包,因为 extern "wasm" 在 native target 不支持
+/// cmd/main 不调本包 (走 MockSocket),浏览器 demo 仅在 wasm-gc target 用
+
+pkgtype(kind: "library")

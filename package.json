@@ -1,0 +1,6 @@
+{
+  "devDependencies": {
+    "playwright": "^1.45.0",
+    "ws": "^8.21.3"
+  }
+}

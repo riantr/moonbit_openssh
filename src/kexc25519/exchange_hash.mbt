@@ -41,7 +41,7 @@ pub fn ExchangeInputs::make(
   client_kexinit : FixedArray[Byte],
   server_kexinit : FixedArray[Byte],
 ) -> ExchangeInputs {
-  { client_version, server_version, client_kexinit, server_kexinit }
+  { client_version, server_version, client_kexinit, server_kexinit, }
 }
 
 ///|

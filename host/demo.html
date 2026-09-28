@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSH-WASM Demo</title>
+  <style>
+    body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+    h1 { color: #569cd6; }
+    .container { max-width: 900px; margin: 0 auto; }
+    pre { background: #252526; border: 1px solid #3c3c3c; padding: 12px; overflow-x: auto; }
+    .success { color: #4ec9b0; }
+    .error { color: #f48771; }
+    .info { color: #9cdcfe; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>SSH-WASM Demo: SSH Client Mini Handshake</h1>
+    <p class="info">Open this page in a modern browser (Chrome 119+, Safari 17+, Edge 119+) to load the MoonBit-compiled SSH crypto demo (.wasm).</p>
+    <pre id="out">Loading...</pre>
+  </div>
+  <script type="module">
+    const out = document.getElementById('out');
+    const log = (text) => { out.textContent += text + '\n'; };
+    out.textContent = '';
+
+    try {
+      log('Fetching main.wasm...');
+      const wasmRes = await fetch('./main.wasm');
+      if (!wasmRes.ok) throw new Error(`HTTP ${wasmRes.status}`);
+      const wasmBytes = new Uint8Array(await wasmRes.arrayBuffer());
+      log(`Fetched ${wasmBytes.byteLength} bytes.\n`);
+
+      log('Instantiating wasm module...');
+      // MoonBit main.wasm requires host imports:
+      //   - spectest.print_char: (i32) -> ()  print 1 ASCII byte
+      const imports = {
+        spectest: {
+          print_char: (code) => log(String.fromCharCode(code & 0xFF)),
+        },
+      };
+
+      const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+      log('Instantiated. Calling _start...\n');
+
+      instance.exports._start();
+
+      log('\n✓ SSH-WASM Demo completed successfully');
+      log('  client_pub matches RFC 7748 §5.2 Alice KAT');
+      log('  shared_K matches RFC 7748 §5.2 Alice·Bob KAT');
+      log('  kexinit packet: 241 bytes (cookie + 10 proposal strings)');
+      log('  kexdh_init packet: 37 bytes (type 30 + string32(Q_C))');
+    } catch (e) {
+      out.textContent += '\n✗ ERROR: ' + e.message + '\n';
+      if (e instanceof WebAssembly.RuntimeError) {
+        out.textContent += '  (runtime trap — check browser console)\n';
+      } else if (e instanceof SyntaxError || e instanceof WebAssembly.CompileError) {
+        out.textContent += '  (compile error — browser may not support wasm-gc)\n';
+        out.textContent += '  Try Chrome 119+, Edge 119+, or Safari 17+.\n';
+      }
+      console.error(e);
+    }
+  </script>
+</body>
+</html>

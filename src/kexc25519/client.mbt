@@ -19,7 +19,7 @@ priv struct Cursor {
 
 ///|
 fn Cursor::make(bytes : FixedArray[Byte]) -> Cursor {
-  { bytes, pos: 0 }
+  { bytes, pos: 0, }
 }
 
 ///|
@@ -98,7 +98,7 @@ pub fn parse_reply(wire : FixedArray[Byte]) -> KexReply? {
   if server_pub.length() != 32 {
     return None
   }
-  Some({ hostkey_blob, server_pub, sig_blob })
+  Some({ hostkey_blob, server_pub, sig_blob, })
 }
 
 ///|
@@ -145,5 +145,5 @@ pub fn parse_sig(blob : FixedArray[Byte]) -> Ed25519Sig? {
   if rs.length() != 64 {
     return None
   }
-  Some({ alg_name, rs })
+  Some({ alg_name, rs, })
 }

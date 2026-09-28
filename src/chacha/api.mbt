@@ -31,7 +31,7 @@ pub fn ChaChaState::new128(key : FixedArray[Byte]) -> ChaChaState {
   state[10] = state[6]
   state[11] = state[7]
   // [12..16] = counter 0 + iv 0(稍后由 set_iv 设置)
-  { input: state }
+  { input: state, }
 }
 
 ///|
@@ -56,7 +56,7 @@ pub fn ChaChaState::new256(key : FixedArray[Byte]) -> ChaChaState {
   state[10] = u8_to_32_le(key, 24)
   state[11] = u8_to_32_le(key, 28)
   // [12..16] = counter 0 + iv 0
-  { input: state }
+  { input: state, }
 }
 
 ///| 装载 IV 和 64-bit 计数器
@@ -88,7 +88,7 @@ pub fn ChaChaState::set_iv(
   // iv @14, @15
   new_input[14] = u8_to_32_le(iv, 0)
   new_input[15] = u8_to_32_le(iv, 4)
-  { input: new_input }
+  { input: new_input, }
 }
 
 ///| ChaCha20 加/解密(同构操作)

@@ -1,0 +1,66 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/knownhosts"
+
+// Values
+pub fn b64_decode(String) -> FixedArray[Byte]?
+
+pub fn check_host_key(Array[KnownHostEntry], String, Int, FixedArray[Byte]) -> HostStatus
+
+pub fn check_host_key_legacy(Array[KnownHostEntry], String, FixedArray[Byte]) -> HostStatus
+
+pub fn check_host_key_strict(Array[KnownHostEntry], String, Int, FixedArray[Byte], Bool) -> HostStatus
+
+pub fn check_host_key_strict_legacy(Array[KnownHostEntry], String, FixedArray[Byte], Bool) -> HostStatus
+
+pub fn hmac_sha1(FixedArray[Byte], FixedArray[Byte], Int) -> FixedArray[Byte]
+
+pub fn is_hashed_host(String) -> Bool
+
+pub fn match_hashed_host(String, String) -> Bool
+
+pub fn match_host_pattern(String, String) -> Bool
+
+pub fn parse_base64_blob(String) -> FixedArray[Byte]?
+
+pub fn parse_file(String) -> Array[KnownHostEntry]
+
+pub fn parse_line(String, Int) -> KnownHostEntry?
+
+pub fn sha1(FixedArray[Byte], Int) -> FixedArray[Byte]
+
+// Errors
+
+// Types and methods
+pub struct HostSpec {
+  host_only : String
+  host_port : Int?
+}
+
+pub(all) enum HostStatus {
+  Ok
+  Mismatch
+  Unknown
+  InvalidEntry
+} derive(Eq)
+
+pub(all) struct KnownHostEntry {
+  marker : Marker
+  host_patterns : Array[String]
+  host_specs : Array[HostSpec]
+  host_raw : String
+  key_type : String
+  key_blob : FixedArray[Byte]
+  raw_line : String
+  linenum : Int
+}
+pub fn KnownHostEntry::key_type_str(Self) -> String
+
+pub(all) enum Marker {
+  None
+  CertAuthority
+  Revoked
+} derive(Eq)
+
+// Type aliases
+
+// Traits

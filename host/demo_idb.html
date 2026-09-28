@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSH-WASM Demo (IndexedDB)</title>
+  <style>
+    body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+    h1 { color: #569cd6; }
+    pre { background: #252526; border: 1px solid #3c3c3c; padding: 12px; overflow-x: auto; }
+    .success { color: #4ec9b0; }
+    .info { color: #9cdcfe; }
+    .error { color: #f48771; }
+  </style>
+</head>
+<body>
+  <h1>SSH-WASM Demo: IndexedDB Known Hosts (Loop #21)</h1>
+  <p class="info">Browser IndexedDB 真实持久化 + sync wrapper host shim</p>
+  <pre id="out">Loading...</pre>
+  <script type="module">
+    // Loop #21 IndexedDB sync wrapper host shim
+    // MoonBit extern wasm 是同步,但 IndexedDB 是异步 API
+    // 解决:host shim 用 Map<key, value> in-memory cache (同步读)
+    //       + 异步写 IDB 持久化
+    const out = document.getElementById('out');
+    out.textContent = '';
+    const log = (s) => { out.textContent += s + '\n'; };
+
+    const DB_NAME = 'openssh-mb';
+    const STORE_NAME = 'known_hosts';
+
+    // Sync cache (MoonBit 读) + async IDB persistence
+    const cache = new Map();
+    let idbReady = false;
+
+    function openIDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          e.target.result.createObjectStore(STORE_NAME);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function initIDB() {
+      const db = await openIDB();
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const allReq = tx.objectStore(STORE_NAME).getAll();
+      return new Promise((resolve) => {
+        allReq.onsuccess = () => {
+          // populate cache from IDB
+          for (const item of allReq.result || []) {
+            if (item && item.key !== undefined) {
+              cache.set(item.key, item.value);
+            }
+          }
+          idbReady = true;
+          log(`[idb] loaded ${cache.size} entries from IDB`);
+          resolve();
+        };
+        allReq.onerror = () => { log('[idb] load failed'); resolve(); };
+      });
+    }
+
+    async function idbPut(key, value) {
+      cache.set(key, value);  // sync cache update
+      // async IDB persist
+      const db = await openIDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).put({ key, value }, key);
+      log(`[idb] put ${key} = ${value.substring(0, 30)}...`);
+    }
+
+    function idbGet(key) {
+      return cache.get(key) || null;
+    }
+
+    function idbCount() {
+      return cache.size;
+    }
+
+    // Demo flow
+    log('[demo] initializing IDB...');
+    await initIDB();
+
+    log(`[demo] current known_hosts count: ${idbCount()}`);
+
+    // Add demo entry
+    await idbPut('example.com', 'example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...');
+
+    log(`[demo] after put, count: ${idbCount()}`);
+
+    // Get entry
+    const v = idbGet('example.com');
+    log(`[demo] get example.com = ${v ? v.substring(0, 30) + '...' : 'null'}`);
+
+    // Verify IDB persistence: re-init from IDB
+    cache.clear();
+    log('[demo] cache cleared, re-loading from IDB...');
+    await initIDB();
+
+    const v2 = idbGet('example.com');
+    if (v2) {
+      log('[demo] ✓ IDB persistence VERIFIED: example.com reloaded');
+    } else {
+      log('[demo] ✗ IDB persistence FAILED');
+    }
+
+    log('\n✓ IndexedDB demo completed');
+  </script>
+</body>
+</html>

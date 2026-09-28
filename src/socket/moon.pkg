@@ -1,0 +1,7 @@
+///| Socket — byte stream transport over WebSocket (browser) / TCP (native)
+///|
+/// 同步 host shim 接口: MoonBit 通过 handle_id 调用 host 提供的 send/recv/close
+import {
+}
+
+pkgtype(kind: "library")

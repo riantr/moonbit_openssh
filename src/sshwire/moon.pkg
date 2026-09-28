@@ -1,0 +1,5 @@
+///| SSH wire framing — RFC 4253 §6 packet read/write
+import {
+}
+
+pkgtype(kind: "library")
