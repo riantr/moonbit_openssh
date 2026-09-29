@@ -1,0 +1,18 @@
+///| src/kexdh — Loop #26 DH group 14 KEX (RFC 3526 + RFC 4253 §8)
+///
+/// 实现:
+///   - RFC 3526 group 14 (2048-bit MODP) 常量
+///   - DH public value: g^x mod p
+///   - DH shared secret: f^x mod p (= e^y mod p)
+///   - RFC 4253 §8 exchange hash H = SHA-256(V_C || V_S || I_C || I_S || K_S || e || f || K)
+///
+/// 应用:
+///   - Loop #26: SSH-DH-SHA256 KEX (diffie-hellman-group14-sha256)
+///   - Loop #27+: 更复杂的 group 16/18 + ECDH
+
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/sha256",
+}
+
+pkgtype(kind: "library")

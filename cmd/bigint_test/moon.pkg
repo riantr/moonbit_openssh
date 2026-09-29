@@ -1,0 +1,9 @@
+///| cmd/bigint_test -- Loop #26 BigNat byte-exact verification
+//|
+/// Outputs ~9 lines byte-exact across 4 target × 2 mode
+
+import {
+  "openssh/openssh_moonbit/src/bigint",
+}
+
+pkgtype(kind: "executable")

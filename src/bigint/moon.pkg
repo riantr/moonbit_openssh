@@ -1,0 +1,22 @@
+///| src/bigint -- Loop #26 BigNat multi-precision unsigned natural
+///
+/// Implementation:
+///   - 64-bit limbs (UInt64) array
+///   - BigNat::from_uint64 / from_bytes_le / from_bytes_be
+///   - BigNat::to_bytes_be
+///   - BigNat::add / sub / mul (schoolbook O(n^2))
+///   - BigNat::cmp / is_zero / bit_length
+///   - BigNat::mpint_encode (RFC 4251 §5 SSH wire format)
+///   - Montgomery modular multiplication / exponentiation
+///
+/// Use cases:
+///   - Loop #26: DH group 14 (RFC 4253 §8)
+///   - Loop #27: RSA host key verify + sign (BigNat modular exponentiation)
+///   - Loop #28: ECDSA / ECDH (BigNat for EC arithmetic)
+///
+/// References:
+///   - Henry S. Warren Jr., "Hacker's Delight" 2nd Ed. §13 Montgomery Multiplication
+///   - OpenSSL crypto/bnlibbn
+///   - RFC 4251 §5 (mpint encoding)
+
+pkgtype(kind: "library")

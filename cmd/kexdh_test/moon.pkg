@@ -1,0 +1,10 @@
+///| cmd/kexdh_test -- Loop #26 DH group 14 KEX byte-exact verification
+//|
+/// Outputs ~10 lines byte-exact across 4 target × 2 mode
+
+import {
+  "openssh/openssh_moonbit/src/kexdh",
+  "openssh/openssh_moonbit/src/bigint",
+}
+
+pkgtype(kind: "executable")
