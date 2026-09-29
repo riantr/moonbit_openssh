@@ -1,0 +1,13 @@
+///| SSH algorithm name registry (Loop #25 G2)
+///
+/// 覆盖 OpenSSH 8.x 完整 KEX/hostkey/cipher/mac algorithm 列表
+/// 参考:
+///   - RFC 4250 §4.11.2 (SSH algorithm names)
+///   - RFC 4344 (SSH transport layer encryption modes)
+///   - RFC 5647 (AES-GCM AEAD for SSH)
+///   - RFC 5656 (ECC for SSH)
+///   - RFC 8268 (PQ KEX)
+///   - RFC 8308 (extension negotiation)
+///   - OpenSSH kex-names.c
+
+pkgtype(kind: "library")

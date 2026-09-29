@@ -1,0 +1,22 @@
+///| AES cipher (FIPS 197 + NIST SP 800-38A CTR + RFC 5647 GCM)
+///|
+/// Loop #25 G1: SSH wire 可协商 cipher
+///   - AES-128 block cipher (FIPS 197)
+///   - AES-256 block cipher (FIPS 197)
+///   - AES-CTR mode (RFC 4344 §4, SSH wire counter format)
+///   - AES-GCM AEAD (RFC 5647 + NIST SP 800-38D)
+///   - GHASH (GF(2^128) multiplication)
+///
+/// 三件大事 (triple-blind):
+///   - MoonBit v0.10.12 实现 vs OpenSSL EVP_aes_*_ctr
+///   - vs pure Python cryptography 库
+///   - vs NIST SP 800-38A/38D test vectors
+///
+/// 参考:
+///   - FIPS 197 (AES block cipher)
+///   - NIST SP 800-38A (CTR mode)
+///   - NIST SP 800-38D (GCM)
+///   - RFC 4344 §4 (SSH AES-CTR use)
+///   - RFC 5647 (SSH AES-GCM AEAD)
+
+pkgtype(kind: "library")

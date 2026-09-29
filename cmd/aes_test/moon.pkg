@@ -1,0 +1,10 @@
+///| cmd/aes_test — Loop #25 AES + kex-names 字节级验证
+//|
+/// 11 行 byte-exact 跨 4 target × 2 mode
+
+import {
+  "openssh/openssh_moonbit/src/aes",
+  "openssh/openssh_moonbit/src/kex_names",
+}
+
+pkgtype(kind: "executable")
