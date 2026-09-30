@@ -1,17 +1,16 @@
 ﻿///| Loop #26 BigNat byte-exact verification (cmd/bigint_test)
 ///
 /// KAT vs Python int reference:
-///   Python:
-///     a = 0xDEADBEEFCAFEBABE123456789ABCDEF0
-///     p = RFC 3526 group 14 (2048-bit MODP)
-///     pow(3, 5, 7) = 5
-///     pow(2, 10, 1000) = 24
-///     pow(2, 100, 13) = 3
-///     pow(7, 50, 11) = 1
+///   mpint encoding (RFC 4251 §5)
+///   pow(3, 5, 7) = 5
+///   pow(2, 10, 1000) = 24
+///   pow(2, 100, 13) = 3
+///   pow(7, 50, 11) = 1
+///   pow(0xDEADBEEF, 5, 0x12345) = 0x1850
+///   pow(2, 0xCAFE, RFC 3526 group 14) = byte-exact vs Python pow()
 
 fn main {
   // ============ G1 BigNat from_bytes_be known value ============
-  // Python: a = 0xDEADBEEFCAFEBABE123456789ABCDEF0
   let a_bytes : FixedArray[Byte] = FixedArray::from_array([
     0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
     0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
@@ -44,8 +43,8 @@ fn main {
   println("bit_length_a: " + bit_len_a.to_string())
 
   // ============ G5 mpint encode RFC 4251 §5 ============
-  let m_zero : FixedArray[Byte] = FixedArray::from_array([])
-  let m_zero_v = @bigint.BigNat::from_bytes_be(m_zero)
+  let m_zero_bytes : FixedArray[Byte] = FixedArray::from_array([])
+  let m_zero_v = @bigint.BigNat::from_bytes_be(m_zero_bytes)
   let m_zero_enc = @bigint.BigNat::mpint_encode(m_zero_v)
   let hex_chars : String = "0123456789abcdef"
   let m_zero_hex = {
@@ -114,7 +113,6 @@ fn main {
   let pow2_hex = @bigint.BigNat::to_hex(pow2_result)
   println("pow_2_10_1000: " + pow2_hex)
 
-  // Python: pow(2, 100, 13) = 3
   let exp100_bytes : FixedArray[Byte] = FixedArray::from_array([0x64])
   let mod13_bytes : FixedArray[Byte] = FixedArray::from_array([0x0D])
   let exp100 = @bigint.BigNat::from_bytes_be(exp100_bytes)
@@ -122,7 +120,6 @@ fn main {
   let pow_2_100_13 = @bigint.BigNat::mod_pow(base2, exp100, mod13)
   println("pow_2_100_13: " + @bigint.BigNat::to_hex(pow_2_100_13))
 
-  // Python: pow(7, 50, 11) = 1
   let base7_bytes : FixedArray[Byte] = FixedArray::from_array([0x07])
   let exp50_bytes : FixedArray[Byte] = FixedArray::from_array([0x32])
   let mod11_bytes : FixedArray[Byte] = FixedArray::from_array([0x0B])
@@ -142,13 +139,15 @@ fn main {
   let pow_dead = @bigint.BigNat::mod_pow(base_dead, exp5, mod_12345)
   println("pow_deadbeef_5_12345: " + @bigint.BigNat::to_hex(pow_dead))
 
-  // sub-step: 0xDEADBEEF mod 0x12345
-  let sub_mod = @bigint.BigNat::mod(base_dead, mod_12345)
-  println("deadbeef_mod_12345: " + @bigint.BigNat::to_hex(sub_mod))
-
-  // sub-step: 0xDEADBEEF * 0xDEADBEEF mod 0x12345
-  let dead_self = @bigint.BigNat::mul(base_dead, base_dead)
-  println("deadbeef_squared: " + @bigint.BigNat::to_hex(dead_self))
-  let dead_self_mod = @bigint.BigNat::mod(dead_self, mod_12345)
-  println("deadbeef_sq_mod_12345: " + @bigint.BigNat::to_hex(dead_self_mod))
+  // Python: pow(2, 0xCAFE, RFC 3526 group 14) = byte-exact
+  let p14_bytes : FixedArray[Byte] = @kexdh.group14_prime()
+  let p14 = @bigint.BigNat::from_bytes_be(p14_bytes)
+  let exp_cafe_bytes : FixedArray[Byte] = FixedArray::from_array([0xCA, 0xFE])
+  let exp_cafe = @bigint.BigNat::from_bytes_be(exp_cafe_bytes)
+  let base_two = @bigint.BigNat::from_uint64(2UL)
+  let pow_cafe = @bigint.BigNat::mod_pow(base_two, exp_cafe, p14)
+  let pow_cafe_hex = @bigint.BigNat::to_hex(pow_cafe)
+  println("pow_2_cafe_p14_first16: " + pow_cafe_hex.unsafe_substring(start=0, end=16))
+  let last_start_cafe = pow_cafe_hex.length() - 16
+  println("pow_2_cafe_p14_last16: " + pow_cafe_hex.unsafe_substring(start=last_start_cafe, end=last_start_cafe + 16))
 }

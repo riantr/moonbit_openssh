@@ -1,14 +1,9 @@
-﻿///| BigNat basic ops (Loop #26 G1)
+///| BigNat basic ops (Loop #26 G1)
 ///
 /// 32-bit limbs (UInt), little-endian word order.
 /// limbs[0] = LSB, limbs[len-1] = MSB.
 ///
 /// Unsigned only (negative not supported for Loop #26/27 use cases).
-///
-/// Why UInt (32-bit) limbs:
-///   - UInt * UInt = UInt (32-bit, no overflow during single mul)
-///   - For schoolbook mul: 32*32 = 64-bit product, accumulated via UInt64
-///   - For DH group 14 (256 bytes = 2048 bits), n_limbs = 64
 
 // ============================================================================
 // BigNat struct + constructors
@@ -85,19 +80,13 @@ pub fn BigNat::to_bytes_be(self : BigNat) -> FixedArray[Byte] {
   }
   let byte_len = (self.len - 1) * 4 + top_byte_idx + 1
   let bytes : FixedArray[Byte] = FixedArray::make(byte_len, b'\x00')
-  // Write MSB first: bytes[0] is the most significant byte (top of top limb)
   let mut bi = 0
-  // Write top limb bytes from top_byte_idx down to 0
   let mut ti = top_byte_idx
   while ti >= 0 {
-    // Shift right by ti*8 bits and take low byte
-    let shifted : UInt = top_limb >> (ti * 8)
-    let masked : UInt = shifted & 0xFFU
-    bytes[bi] = masked.to_byte()
+    bytes[bi] = ((top_limb >> (ti * 8)) & 0xFFU).to_byte()
     bi = bi + 1
     ti = ti - 1
   }
-  // Write remaining limbs (top-1 down to 0) each as 4 bytes high-to-low
   let mut li = self.len - 2
   while li >= 0 {
     let v = self.limbs[li]
@@ -111,7 +100,7 @@ pub fn BigNat::to_bytes_be(self : BigNat) -> FixedArray[Byte] {
   bytes
 }
 
-///| SSH wire mpint encoding (RFC 4251 搂5)
+///| SSH wire mpint encoding (RFC 4251 §5)
 pub fn BigNat::mpint_encode(self : BigNat) -> FixedArray[Byte] {
   let bytes = self.to_bytes_be()
   let needs_leading = bytes.length() > 0 && (bytes[0].to_int() & 0x80) != 0
@@ -235,68 +224,64 @@ pub fn BigNat::sub(a : BigNat, b : BigNat) -> BigNat {
 }
 
 ///| BigNat * BigNat -> BigNat (schoolbook, O(n*m))
-///   32-bit limbs: 32*32 = 64-bit product, accumulated via UInt64 with multi-limb carry propagation
+///   Standard algorithm: at each (i, j), multiply a[i] * b[j] (64-bit) and add to
+///   r[i+j] with proper carry chain. r[] is UInt32 limbs (LE).
 pub fn BigNat::mul(a : BigNat, b : BigNat) -> BigNat {
   if a.len == 0 || b.len == 0 {
     return BigNat::from_uint64(0UL)
   }
   let out_len = a.len + b.len
-  let acc : FixedArray[UInt64] = FixedArray::make(out_len, 0UL)
+  let result : FixedArray[UInt] = FixedArray::make(out_len, 0U)
   let mut i = 0
   while i < a.len {
     let a_val : UInt64 = a.limbs[i].to_uint64()
     if a_val > 0UL {
+      let mut carry : UInt64 = 0UL
       let mut j = 0
       while j < b.len {
         let b_val : UInt64 = b.limbs[j].to_uint64()
         let prod : UInt64 = a_val * b_val
+        let prod_low : UInt = (prod & 0xFFFFFFFFUL).to_uint()
+        let prod_high : UInt = ((prod >> 32) & 0xFFFFFFFFUL).to_uint()
         let pos = i + j
-        let cur = acc[pos]
-        let sum1 = cur + prod
-        acc[pos] = sum1
-        if sum1 < cur || sum1 < prod {
+        let cur : UInt = result[pos]
+        let cur64 : UInt64 = cur.to_uint64()
+        let prod_low64 : UInt64 = prod_low.to_uint64()
+        let total : UInt64 = cur64 + prod_low64 + carry
+        result[pos] = (total & 0xFFFFFFFFUL).to_uint()
+        carry = (total >> 32) + prod_high.to_uint64()
+        j = j + 1
+      }
+      if carry > 0UL {
+        let pos = i + b.len
+        if pos < out_len {
+          let cur : UInt = result[pos]
+          let total : UInt64 = cur.to_uint64() + carry
+          result[pos] = (total & 0xFFFFFFFFUL).to_uint()
+          let mut new_carry : UInt64 = total >> 32
           let mut k = pos + 1
-          let mut c : UInt64 = 1UL
-          while c > 0UL && k < out_len {
-            let prev = acc[k]
-            let new_v = prev + c
-            acc[k] = new_v
-            if new_v >= prev {
-              c = 0UL
-            }
+          while new_carry > 0UL && k < out_len {
+            let cur_k : UInt = result[k]
+            let total_k : UInt64 = cur_k.to_uint64() + new_carry
+            result[k] = (total_k & 0xFFFFFFFFUL).to_uint()
+            new_carry = total_k >> 32
             k = k + 1
           }
+          ignore(new_carry)
         }
-        j = j + 1
       }
     }
     i = i + 1
   }
-  let final_len = out_len + 1
-  let final_out : FixedArray[UInt] = FixedArray::make(final_len, 0U)
-  let mut carry64 : UInt64 = 0UL
-  let mut k2 = 0
-  while k2 < out_len {
-    let v : UInt64 = acc[k2] + carry64
-    final_out[k2] = (v & 0xFFFFFFFFUL).to_uint()
-    carry64 = v >> 32
-    k2 = k2 + 1
-  }
-  final_out[out_len] = carry64.to_uint()
-  let mut new_len = final_out.length()
-  while new_len > 0 && final_out[new_len - 1] == 0U {
+  let mut new_len = result.length()
+  while new_len > 0 && result[new_len - 1] == 0U {
     new_len = new_len - 1
   }
-  { limbs: final_out, len: new_len }
+  if new_len == 0 { new_len = 1 }
+  { limbs: result, len: new_len }
 }
 
-///| BigNat % BigNat (a mod b) -- schoolbook long division (Knuth Algorithm D simplified)
-///   Algorithm:
-///     1. Normalize: shift b left by s bits such that b's top limb's MSB is 1.
-///     2. For each limb position from high to low of normalized a:
-///        - Estimate q_hat from top 2 limbs of remainder
-///        - Multiply b by q_hat, subtract from remainder
-///     3. Shift remainder right by s bits to get result.
+///| BigNat % BigNat (a mod b) -- binary long division with multi-bit shifts
 pub fn BigNat::mod(a : BigNat, b : BigNat) -> BigNat {
   if b.len == 0 {
     abort("BigNat::mod: divide by zero")
@@ -304,201 +289,34 @@ pub fn BigNat::mod(a : BigNat, b : BigNat) -> BigNat {
   if BigNat::cmp(a, b) < 0 {
     return { limbs: a.limbs, len: a.len }
   }
-  // 1. Normalize: find s such that b_top has MSB set
-  let mut s : Int = 0
-  let b_top = b.limbs[b.len - 1]
-  let mut v = b_top
-  while v < 0x80000000U && s < 32 {
-    v = v << 1
-    s = s + 1
-  }
-  if s == 32 { s = 0 }  // already normalized
-  // 2. Shift a and b left by s bits
-  let norm_a : FixedArray[UInt] = FixedArray::make(a.len + 1, 0U)
-  let norm_b : FixedArray[UInt] = FixedArray::make(b.len + 1, 0U)
-  let s_inv = 32 - s
-  let mut i = 0
-  while i < a.len {
-    let a_v = a.limbs[i]
-    let next : UInt = if i + 1 < a.len { a.limbs[i + 1] } else { 0U }
-    if s == 0 {
-      norm_a[i] = a_v
-    } else {
-      norm_a[i] = ((a_v << s) | (next >> s_inv)) & 0xFFFFFFFFU
-    }
-    i = i + 1
-  }
-  if s > 0 && a.len > 0 {
-    norm_a[a.len] = (a.limbs[a.len - 1] >> s_inv) & 0xFFFFFFFFU
-  }
-  let mut j = 0
-  while j < b.len {
-    let b_v = b.limbs[j]
-    let next : UInt = if j + 1 < b.len { b.limbs[j + 1] } else { 0U }
-    if s == 0 {
-      norm_b[j] = b_v
-    } else {
-      norm_b[j] = ((b_v << s) | (next >> s_inv)) & 0xFFFFFFFFU
-    }
-    j = j + 1
-  }
-  if s > 0 && b.len > 0 {
-    norm_b[b.len] = (b.limbs[b.len - 1] >> s_inv) & 0xFFFFFFFFU
-  }
-  // norm_a.len = a.len + 1 (always includes the top extra limb)
-  // norm_b.len = b.len + 1
-  let m = b.len  // effective m (ignoring top zero limb of norm_b)
-  let n = (a.len + 1) - m  // n = (a.len + 1) - m; number of quotient limbs
-  if n <= 0 {
-    // a shifted by s is still < b shifted by s
-    // This shouldn't happen if a >= b before shift
-    return BigNat::mod_simple(a, b)
-  }
-  // 3. Knuth Algorithm D loop
-  // We work with a mutable copy of norm_a as buffer (length a.len + 1)
-  let buf : FixedArray[UInt] = FixedArray::make(a.len + 1, 0U)
-  let mut bi = 0
-  while bi <= a.len {
-    buf[bi] = norm_a[bi]
-    bi = bi + 1
-  }
-  let b_top_norm : UInt64 = norm_b[m - 1].to_uint64()
-  let mut qi = n
-  while qi > 0 {
-    qi = qi - 1
-    // q_hat estimate from buf[qi+m-1..qi+m+1]
-    let a_high : UInt64 = if qi + m < buf.length() {
-      (buf[qi + m].to_uint64() << 32) | buf[qi + m - 1].to_uint64()
-    } else if qi + m - 1 < buf.length() {
-      buf[qi + m - 1].to_uint64()
-    } else {
-      0UL
-    }
-    let a_next : UInt64 = if qi + m - 2 >= 0 && qi + m - 2 < buf.length() {
-      buf[qi + m - 2].to_uint64()
-    } else {
-      0UL
-    }
-    // q_hat = a_high / b_top_norm, capped at 2^32 - 1
-    let mut q_hat : UInt64 = if b_top_norm == 0UL { 0UL } else { a_high / b_top_norm }
-    if q_hat > 0xFFFFFFFFUL { q_hat = 0xFFFFFFFFUL }
-    // Refinement: if q_hat == 2^32 - 1 and b_top_norm == 2^32 - 1, OK; otherwise check
-    let r_hat : UInt64 = a_high - q_hat * b_top_norm
-    let b_second : UInt64 = if m >= 2 { norm_b[m - 2].to_uint64() } else { 0UL }
-    // Check if q_hat * b_second > r_hat * 2^32 + a_next
-    let lhs : UInt64 = q_hat * b_second
-    let rhs : UInt64 = (r_hat << 32) | a_next
-    if q_hat == b_top_norm || lhs > rhs {
-      q_hat = q_hat - 1UL
-    }
-    // Subtract q_hat * norm_b from buf[qi..qi+m]
-    let mut borrow : Int64 = 0L
-    let mut jj = 0
-    while jj < m {
-      let prod : UInt64 = q_hat * norm_b[jj].to_uint64()
-      let lo : UInt = (prod & 0xFFFFFFFFUL).to_uint()
-      let hi : UInt = (prod >> 32).to_uint()
-      // Subtract lo from buf[qi+jj] with borrow
-      let cur_lo = buf[qi + jj].to_int64()
-      let diff_lo : Int64 = cur_lo - lo.to_int64() - borrow
-      if diff_lo < 0L {
-        buf[qi + jj] = ((diff_lo + 0x100000000L).reinterpret_as_uint64() & 0xFFFFFFFFUL).to_uint()
-        borrow = 1L
-      } else {
-        buf[qi + jj] = (diff_lo.reinterpret_as_uint64() & 0xFFFFFFFFUL).to_uint()
-        borrow = 0L
-      }
-      // Subtract hi from buf[qi+jj+1] with carry from previous
-      let cur_hi = buf[qi + jj + 1].to_int64()
-      let diff_hi : Int64 = cur_hi - hi.to_int64() - borrow
-      if diff_hi < 0L {
-        buf[qi + jj + 1] = ((diff_hi + 0x100000000L).reinterpret_as_uint64() & 0xFFFFFFFFUL).to_uint()
-        borrow = 1L
-      } else {
-        buf[qi + jj + 1] = (diff_hi.reinterpret_as_uint64() & 0xFFFFFFFFUL).to_uint()
-        borrow = 0L
-      }
-      jj = jj + 1
-    }
-    // If buf[qi+m] underflowed (borrow propagated to it), add b back
-    if borrow > 0L {
-      // buf[qi..qi+m] -= norm_b[0..m-1] underflowed; add norm_b back to buf[qi..qi+m]
-      let mut carry : UInt64 = 0UL
-      let mut kk = 0
-      while kk < m {
-        let sum : UInt64 = buf[qi + kk].to_uint64() + norm_b[kk].to_uint64() + carry
-        buf[qi + kk] = (sum & 0xFFFFFFFFUL).to_uint()
-        carry = sum >> 32
-        kk = kk + 1
-      }
-      // The top underflowed by 1, so we add back; buf[qi+m] should now be 0 (since b_top was subtracted)
-      ignore(carry)
-    }
-  }
-  // Remainder is in buf[0..m]; un-normalize by shifting right by s bits
-  let remainder_arr : FixedArray[UInt] = FixedArray::make(m, 0U)
-  let mut ri = 0
-  while ri < m {
-    let cur_v = buf[ri]
-    let next_v : UInt = if ri + 1 < buf.length() { buf[ri + 1] } else { 0U }
-    if s == 0 {
-      remainder_arr[ri] = cur_v
-    } else {
-      remainder_arr[ri] = ((cur_v >> s) | (next_v << s_inv)) & 0xFFFFFFFFU
-    }
-    ri = ri + 1
-  }
-  // Normalize length
-  let mut new_len = m
-  while new_len > 0 && remainder_arr[new_len - 1] == 0U {
-    new_len = new_len - 1
-  }
-  if new_len == 0 { new_len = 1 }
-  { limbs: remainder_arr, len: new_len }
-}
-
-///| BigNat mod (simple fallback for small inputs)
-fn BigNat::mod_simple(a : BigNat, b : BigNat) -> BigNat {
-  if BigNat::cmp(a, b) < 0 {
-    return { limbs: a.limbs, len: a.len }
-  }
   let a_bits = a.bit_length()
   let b_bits = b.bit_length()
-  let mut rem : BigNat = { limbs: a.limbs, len: a.len }
-  let mut i = a_bits - b_bits
-  while i >= 0 {
-    let mut shifted_b : BigNat = b
-    let mut k = 0
-    while k < i {
-      shifted_b = BigNat::shift_left_1(shifted_b)
-      k = k + 1
+  if a_bits <= b_bits {
+    return { limbs: a.limbs, len: a.len }
+  }
+  let mut shift = a_bits - b_bits
+  let mut shifted_b = BigNat::shift_left_bits(b, (shift % 32).reinterpret_as_uint())
+  let limb_shift = shift / 32
+  if limb_shift > 0 {
+    let new_limbs : FixedArray[UInt] = FixedArray::make(shifted_b.len + limb_shift, 0U)
+    let mut i = 0
+    while i < shifted_b.len {
+      new_limbs[i + limb_shift] = shifted_b.limbs[i]
+      i = i + 1
     }
+    shifted_b = { limbs: new_limbs, len: new_limbs.length() }
+  }
+  let mut rem : BigNat = { limbs: a.limbs, len: a.len }
+  while shift >= 0 {
     if BigNat::cmp(rem, shifted_b) >= 0 {
       rem = BigNat::sub(rem, shifted_b)
     }
-    i = i - 1
+    if shift > 0 {
+      shifted_b = BigNat::shift_right_1(shifted_b)
+    }
+    shift = shift - 1
   }
   rem
-}
-
-///| BigNat left shift 1 bit
-fn BigNat::shift_left_1(a : BigNat) -> BigNat {
-  let out_len = a.len + 1
-  let out : FixedArray[UInt] = FixedArray::make(out_len, 0U)
-  let mut carry : UInt = 0U
-  let mut i = 0
-  while i < a.len {
-    let v = a.limbs[i]
-    out[i] = (v << 1) | carry
-    carry = v >> 31
-    i = i + 1
-  }
-  out[a.len] = carry
-  let mut new_len = out_len
-  while new_len > 0 && out[new_len - 1] == 0U {
-    new_len = new_len - 1
-  }
-  { limbs: out, len: new_len }
 }
 
 // ============================================================================
@@ -522,4 +340,52 @@ pub fn BigNat::to_hex(self : BigNat) -> String {
     i = i + 1
   }
   sb.to_string()
+}
+
+// ============================================================================
+// Multi-bit shifts for mod
+// ============================================================================
+
+///| BigNat left shift by s bits (s < 32, 0 <= s <= 32)
+fn BigNat::shift_left_bits(a : BigNat, s : UInt) -> BigNat {
+  if s == 0U { return { limbs: a.limbs, len: a.len } }
+  let s_int : Int = s.reinterpret_as_int()
+  let out_len = a.len + 1
+  let out : FixedArray[UInt] = FixedArray::make(out_len, 0U)
+  let mut carry : UInt = 0U
+  let mut i = 0
+  while i < a.len {
+    let v = a.limbs[i]
+    out[i] = ((v << s_int) | carry) & 0xFFFFFFFFU
+    carry = v >> (32 - s_int)
+    i = i + 1
+  }
+  out[a.len] = carry
+  let mut new_len = out_len
+  while new_len > 0 && out[new_len - 1] == 0U {
+    new_len = new_len - 1
+  }
+  if new_len == 0 { new_len = 1 }
+  { limbs: out, len: new_len }
+}
+
+///| BigNat right shift by 1 bit
+fn BigNat::shift_right_1(a : BigNat) -> BigNat {
+  if a.len == 0 { return a }
+  let out_len = if a.len > 1 { a.len } else { 1 }
+  let out : FixedArray[UInt] = FixedArray::make(out_len, 0U)
+  let mut carry : UInt = 0U
+  let mut i = a.len - 1
+  while i >= 0 {
+    let v = a.limbs[i]
+    out[i] = (v >> 1) | carry
+    carry = (v & 1U) << 31
+    i = i - 1
+  }
+  let mut new_len = out_len
+  while new_len > 0 && out[new_len - 1] == 0U {
+    new_len = new_len - 1
+  }
+  if new_len == 0 { new_len = 1 }
+  { limbs: out, len: new_len }
 }

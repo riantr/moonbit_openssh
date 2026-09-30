@@ -39,9 +39,17 @@ fn main {
 
   let e = @kexdh.dh_pub(g, x, p)
   let e_hex = @bigint.BigNat::to_hex(e)
-  let e_first8 = e_hex.unsafe_substring(start=0, end=8)
-  let e_last_start = e_hex.length() - 8
-  let e_last8 = e_hex.unsafe_substring(start=e_last_start, end=e_last_start + 8)
+  let e_first8 = if e_hex.length() >= 8 {
+    e_hex.unsafe_substring(start=0, end=8)
+  } else {
+    e_hex
+  }
+  let e_last8 = if e_hex.length() >= 8 {
+    let e_last_start = e_hex.length() - 8
+    e_hex.unsafe_substring(start=e_last_start, end=e_last_start + 8)
+  } else {
+    e_hex
+  }
   println("dh14_e_first8: " + e_first8)
   println("dh14_e_last8: " + e_last8)
 
