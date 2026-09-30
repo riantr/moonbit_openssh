@@ -1,0 +1,10 @@
+///| cmd/rsa_test -- Loop #27 G3 RSA host key verify byte-exact (PKCS#1 v1.5 + SHA-256)
+///
+/// 512-bit RSA test vector (small for fast verify)
+
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/rsa",
+}
+
+pkgtype(kind: "executable")

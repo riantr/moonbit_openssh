@@ -1,0 +1,25 @@
+///| src/rsa -- Loop #27 G3 RSA host key verify (PKCS#1 v1.5 + SHA-256)
+///
+/// Implementation:
+///   - rsa_pub_from_bytes(n_bytes, e_bytes) -> (n, e) BigNat pair
+///   - rsa_verify_pkcs1_sha256(n, e, sig, msg) -> Bool
+///   - rsa_sign_pkcs1_sha256(n, d, msg) -> sig_bytes (for testing)
+///
+/// Algorithm:
+///   - Compute m = sig^e mod n
+///   - Strip PKCS#1 v1.5 padding: 0x00 0x01 [0xFF*N] 0x00 [DigestInfo]
+///   - DigestInfo for SHA-256: ASN.1 SEQUENCE containing OID sha256 + NULL + OCTETSTRING hash
+///   - Extract hash, compare with SHA-256(msg)
+///
+/// Known limitation:
+///   - RSA-2048/4096-bit verify with public exponent e=65537 takes ~hours
+///     with current binary long division mod. Production needs Loop #28+
+///     Montgomery REDC (~100x speedup).
+///   - Loop #27 verifies with 512-bit RSA test vector only.
+
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/sha256",
+}
+
+pkgtype(kind: "library")
