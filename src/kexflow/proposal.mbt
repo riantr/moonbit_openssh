@@ -291,6 +291,7 @@ pub(all) enum NegotiationError {
   NoKexAlg
   NoHostkeyAlg
   NoCipherAlg
+  NoMacAlg
   NoCompAlg
 }
 
@@ -301,6 +302,8 @@ pub(all) struct Negotiated {
   hostkey_alg : String
   cipher_ctos : String
   cipher_stoc : String
+  mac_ctos : String
+  mac_stoc : String
   comp_ctos : String
   comp_stoc : String
 }
@@ -374,11 +377,27 @@ pub fn negotiate(
     Some(s) => s
     None => return Err(NoCompAlg)
   }
+  // MAC is negotiated like any other list. It was previously dropped because
+  // the only cipher this client offered was an AEAD, where MAC is implicit;
+  // Loop #31 negotiates aes128-ctr + hmac-sha2-256, so the agreed name is
+  // needed to derive the right keys.
+  let mc = pf_match_list(my.mac_ctos, peer.mac_ctos)
+  let mc = match mc {
+    Some(s) => s
+    None => return Err(NoMacAlg)
+  }
+  let ms = pf_match_list(my.mac_stoc, peer.mac_stoc)
+  let ms = match ms {
+    Some(s) => s
+    None => return Err(NoMacAlg)
+  }
   Ok({
     kex_alg: kex,
     hostkey_alg: hk,
     cipher_ctos: ecc,
     cipher_stoc: ecs,
+    mac_ctos: mc,
+    mac_stoc: ms,
     comp_ctos: cc,
     comp_stoc: cs,
   })

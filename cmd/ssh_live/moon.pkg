@@ -1,0 +1,11 @@
+import {
+  "moonbitlang/core/env",
+  "openssh/openssh_moonbit/src/tcp",
+  "openssh/openssh_moonbit/src/sshclient",
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/ecdsa",
+}
+
+options(
+  is_main: true,
+)

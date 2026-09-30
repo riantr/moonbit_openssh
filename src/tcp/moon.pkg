@@ -1,0 +1,12 @@
+import {
+  "moonbitlang/core/bytes",
+}
+
+options(
+  native_stub: [ "winsock.c" ],
+  targets: {
+    "socket_native.mbt": [ "native" ],
+    "socket_js.mbt": [ "js" ],
+    "socket_wasm.mbt": [ "wasm", "wasm-gc" ],
+  },
+)

@@ -110,6 +110,12 @@ For each crypto module:
 # Run all MoonBit tests
 moon test                                   # defaults to native
 
+# Loop #31: full live-sshd gate (starts a private OpenSSH on 127.0.0.1:22230,
+# runs the MoonBit client, cross-checks the exchange hash twice, then re-runs
+# the Loop #30 crypto suites 4 target x 2 mode for regressions)
+node host/verify_loop31.mjs
+node host/verify_loop31.mjs --keep-sshd     # leave the server up for poking
+
 # Rebuild C driver (hand-written SHA-512, no OpenSSH sha2.c)
 cd triple_check/c
 python gen_tables.py                        # regenerate tables.h
