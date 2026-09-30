@@ -153,3 +153,32 @@ python compare.py
 - **Empty-string SHA-512 self-test**: hashing `""` and comparing
   against `cf83e135...` transitively validates ALL 8 H0 and 80 K
   constants. Any single wrong constant changes the digest.
+- **SSH transport exchange hash (Loop #31)**: RFC 4253 §8 lists the
+  inputs informally and the natural reading is wrong. All eight fields
+  are length-prefixed, K included, and I_C / I_S are the *complete*
+  KEXINIT payload with the `0x14` type byte sitting **immediately after
+  the length prefix**, not at the end. See `kex_gen_hash()` in
+  `kexgen.c:47-96` and `kex_dh_compute_key()` in `kexdh.c:105` for the
+  authoritative shape. Do not re-derive this from the RFC: run
+  `python host/paramiko_oracle.py --port <p>`, which sweeps all 16
+  prefix combinations against a live paramiko `session_id`.
+- **`mpint_encode` already emits the u32 length prefix.** Wrapping its
+  output in `write_ssh_string` again produces a string whose value
+  starts with four zero bytes; a real server reads that as a far larger
+  number and rejects the DH value as `>= p-1`.
+- **SSH packet framing**: `packet_length` must be `4 (mod 8)` (the
+  length field counts itself), the payload begins at offset 5 *within*
+  the packet but at index 6 of the assembled buffer once the type byte
+  is in place, and the payload length is
+  `packet_length - padding_length - 2`.
+- **`moon fmt` scope and CJK damage**: run it only over the packages the
+  loop actually touched, then `git checkout --` the rest — it reformats
+  unrelated legacy files and can alter CJK comments (it turned
+  `真实加密` into `真加密` in `src/sshclient/moon.pkg`).
+- **`moon check` summary goes to stderr** and exits 0 even with
+  warnings, so a stdout-only capture sees an empty string. Read the
+  error count out of the `N warnings, M errors` line across both
+  streams, as `moonCheck()` in `host/verify_loop31.mjs` does.
+- **Absolute artifact paths in `execSync`**: a bare `_build/...` is
+  resolved by `cmd.exe` as a command name, not a path. Quote an
+  absolute path instead.
