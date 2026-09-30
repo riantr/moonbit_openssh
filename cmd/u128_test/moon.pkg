@@ -1,0 +1,6 @@
+///| cmd/u128_test -- Loop #29 UInt128 + Montgomery CIOS KAT
+import {
+  "openssh/openssh_moonbit/src/bigint",
+}
+
+pkgtype(kind: "executable")

@@ -10,13 +10,43 @@
 ///   7. H is signed by server with host key (Loop #27+)
 
 ///| DH public value: e = g^x mod p
+///
+///   The prime is fixed per group, so callers doing several exponentiations
+///   against the same group should build a Montgomery context once with
+///   `dh_ctx` and use `dh_pub_ctx` / `dh_shared_ctx` instead. That avoids
+///   recomputing n' and R^2 for each of the three modexps an SSH-DH exchange
+///   performs (e, f, and the shared secret).
 pub fn dh_pub(g : @bigint.BigNat, x : @bigint.BigNat, p : @bigint.BigNat) -> @bigint.BigNat {
-  @bigint.BigNat::mod_pow(g, x, p)
+  @bigint.BigNat::mod_pow_auto(g, x, p)
 }
 
 ///| DH shared secret: K = f^x mod p
 pub fn dh_shared(f : @bigint.BigNat, x : @bigint.BigNat, p : @bigint.BigNat) -> @bigint.BigNat {
-  @bigint.BigNat::mod_pow(f, x, p)
+  @bigint.BigNat::mod_pow_auto(f, x, p)
+}
+
+///| Build a reusable Montgomery context for a DH group prime.
+pub fn dh_ctx(p : @bigint.BigNat) -> @bigint.MontCtx {
+  let k = p.limb64_len()
+  @bigint.MontCtx::new(p.to_limbs64(k), k)
+}
+
+///| DH public value using a pre-built context.
+pub fn dh_pub_ctx(
+  ctx : @bigint.MontCtx,
+  g : @bigint.BigNat,
+  x : @bigint.BigNat
+) -> @bigint.BigNat {
+  @bigint.mont_pow_with(ctx, g, x)
+}
+
+///| DH shared secret using a pre-built context.
+pub fn dh_shared_ctx(
+  ctx : @bigint.MontCtx,
+  f : @bigint.BigNat,
+  x : @bigint.BigNat
+) -> @bigint.BigNat {
+  @bigint.mont_pow_with(ctx, f, x)
 }
 
 ///| RFC 4253 §8 exchange hash

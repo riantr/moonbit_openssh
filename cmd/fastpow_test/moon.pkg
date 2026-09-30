@@ -1,0 +1,8 @@
+///| cmd/fastpow_test -- Loop #29 G3 Montgomery fast-path equivalence + benchmark
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/kexdh",
+  "openssh/openssh_moonbit/src/rsa",
+}
+
+pkgtype(kind: "executable")

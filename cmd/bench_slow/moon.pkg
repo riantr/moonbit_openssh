@@ -1,0 +1,6 @@
+///| cmd/bench_slow -- Loop #29 G3 benchmark
+import {
+  "openssh/openssh_moonbit/src/bigint",
+}
+
+pkgtype(kind: "executable")

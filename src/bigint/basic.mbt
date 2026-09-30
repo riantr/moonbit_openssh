@@ -320,6 +320,47 @@ pub fn BigNat::mod(a : BigNat, b : BigNat) -> BigNat {
 }
 
 // ============================================================================
+// Schoolbook modular arithmetic (reference path; see mont64.mbt for the fast path)
+// ============================================================================
+
+///| BigNat mod_mul: a * b mod n via schoolbook mul + binary long division.
+///   This is the O(k^2) reference implementation. `fastpow.mbt` provides
+///   `mod_mul_auto` / `mod_pow_auto`, which route odd moduli through Montgomery
+///   CIOS in native 64-bit limbs and fall back here for even moduli.
+pub fn BigNat::mod_mul(a : BigNat, b : BigNat, n : BigNat) -> BigNat {
+  let product = BigNat::mul(a, b)
+  BigNat::mod(product, n)
+}
+
+///| BigNat mod_pow: base^exp mod n via binary exponentiation.
+///   Reference path; `mod_pow_auto` is the accelerated entry point.
+pub fn BigNat::mod_pow(base : BigNat, exp : BigNat, n : BigNat) -> BigNat {
+  if exp.len == 0 {
+    return BigNat::from_uint64(1UL)
+  }
+  let mut result : BigNat = BigNat::from_uint64(1UL)
+  let mut b : BigNat = base
+  let total_bits = exp.bit_length()
+  let mut i = 0
+  while i < total_bits {
+    let limb_idx = i / 32
+    let bit_idx = i % 32
+    let bit_mask : UInt = 1U << bit_idx
+    let exp_word : UInt = if limb_idx < exp.len {
+      exp.limbs[limb_idx]
+    } else {
+      0U
+    }
+    if (exp_word & bit_mask) != 0U {
+      result = BigNat::mod_mul(result, b, n)
+    }
+    b = BigNat::mod_mul(b, b, n)
+    i = i + 1
+  }
+  result
+}
+
+// ============================================================================
 // Debug helpers
 // ============================================================================
 
