@@ -54,6 +54,66 @@ pub fn HostKey::verify(
         Rejected(SignatureInvalid)
       }
     }
+    // ECDSA (ssh_ecdsa_verify, ssh-ecdsa.c) 的检查顺序:
+    //   get_cstring(alg) + get_string(inner)  → InvalidFormat
+    //   alg 与 key 类型不符                    → TypeMismatch (先于尾部残余)
+    //   外层尾部残余                            → TrailingData
+    //   inner: get_bignum2(r) + get_bignum2(s)  → InvalidFormat
+    //   inner 尾部残余                          → TrailingData
+    //   随后进密码学层
+    EcdsaKey(bits, qbytes) => {
+      let name = if bits == 256 { "nistp256" } else { "nistp384" }
+      let want_alg = if bits == 256 {
+        "ecdsa-sha2-nistp256"
+      } else {
+        "ecdsa-sha2-nistp384"
+      }
+      let outer = HkCursor::new(sig_blob)
+      let ealg = outer.get_cstring()
+      if outer.err is Some(_) {
+        return Rejected(InvalidFormat)
+      }
+      let inner = outer.get_string()
+      if outer.err is Some(_) {
+        return Rejected(InvalidFormat)
+      }
+      if ealg != want_alg {
+        return Rejected(TypeMismatch)
+      }
+      if outer.remaining() != 0 {
+        return Rejected(TrailingData)
+      }
+      let icur = HkCursor::new(inner)
+      let r = icur.get_bignum2()
+      if icur.err is Some(_) {
+        return Rejected(InvalidFormat)
+      }
+      let s = icur.get_bignum2()
+      if icur.err is Some(_) {
+        return Rejected(InvalidFormat)
+      }
+      if icur.remaining() != 0 {
+        return Rejected(TrailingData)
+      }
+      match @ecdsa.Curve::from_name(name) {
+        None => Rejected(UnsupportedType)
+        Some(c) =>
+          match @ecdsa.decode_point(c, qbytes) {
+            None => Rejected(KeyInvalidEcValue)
+            Some(q) => {
+              let sig = @ecdsa.Signature::new(
+                @bigint.BigNat::from_bytes_be(r),
+                @bigint.BigNat::from_bytes_be(s),
+              )
+              if @ecdsa.ecdsa_verify(c, q, sig, msg) {
+                Accepted
+              } else {
+                Rejected(SignatureInvalid)
+              }
+            }
+          }
+      }
+    }
     // RSA 验证需 bignum modexp——本 loop 范围外,显式标注。
     // 注:C 的 ssh_rsa_verify 会先做自身结构解析再进密码学层;
     // 本实现不细分结构错误,一律显式 Unavailable(报告注明)。

@@ -1,1 +1,5 @@
 // SSH hostkey parsing & signature verification (sshkey.c subset)
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/ecdsa",
+}

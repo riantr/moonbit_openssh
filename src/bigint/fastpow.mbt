@@ -81,8 +81,11 @@ pub fn mont_redc_with(
 ///| mod_pow that automatically picks the fast path.
 ///   - odd modulus  -> Montgomery CIOS in 64-bit limbs
 ///   - even modulus -> schoolbook mul + binary long division
-///   Exponent length drives the work: odd exponents are unchanged, even ones
-///   are halved by one trailing shift so the extra bit costs nothing.
+///
+///   Both Montgomery entry points (CIOS) require their operands to be strictly
+///   less than the modulus, so `base` is reduced here. Without this the public
+///   contract "base^exp mod n" silently breaks for any unreduced base -- which
+///   is exactly what ECDSA sign does with `e + r*d`.
 pub fn BigNat::mod_pow_auto(base : BigNat, exp : BigNat, n : BigNat) -> BigNat {
   if exp.len == 0 {
     return BigNat::from_uint64(1UL)
@@ -91,18 +94,28 @@ pub fn BigNat::mod_pow_auto(base : BigNat, exp : BigNat, n : BigNat) -> BigNat {
     return BigNat::mod_pow(base, exp, n)
   }
   let k = n.limb64_len()
-  let n_limbs = n.to_limbs64(k)
-  let ctx = MontCtx::new(n_limbs, k)
-  mont_pow_with(ctx, base, exp)
+  // The exponent is fed to the ladder as exactly k limbs, so an exponent
+  // wider than the modulus would be silently truncated. Fall back instead.
+  if exp.limb64_len() > k {
+    return BigNat::mod_pow(base, exp, n)
+  }
+  let ctx = MontCtx::new(n.to_limbs64(k), k)
+  let b = if BigNat::cmp(base, n) < 0 { base } else { BigNat::mod(base, n) }
+  mont_pow_with(ctx, b, exp)
 }
 
 ///| mod_mul that automatically picks the fast path.
+///
+///   As with `mod_pow_auto`, both operands are reduced mod n before entering
+///   Montgomery CIOS; the already-reduced case skips the division.
 pub fn BigNat::mod_mul_auto(a : BigNat, b : BigNat, n : BigNat) -> BigNat {
   if !n.is_odd() {
     return BigNat::mod_mul(a, b, n)
   }
   let k = n.limb64_len()
   let ctx = MontCtx::new(n.to_limbs64(k), k)
-  let r = MontCtx::mul(ctx, a.to_limbs64(k), b.to_limbs64(k))
+  let ar = if BigNat::cmp(a, n) < 0 { a } else { BigNat::mod(a, n) }
+  let br = if BigNat::cmp(b, n) < 0 { b } else { BigNat::mod(b, n) }
+  let r = MontCtx::mul(ctx, ar.to_limbs64(k), br.to_limbs64(k))
   limbs64_to_bignat(r, k)
 }

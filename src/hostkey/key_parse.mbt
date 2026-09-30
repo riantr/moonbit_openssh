@@ -39,6 +39,10 @@ pub(all) enum KeyError {
   SignatureInvalid
   /// SSH_ERR_INVALID_ARGUMENT(siglen==0 / msg 超限 / 空入参)
   InvalidArgument
+  /// SSH_ERR_EC_CURVE_MISMATCH(blob 内 curve 名与 alg 不符)
+  EcCurveMismatch
+  /// SSH_ERR_KEY_INVALID_EC_VALUE(点不在曲线上/越界/无穷远)
+  KeyInvalidEcValue
   /// RSA 密码学验证需 bignum modexp——本 loop 范围外,显式标注
   RsaVerifyUnavailable
 }
@@ -62,9 +66,12 @@ pub(all) enum VerifyResult {
 ///
 /// Ed25519Key:pk 恰 32 字节。
 /// RsaKey:(e, n) 均为 trim 前导零后的大端字节(空数组表示数值 0)。
+/// EcdsaKey:(曲线位数, 规范化未压缩点) —— 点为 0x04 || X || Y,
+///   已在解析期通过曲线方程校验。
 pub(all) enum HostKey {
   Ed25519Key(FixedArray[Byte])
   RsaKey(FixedArray[Byte], FixedArray[Byte])
+  EcdsaKey(Int, FixedArray[Byte])
 }
 
 ///|
@@ -215,6 +222,30 @@ fn bit_length_be(bytes : FixedArray[Byte]) -> Int {
 }
 
 ///|
+/// 曲线名 → 位数
+fn ecdsa_curve_bits(name : String) -> Int {
+  if name == "nistp256" { 256 } else { 384 }
+}
+
+///|
+/// 解析并校验 ECDSA 公钥点,返回规范化未压缩点字节(0x04 || X || Y)。
+/// decode_point 已做长度/格式/曲线方程/坐标范围校验;再 encode_point
+/// 得到与输入等价的规范形式,便于后续直接使用。
+fn ecdsa_canonical_point(
+  name : String,
+  qb : FixedArray[Byte]
+) -> FixedArray[Byte]? {
+  match @ecdsa.Curve::from_name(name) {
+    None => None
+    Some(c) =>
+      match @ecdsa.decode_point(c, qb) {
+        None => None
+        Some(pt) => @ecdsa.encode_point(c, pt)
+      }
+  }
+}
+
+///|
 pub fn HostKey::from_blob(blob : FixedArray[Byte]) -> ParseResult {
   let cur = HkCursor::new(blob)
   let ktype = cur.get_cstring()
@@ -253,6 +284,39 @@ pub fn HostKey::from_blob(blob : FixedArray[Byte]) -> ParseResult {
           None
         } else {
           Some(RsaKey(e, n))
+        }
+      }
+    }
+    "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" => {
+      // ssh_ecdsa_deserialize_public(ssh-ecdsa.c):
+      //   get_cstring(curve) → nid 与 ktype 不符 → SSH_ERR_EC_CURVE_MISMATCH
+      //   get_eckey(Q)     → 长度/格式由 get_ec 拒
+      //   validate_public  → 不在曲线上/越界 → SSH_ERR_KEY_INVALID_EC_VALUE
+      let curve = cur.get_cstring()
+      if cur.err is Some(_) {
+        None
+      } else {
+        let want_name = if ktype == "ecdsa-sha2-nistp256" {
+          "nistp256"
+        } else {
+          "nistp384"
+        }
+        if curve != want_name {
+          cur.fail(EcCurveMismatch)
+          None
+        } else {
+          let qb = cur.get_string()
+          if cur.err is Some(_) {
+            None
+          } else {
+            match ecdsa_canonical_point(want_name, qb) {
+              None => {
+                cur.fail(KeyInvalidEcValue)
+                None
+              }
+              Some(canon) => Some(EcdsaKey(ecdsa_curve_bits(want_name), canon))
+            }
+          }
         }
       }
     }

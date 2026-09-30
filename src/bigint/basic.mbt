@@ -387,8 +387,8 @@ pub fn BigNat::to_hex(self : BigNat) -> String {
 // Multi-bit shifts for mod
 // ============================================================================
 
-///| BigNat left shift by s bits (s < 32, 0 <= s <= 32)
-fn BigNat::shift_left_bits(a : BigNat, s : UInt) -> BigNat {
+///| BigNat left shift by s bits (0 <= s <= 32)
+pub fn BigNat::shift_left_bits(a : BigNat, s : UInt) -> BigNat {
   if s == 0U { return { limbs: a.limbs, len: a.len } }
   let s_int : Int = s.reinterpret_as_int()
   let out_len = a.len + 1
@@ -428,5 +428,33 @@ fn BigNat::shift_right_1(a : BigNat) -> BigNat {
     new_len = new_len - 1
   }
   if new_len == 0 { new_len = 1 }
+  { limbs: out, len: new_len }
+}
+///| BigNat right shift by an arbitrary bit count.
+///   Used by RFC 6979 bits2int (which truncates a hash to the group order size).
+pub fn BigNat::shift_right_bits(self : BigNat, s : Int) -> BigNat {
+  if s <= 0 { return { limbs: self.limbs, len: self.len } }
+  if self.len == 0 { return self }
+  let limb_shift = s / 32
+  let bit_shift = s % 32
+  let out_len = self.len - limb_shift
+  if out_len < 1 { return { limbs: self.limbs, len: 0 } }
+  let out : FixedArray[UInt] = FixedArray::make(out_len, 0U)
+  let mut i = 0
+  while i < out_len {
+    let hi_idx = i + limb_shift
+    let lo_val = if hi_idx < self.len { self.limbs[hi_idx] } else { 0U }
+    let hi_val = if (hi_idx + 1) < self.len { self.limbs[hi_idx + 1] } else { 0U }
+    if bit_shift == 0 {
+      out[i] = lo_val
+    } else {
+      out[i] = (lo_val >> bit_shift) | (hi_val << (32 - bit_shift))
+    }
+    i = i + 1
+  }
+  let mut new_len = out_len
+  while new_len > 0 && out[new_len - 1] == 0U {
+    new_len = new_len - 1
+  }
   { limbs: out, len: new_len }
 }

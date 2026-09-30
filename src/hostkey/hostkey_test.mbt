@@ -60,6 +60,8 @@ fn hk_err_name(e : KeyError) -> String {
     RsaModulusTooShort => "RsaModulusTooShort"
     SignatureInvalid => "SignatureInvalid"
     InvalidArgument => "InvalidArgument"
+    EcCurveMismatch => "EcCurveMismatch"
+    KeyInvalidEcValue => "KeyInvalidEcValue"
     RsaVerifyUnavailable => "RsaVerifyUnavailable"
   }
 }
@@ -69,6 +71,11 @@ fn hk_parse_name(res : ParseResult) -> String {
   match res {
     Parsed(Ed25519Key(_)) => "Parsed(ed25519)"
     Parsed(RsaKey(_, _)) => "Parsed(rsa)"
+    Parsed(EcdsaKey(bits, _)) => if bits == 256 {
+      "Parsed(ecdsa-p256)"
+    } else {
+      "Parsed(ecdsa-p384)"
+    }
     Rejected(e) => hk_err_name(e)
   }
 }

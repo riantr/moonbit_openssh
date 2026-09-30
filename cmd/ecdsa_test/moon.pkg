@@ -1,0 +1,7 @@
+///| cmd/ecdsa_test -- Loop #30 ECDSA P-256/P-384 + RFC 6979 KAT
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/ecdsa",
+}
+
+pkgtype(kind: "executable")
