@@ -1,0 +1,7 @@
+///| cmd/rsa2048_test -- 2048-bit RSA host key verify KAT
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/rsa",
+}
+
+pkgtype(kind: "executable")
