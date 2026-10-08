@@ -172,7 +172,13 @@ const BASELINE = {
   kexdh_test: 'afbca72be34dfba2',
   rsa_test: '7382ee95fe7d6677',
   rsa2048_test: 'dffb73d5452ae5e6',
-  ecdsa_test: '0e3ec3f7e954bd98',
+  // Moved in Loop #34 (0e3ec3f7e954bd98 -> d78cd820e9ea2317). The ECDSA
+  // signature blob gained the outer `string` wrapper it should always have had
+  // (ssh-ecdsa.c:431-432), and cmd/ecdsa_test's build_sig was corrected to
+  // construct its negative cases in the same layout -- without that second
+  // half every "must be rejected" case would have kept passing for the wrong
+  // reason, which is worse than a red suite.
+  ecdsa_test: 'd78cd820e9ea2317',
 };
 const TARGETS = ['native', 'js', 'wasm', 'wasm-gc'];
 const MODES = ['debug', 'release'];

@@ -78,6 +78,25 @@ Both directories coexist. Use `verify_c/` for the broader per-module harness
 stream), and use `triple_check/<module>/` when you want a single, self-
 contained, three-language byte-exact comparison.
 
+Above those sit the per-loop gates, which are what "done" means for a loop:
+
+```
+cmd/<name>_test/          ← KAT driver, runs on 4 target x 2 mode unless the
+                            dependency graph forces otherwise (say so in the
+                            package comment when it does)
+host/gen_*_vectors.py     ← KAT generator. Vectors come from Python, never from
+                            transcribing our own encoder, or the suite proves
+                            nothing.
+host/*_oracle.py          ← reference implementation; refuses to emit anything
+                            until it agrees with a second one (paramiko /
+                            cryptography / a published RFC vector)
+host/verify_loopNN.mjs    ← the gate: oracle agreement, KAT, real sshd, browser
+                            Worker, and the earlier loops re-run
+```
+
+A gate is worth more than its check count. The checks that keep earning their
+keep are the ones that can fail for a reason nobody had already ruled out.
+
 ### Adding triple-blind for a new module
 
 For module `<m>`:
@@ -313,4 +332,92 @@ opinion rather than the first — then drives the native client and the browser
 Worker against a real OpenSSH 8.0p1 sshd and requires `SERVICE_ACCEPTED` from
 both, with identical byte counts (509/753 for the handshake, 573/817 with the
 encrypted exchange).
+
+### Loop #34: RFC 4252 section 7 publickey authentication
+
+The client now proves who it is. A real OpenSSH 8.0p1 server looks the public
+key up in `authorized_keys`, verifies the RFC 6979 ECDSA signature over the
+RFC 4252 section 7 bytes, and answers `USERAUTH_SUCCESS` — first natively, then
+from inside a browser Web Worker with zero native code and zero dependencies.
+
+- **The ECDSA signature blob is two strings, not three fields:**
+
+      string  key_type          "ecdsa-sha2-nistp256"
+      string  signature_blob    (mpint r ‖ mpint s)
+
+  This is the bug this loop spent most of its time on, and it is worth
+  remembering because *every* local check passed while it was broken:
+  `cryptography` verified the `(r, s)` over the exact bytes we sent, our own
+  decoder round-tripped it, the KAT was generated from our own encoder and
+  matched it, and the RFC 6979 values matched the published ones. Only a real
+  server rejected it, with the least informative message in the protocol.
+
+  The reason it hides so well is that an mpint's wire form *is* "length prefix
+  + bytes". Drop the outer `string` and you still have `len ‖ r ‖ len ‖ s`, which
+  a permissive reader will happily consume — just with the first 4 bytes
+  swallowed as the length of `r`, and then no bytes left for `s`.
+
+  Authority, in order of usefulness:
+  - `ssh-ecdsa.c:431-432` — `sshbuf_get_cstring(b,&ktype) || sshbuf_froms(b,&sigbuf)`,
+    then two `sshbuf_get_bignum2` reads out of `sigbuf`.
+  - paramiko `ECDSAKey.sign_ssh_data` — `add_string(key_type)` then
+    `add_string(self._sigencode(r, s))`, and `_sigencode` is the two mpints.
+  - `src/hostkey/sig_verify.mbt:71-88`, which had it right all along because it
+    verifies real host keys against a real server (Loop #31).
+
+  **Lesson: when a blob layout is disputed, ask the implementation that has
+  already been proven against a live server in this same repo, before adding
+  another oracle.** `hostkey` was the answer and it was sitting one directory
+  away.
+- **`host/paramiko_blob_capture.py` is the tool that found it.** Patching
+  paramiko's `AuthHandler._get_session_blob` dumps the bytes it *actually*
+  signs. The first attempt patched `AuthHandler._finalize_pubkey_algorithm` and
+  rebuilt the blob by hand — that produced a `pkblob` of 19 bytes (the key type
+  only) and looked like a second, unrelated layout bug. A probe that reconstructs
+  the blob instead of intercepting it will mislead you exactly when you can least
+  afford it.
+- **`ECDHSA_ERROR` never says which part was wrong.** OpenSSH's monitor path
+  reports one line for both "that key is not in authorized_keys" and "that
+  signature does not verify". `AuthError::AuthRejected` therefore carries the
+  reason *plus* the signed bytes *plus* the signature, so a second implementation
+  can replay the exact failure. Every hypothesis in the investigation below was
+  ruled out by re-reading OpenSSH's C against our bytes — the only thing left was
+  to compare against a working client.
+- **The service name in `USERAUTH_REQUEST` is `ssh-connection`,** not
+  `ssh-userauth` (the latter belongs to the preceding `SERVICE_REQUEST`).
+  `auth2.c:302` takes it from the request itself, so the two are not
+  interchangeable in any way that a live server will point at.
+- **The public point Q is one SEC1 `string` (`0x04 ‖ X ‖ Y`),** not two
+  coordinate strings and not an mpint. Getting this wrong produces a valid-looking
+  key blob that no server will ever accept.
+- **`cmd/userauth_test` depends on `src/userauth`, not `src/sshclient`.**
+  `src/sshclient` reaches `src/tcp`, which is native-only, so a KAT built on it
+  could only ever run on one backend. The section 7 assembly is pure byte work
+  over `src/sshwire` and now runs on 4 target × 2 mode like everything else in
+  this repo. The two five-line helpers it duplicates (`ascii`, `concat`) are the
+  price of not dragging `@tcp` in — moving them into `src/sshwire` would touch
+  every byte-exact baseline from Loops #31–#33 to save eight lines.
+- **A negative wire test must build the blob in the layout you fixed.** When
+  `decode_sig_blob` gained the wrapper, `build_sig` in `cmd/ecdsa_test` still
+  produced three flat fields — so every "must be rejected" case kept passing, for
+  the wrong reason: it failed at the parse layer, not on the defect it names.
+  Silent, green, and worthless. `ecdsa_test`'s output hash moved with this fix
+  (`0e3ec3f7e954bd98` → `d78cd820e9ea2317`); the harness re-baselined both
+  `cmd/userauth_test`'s `mpint_pair_padded` parser and this one in the same commit.
+- **P-256 r and s need a `0x00` sign pad about half the time.** The vector set
+  covers 4 of 6 cases, and both sides must agree on the count — a suite that
+  never exercises the pad tests only the easy half. Judge minimality by the
+  rule, not by the first byte: a padded mpint *must* be followed by a byte with
+  the high bit set.
+- **A KAT generated from your own encoder cannot catch your own layout bug.**
+  `verify_loop34.mjs` therefore re-derives the signed blob from the request
+  actually put on the wire, exactly as `auth2-pubkey.c:207-213` rebuilds it, and
+  compares byte for byte. That check is local, needs no server, and fails with a
+  specific message — which is what turns the next occurrence of this bug class
+  from a two-day investigation into a red line.
+
+Run the gate with `node host/verify_loop34.mjs` (`--skip-regression` to skip the
+Loop #32/#33 harnesses and the crypto baselines). It re-derives
+`cmd/userauth_test/vectors.mbt` from `host/ecdsa_auth_oracle.py` and fails if the
+committed copy has drifted, so the KAT cannot be satisfied by hand-editing it.
 

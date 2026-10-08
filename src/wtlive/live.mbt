@@ -108,6 +108,9 @@ priv struct WtSessionState {
   recv : @bpacket.RecvCtx
   counters : WtWireCounters
   we_need : Int
+  /// 首次 KEX 的 H。publickey 认证要拿它当签名输入(RFC 4252 §7),
+  /// 必须是**完整**字节——`session_id_head` 只是给人看的十六进制摘要。
+  session_id : FixedArray[Byte]
   key_head : String
   session_id_head : String
 }
@@ -512,6 +515,7 @@ async fn wt_handshake_into(
     recv: r,
     counters,
     we_need,
+    session_id: keys.session_id(),
     key_head: hex_bytes_head(keys.enc_key_ctos(), 8) +
     "/" +
     hex_bytes_head(keys.mac_key_ctos(), 8),
@@ -595,40 +599,15 @@ pub async fn wt_live_session(
     None => return Failed(WtSessionError::NoServiceAccept)
     Some(v) => v
   }
-  let payload = @sshwire.write_ssh_string(@sshclient.ascii(WT_USERAUTH_SERVICE))
-  if !wt_send_plain_packet(
-      conn,
-      st.counters,
-      st.send,
-      @sshwire.SSH_MSG_SERVICE_REQUEST,
-      payload,
-    ) {
-    return Failed(WtSessionError::NoServiceAccept)
-  }
-  let mut tries = 0
-  let mut answer : FixedArray[Byte]? = None
-  while tries < 32 {
-    match wt_recv_plain_packet(conn, st.counters, st.recv) {
-      None => return Failed(WtSessionError::NoServiceAccept)
-      Some((t, pl)) => {
-        tries = tries + 1
-        if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
-          answer = Some(pl)
-          break
-        }
-      }
-    }
-  }
-  let accepted_body = match answer {
+  let (accepted_opt, err) = wt_request_userauth_service(conn, st)
+  let accepted = match accepted_opt {
     None => return Failed(WtSessionError::NoServiceAccept)
     Some(v) => v
   }
-  let accepted = match @sshclient.read_field(accepted_body, 0) {
-    None => return Failed(WtSessionError::UnexpectedService("malformed"))
-    Some((name, _)) => @sshclient.bytes_to_string(name)
-  }
-  if accepted != WT_USERAUTH_SERVICE {
-    return Failed(WtSessionError::UnexpectedService(accepted))
+  match err {
+    Some(WtSessionError::UnexpectedService(s)) =>
+      return Failed(WtSessionError::UnexpectedService(s))
+    _ => ()
   }
   ServiceAccepted({
     handshake,
@@ -639,6 +618,198 @@ pub async fn wt_live_session(
     session_id_head: st.session_id_head,
     sent_bytes: st.counters.sent,
     recv_bytes: st.counters.recv,
+  })
+}
+
+///|
+/// 浏览器侧的认证结果
+pub(all) enum WtAuthResult {
+  Authenticated(WtAuthReport)
+  Failed(WtAuthError)
+}
+
+///|
+/// 失败原因与 `src/sshclient` 的 `AuthError` 一一对应,只是传输层类型不同
+pub(all) enum WtAuthError {
+  HandshakeFailed(WtLiveError)
+  NoServiceAccept
+  UnexpectedService(String)
+  SignFailed
+  NoAuthReply
+  /// 原因 + 实际签名的字节 + 签名 blob 的十六进制。
+  ///
+  /// 服务端把「公钥不在 authorized_keys 里」和「签名算错了」都报成同一句
+  /// FAILURE,本地不留证据就只能靠猜。Loop #34 定位那个
+  /// `encode_sig_blob` 少包一层 string 的缺陷,靠的就是这三样。
+  AuthRejected(String, String, String)
+}
+
+///|
+pub(all) struct WtAuthReport {
+  user : String
+  method : String
+  key_type : String
+  signed_blob_hex : String
+  sig_blob_hex : String
+  request_hex : String
+  session : WtSessionReport
+}
+
+///|
+/// 请求 ssh-userauth 服务并等到 SERVICE_ACCEPT
+///
+/// 抽出来是因为 `wt_live_session` 和 `wt_live_auth` 要走同样的两步;
+/// 留在调用点各写一份的话,任何一处改动都只覆盖一半路径。
+async fn wt_request_userauth_service(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+) -> (String?, WtSessionError?) {
+  let payload = @sshwire.write_ssh_string(
+    @sshclient.ascii(WT_USERAUTH_SERVICE),
+  )
+  if !wt_send_plain_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_SERVICE_REQUEST,
+      payload,
+    ) {
+    return (None, Some(WtSessionError::NoServiceAccept))
+  }
+  let mut tries = 0
+  let mut answer : FixedArray[Byte]? = None
+  while tries < 32 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      None => return (None, Some(WtSessionError::NoServiceAccept))
+      Some((t, pl)) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
+          answer = Some(pl)
+          break
+        }
+      }
+    }
+  }
+  let accepted_body = match answer {
+    None => return (None, Some(WtSessionError::NoServiceAccept))
+    Some(v) => v
+  }
+  let accepted = match @sshclient.read_field(accepted_body, 0) {
+    None => return (None, Some(WtSessionError::UnexpectedService("malformed")))
+    Some((name, _)) => @sshclient.bytes_to_string(name)
+  }
+  if accepted != WT_USERAUTH_SERVICE {
+    return (None, Some(WtSessionError::UnexpectedService(accepted)))
+  }
+  (Some(accepted), None)
+}
+
+///|
+/// 握手 → 请求 ssh-userauth → publickey 认证,直到 SSH_MSG_USERAUTH_SUCCESS
+///
+/// 组包本身来自 `src/sshclient/userauth.mbt`(浏览器与原生共用),这里只负责
+/// 把字节搬上 `src/wt` 的传输层。两条路径发出的签名输入必须逐字节相同——
+/// 服务端只有一把 session_id,任何一边漂移都表现为一句 FAILURE。
+pub async fn wt_live_auth(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+) -> WtAuthResult {
+  let box = { state: None, }
+  let res = wt_handshake_into(conn, x, box)
+  let handshake = match res {
+    Established(rep) => rep
+    Failed(e) => return Failed(WtAuthError::HandshakeFailed(e))
+  }
+  let st = match box.state {
+    None => return Failed(WtAuthError::NoServiceAccept)
+    Some(v) => v
+  }
+  let (accepted_opt, err) = wt_request_userauth_service(conn, st)
+  let accepted = match accepted_opt {
+    None => return Failed(WtAuthError::NoServiceAccept)
+    Some(v) => v
+  }
+  match err {
+    Some(WtSessionError::UnexpectedService(s)) =>
+      return Failed(WtAuthError::UnexpectedService(s))
+    _ => ()
+  }
+  // 字节计数在认证往返之后才最终确定,所以报告在这里才构造——早建一次再改字段
+  // 既没地方改(WtSessionReport 的字段是 pub(all),不可变),也没必要。
+  let curve = @ecdsa.Curve::p256()
+  let (pk_blob, sig_blob, payload) = match @userauth.userauth_publickey_signed_request(
+    curve,
+    d,
+    st.session_id,
+    user,
+    @userauth.AUTH_SERVICE_CONNECTION,
+  ) {
+    None => return Failed(WtAuthError::SignFailed)
+    Some(v) => v
+  }
+  let to_sign = @userauth.userauth_signed_blob(
+    st.session_id,
+    user,
+    @userauth.AUTH_SERVICE_CONNECTION,
+    curve.ssh_key_type(),
+    pk_blob,
+  )
+  if !wt_send_plain_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_USERAUTH_REQUEST,
+      payload,
+    ) {
+    return Failed(WtAuthError::NoAuthReply)
+  }
+  let mut tries = 0
+  let mut verdict : (Byte, FixedArray[Byte])? = None
+  while tries < 32 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      None => return Failed(WtAuthError::NoAuthReply)
+      Some((t, pl)) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS ||
+          t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+          verdict = Some((t, pl))
+          break
+        }
+      }
+    }
+  }
+  let (msg_type, body) = match verdict {
+    None => return Failed(WtAuthError::NoAuthReply)
+    Some(v) => v
+  }
+  if msg_type == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+    return Failed(
+      WtAuthError::AuthRejected(
+        @sshclient.userauth_failure_reason(body),
+        @ecdsa.bytes_to_hex(to_sign),
+        @ecdsa.bytes_to_hex(sig_blob),
+      ),
+    )
+  }
+  Authenticated({
+    user,
+    method: @userauth.AUTH_METHOD_PUBLICKEY,
+    key_type: curve.ssh_key_type(),
+    signed_blob_hex: @ecdsa.bytes_to_hex(to_sign),
+    sig_blob_hex: @ecdsa.bytes_to_hex(sig_blob),
+    request_hex: @ecdsa.bytes_to_hex(payload),
+    session: {
+      handshake,
+      service_name: WT_USERAUTH_SERVICE,
+      accepted_service: accepted,
+      we_need: st.we_need,
+      key_head: st.key_head,
+      session_id_head: st.session_id_head,
+      sent_bytes: st.counters.sent,
+      recv_bytes: st.counters.recv,
+    },
   })
 }
 

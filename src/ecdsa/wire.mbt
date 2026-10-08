@@ -249,10 +249,32 @@ pub fn decode_pubkey_blob(blob : FixedArray[Byte]) -> (Curve, Point)? {
 
 ///|
 /// Full SSH ECDSA signature blob.
+///
+/// 外层是**两个** string,不是三个字段:
+///
+///     string  key_type            ("ecdsa-sha2-nistp256")
+///     string  signature_blob      (mpint r ‖ mpint s)
+///
+/// 这层包装很容易写漏,因为 mpint 的 wire 形式本身就是"长度前缀 + 字节",
+/// 少包一层之后前 4 个字节会被服务端当成 r 的长度读走——r 读出来是一坨巨大的
+/// 数字,然后读 s 时缓冲已空,失败点被报成一个笼统的 "signature unverified",
+/// 和「公钥不对」「数学错了」完全分不开。
+///
+/// 权威依据:
+///   * ssh-ecdsa.c:431-432 `sshbuf_get_cstring(b,&ktype) || sshbuf_froms(b,&sigbuf)`,
+///     随后从 sigbuf 里连读两个 `sshbuf_get_bignum2`。
+///   * paramiko `ECDSAKey.sign_ssh_data`:`add_string(key_format_identifier)`
+///     之后 `add_string(self._sigencode(r, s))`,而 `_sigencode` 是
+///     `add_mpint(r) ‖ add_mpint(s)` —— 外面确实还有一层。
+///   * 本仓 src/hostkey/sig_verify.mbt:71-88(验主机签名,Loop #31 已对真
+///     sshd 验证过)走的就是 `get_cstring(alg) + get_string(inner)` 的顺序。
+///     那个文件是对的;这里的编码器早于它且没跟上,本轮才暴露。
 pub fn encode_sig_blob(c : Curve, sig : Signature) -> FixedArray[Byte] {
   cat(
-    cat(put_string(str_bytes(c.ssh_name())), put_string(mpint_body(sig.r))),
-    put_string(mpint_body(sig.s)),
+    put_string(str_bytes(c.ssh_name())),
+    put_string(
+      cat(put_string(mpint_body(sig.r)), put_string(mpint_body(sig.s))),
+    ),
   )
 }
 
@@ -295,6 +317,11 @@ pub fn decode_ecdsa_int(
 
 ///|
 /// Parse an SSH ECDSA signature blob for the given curve.
+///
+/// 与 `encode_sig_blob` 互为镜像:外层两个 string,第二个 string 里装
+/// `mpint r ‖ mpint s`。少一层包装时,第二个 string 会被整段当成 r,
+/// 接着读 s 必然越界——所以这里对「内层必须恰好读完」和「外层不许有残余」
+/// 都要显式判掉。
 pub fn decode_sig_blob(c : Curve, blob : FixedArray[Byte]) -> Signature? {
   let fs = Curve::field_bytes(c)
   let s1 = read_string(blob, 0)
@@ -304,20 +331,32 @@ pub fn decode_sig_blob(c : Curve, blob : FixedArray[Byte]) -> Signature? {
       if as_string(alg) != c.ssh_name() {
         return None
       }
-      let s2 = read_string(blob, o1)
-      match s2 {
+      let inner = read_string(blob, o1)
+      match inner {
         None => None
-        Some((rb, o2)) => {
-          let s3 = read_string(blob, o2)
-          match s3 {
+        Some((body, o2)) => {
+          if o2 != blob.length() {
+            return None
+          }
+          let rb = read_string(body, 0)
+          match rb {
             None => None
-            Some((sb, o3)) => {
-              if o3 != blob.length() {
-                return None
-              }
-              match (decode_ecdsa_int(rb, fs), decode_ecdsa_int(sb, fs)) {
-                (Some(r), Some(s)) => Some(Signature::new(r, s))
-                _ => None
+            Some((rbytes, ro)) => {
+              let sb = read_string(body, ro)
+              match sb {
+                None => None
+                Some((sbytes, so)) => {
+                  if so != body.length() {
+                    return None
+                  }
+                  match (
+                    decode_ecdsa_int(rbytes, fs),
+                    decode_ecdsa_int(sbytes, fs),
+                  ) {
+                    (Some(r), Some(s)) => Some(Signature::new(r, s))
+                    _ => None
+                  }
+                }
               }
             }
           }

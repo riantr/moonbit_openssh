@@ -1,0 +1,12 @@
+///| cmd/userauth_test -- Loop #34 RFC 4252 section 7 publickey auth byte-exact
+///|
+///| Depends on `src/userauth` rather than `src/sshclient`: the latter reaches
+/// `src/tcp`, which is native-only, and a KAT that can only run on one backend
+/// is a quarter of the coverage the rest of this repo insists on.
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/userauth",
+}
+
+pkgtype(kind: "executable")

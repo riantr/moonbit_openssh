@@ -126,7 +126,11 @@ const BASELINE = {
   kexdh_test: 'afbca72be34dfba2',
   rsa_test: '7382ee95fe7d6677',
   rsa2048_test: 'dffb73d5452ae5e6',
-  ecdsa_test: '0e3ec3f7e954bd98',
+  // Moved in Loop #34 (0e3ec3f7e954bd98 -> d78cd820e9ea2317): the ECDSA
+  // signature blob gained the outer `string` wrapper, and cmd/ecdsa_test's
+  // build_sig was corrected to build its negative cases in that same layout
+  // so they keep failing for the reason they name.
+  ecdsa_test: 'd78cd820e9ea2317',
 };
 const TARGETS = ['native', 'js', 'wasm', 'wasm-gc'];
 const MODES = ['debug', 'release'];

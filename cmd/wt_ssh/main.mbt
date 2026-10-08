@@ -78,6 +78,48 @@ fn session_error_name(e : @wtlive.WtSessionError) -> String {
 }
 
 ///|
+/// Loop #34 的测试私钥:即 RFC 6979 A.2.5 公布的 NIST P-256 key。
+///
+/// 与 cmd/ssh_live 用的是同一把,这样浏览器路径和原生路径签出来的公钥
+/// 才能和同一份 authorized_keys 对上——两边用不同的私钥就没有可比性。
+/// 这把私钥印在 RFC 原文里,**绝不能**用在真实主机上。
+fn test_auth_key() -> @bigint.BigNat {
+  let bytes : FixedArray[Byte] = FixedArray::from_array([
+    0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67,
+    0xB1, 0xD6, 0x93, 0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A,
+    0x62, 0x2B, 0x12, 0x0F, 0x67, 0x21,
+  ])
+  @bigint.BigNat::from_bytes_be(bytes)
+}
+
+///|
+/// AuthRejected 携带的三样证据原样打印,理由字段不在这一层被拼进字符串里,
+/// 它得能被单独解析。
+fn print_auth_rejection(e : @wtlive.WtAuthError) -> Unit {
+  match e {
+    @wtlive.AuthRejected(r, sb, sg) => {
+      println("result: USERAUTH_FAILURE")
+      println("reason: " + r)
+      println("signed_blob: " + sb)
+      println("sig_blob: " + sg)
+    }
+    _ => ()
+  }
+}
+
+///|
+fn auth_error_name(e : @wtlive.WtAuthError) -> String {
+  match e {
+    @wtlive.HandshakeFailed(h) => "handshake:" + error_name(h)
+    @wtlive.NoServiceAccept => "NoServiceAccept"
+    @wtlive.UnexpectedService(s) => "UnexpectedService:" + s
+    @wtlive.SignFailed => "SignFailed"
+    @wtlive.NoAuthReply => "NoAuthReply"
+    @wtlive.AuthRejected(_, _, _) => "AuthRejected"
+  }
+}
+
+///|
 
 ///| `async fn main` because awaiting is itself an async operation, and MoonBit
 
@@ -88,6 +130,50 @@ async fn main {
   // The Worker passes `session: 1` for the Loop #33 run. A config lookup
   // rather than argv, because a browser has no argv.
   let want_session = cfg("session") == "1" || cfg("session") == "true"
+  // Loop #34: `auth: 1` goes all the way to SSH_MSG_USERAUTH_SUCCESS.
+  let want_auth = cfg("auth") == "1" || cfg("auth") == "true"
+  if want_auth {
+    let user = cfg("user")
+    let uname = if user == "" { "hp" } else { user }
+    println("=== Loop #34 publickey auth in a browser Worker ===")
+    println("transport_url: " + url)
+    println("user: " + uname)
+    let aconn = @wt.WtConn::connect(url) catch {
+      _ => {
+        println("result: FAILED")
+        println("error: ConnectFailed")
+        wt_finish(false, "connect failed")
+        return
+      }
+    }
+    println("transport: connected")
+    match @wtlive.wt_live_auth(aconn, fixed_x(), uname, test_auth_key()) {
+      @wtlive.Authenticated(r) => {
+        println("result: USERAUTH_SUCCESS")
+        println("user: " + r.user)
+        println("method: " + r.method)
+        println("key_type: " + r.key_type)
+        println("session_id_head: " + r.session.session_id_head)
+        println("signed_blob: " + r.signed_blob_hex)
+        println("sig_blob: " + r.sig_blob_hex)
+        println("request: " + r.request_hex)
+        println("handshake_sent_bytes: " + r.session.handshake.sent_bytes.to_string())
+        println("handshake_recv_bytes: " + r.session.handshake.recv_bytes.to_string())
+        println("total_sent_bytes: " + r.session.sent_bytes.to_string())
+        println("total_recv_bytes: " + r.session.recv_bytes.to_string())
+      }
+      @wtlive.Failed(e) => {
+        print_auth_rejection(e)
+        if auth_error_name(e) != "AuthRejected" {
+          println("result: FAILED")
+          println("error: " + auth_error_name(e))
+        }
+      }
+    }
+    aconn.close()
+    wt_finish(true, "done")
+    return
+  }
   if want_session {
     println("=== Loop #33 encrypted session in a browser Worker ===")
     println("transport_url: " + url)

@@ -57,6 +57,47 @@ fn session_error_name(e : @sshclient.SessionError) -> String {
 }
 
 ///|
+/// AuthRejected 携带的证据(原因 + 我们签的那串字节 + 签名)由调用方直接打印,
+/// 这里只给一个短标签。理由字段在这一层已经丢了,细节不该藏在一个拼接出来的
+/// 字符串里——它得能被单独解析。
+fn auth_error_name(e : @sshclient.AuthError) -> String {
+  match e {
+    @sshclient.Transport(s) => "transport:" + session_error_name(s)
+    @sshclient.SignFailed => "SignFailed"
+    @sshclient.NoAuthReply => "NoAuthReply"
+    @sshclient.AuthRejected(_, _, _) => "AuthRejected"
+  }
+}
+
+///|
+fn print_auth_rejection(e : @sshclient.AuthError) -> Unit {
+  match e {
+    @sshclient.AuthRejected(r, sb, sg) => {
+      println("result: USERAUTH_FAILURE")
+      println("reason: " + r)
+      println("signed_blob: " + sb)
+      println("sig_blob: " + sg)
+    }
+    _ => ()
+  }
+}
+
+///|
+/// Loop #34 的测试私钥:即 RFC 6979 A.2.5 公布的 NIST P-256 key。
+///
+/// 这把私钥出现在 RFC 原文里,只可能用于本 loop 那台一次性 sshd 的
+/// authorized_keys。**绝不能**用在真实主机上——公开的私钥等于没有私钥。
+/// 生产客户端必须从 CSPRNG 取 d,并且用完即弃。
+fn test_auth_key() -> @bigint.BigNat {
+  let bytes : FixedArray[Byte] = FixedArray::from_array([
+    0xC9, 0xAF, 0xA9, 0xD8, 0x45, 0xBA, 0x75, 0x16, 0x6B, 0x5C, 0x21, 0x57, 0x67,
+    0xB1, 0xD6, 0x93, 0x4E, 0x50, 0xC3, 0xDB, 0x36, 0xE8, 0x9B, 0x12, 0x7B, 0x8A,
+    0x62, 0x2B, 0x12, 0x0F, 0x67, 0x21,
+  ])
+  @bigint.BigNat::from_bytes_be(bytes)
+}
+
+///|
 /// Decimal string to Int, or `fallback` if it is not a bare 1-5 digit number.
 /// Kept local rather than reaching for a parser from the standard library,
 /// whose surface differs across MoonBit releases and this driver only ever
@@ -121,9 +162,97 @@ fn wants_session(argv : Array[String]) -> Bool {
 }
 
 ///|
+/// Loop #34 模式?(`--auth`)
+///
+/// 用户名来自 `--user <name>`。不猜:Windows 的 sshd 用的是本机账号名,
+/// 而 MoonBit 没有一个跨后端可靠的 USERNAME 读取口(会拖进 `__moonbit_fs_unstable`),
+/// 所以由调用方(verify_loop34.mjs)从 `process.env.USERNAME` 传进来。
+/// 没传就用一个显眼的占位名,让它失败得清楚而不是连错账号。
+fn auth_mode(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--auth" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+fn find_user(argv : Array[String]) -> String {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--user" && i + 1 < argv.length() {
+      return argv[i + 1]
+    }
+    i = i + 1
+  }
+  "<no-user-given>"
+}
+
+///|
 fn main {
   let argv = @env.args()
   let port = find_port(argv)
+  if auth_mode(argv) {
+    let user = find_user(argv)
+    println("=== Loop #34 publickey auth vs real sshd ===")
+    println("port: " + port.to_string())
+    println("user: " + user)
+    match @tcp.TcpConn::connect("127.0.0.1", port) {
+      None => {
+        println("result: CONNECT_FAILED")
+        return
+      }
+      Some(conn) => {
+        let outcome = @sshclient.live_auth(
+          conn,
+          fixed_x(),
+          user,
+          test_auth_key(),
+        )
+        conn.close()
+        match outcome {
+          @sshclient.Authenticated(r) => {
+            println("result: USERAUTH_SUCCESS")
+            println("user: " + r.user)
+            println("method: " + r.method)
+            println("key_type: " + r.key_type)
+            println("signed_blob: " + r.signed_blob_hex)
+            println("sig_blob: " + r.sig_blob_hex)
+            // 请求载荷也一并带出来:验证脚本要能**独立地**从它重建出
+            // signed_blob 并逐字节比对——那正是服务端做的事。用自己签的
+            // 那串字节证明"我签的和请求里的一样"是没有意义的。
+            println("request: " + r.request_hex)
+            println(
+              "session_id_head: " + r.session.session_id_head,
+            )
+            println(
+              "handshake_sent_bytes: " +
+              r.session.handshake.sent_bytes.to_string(),
+            )
+            println(
+              "handshake_recv_bytes: " +
+              r.session.handshake.recv_bytes.to_string(),
+            )
+            println(
+              "total_sent_bytes: " + r.session.sent_bytes.to_string(),
+            )
+            println(
+              "total_recv_bytes: " + r.session.recv_bytes.to_string(),
+            )
+          }
+          @sshclient.Failed(e) => {
+            println("result: FAILED")
+            print_auth_rejection(e)
+            println("error: " + auth_error_name(e))
+          }
+        }
+      }
+    }
+    return
+  }
+
   if wants_session(argv) {
     println("=== Loop #33 encrypted session vs real sshd ===")
     println("port: " + port.to_string())

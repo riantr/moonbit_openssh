@@ -9,6 +9,8 @@ import {
   "openssh/openssh_moonbit/src/kexc25519",
   "openssh/openssh_moonbit/src/bpacket",
   "openssh/openssh_moonbit/src/hostkey",
+  "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/userauth",
 }
 
 ///| Loop #32: the SSH transport handshake over a browser transport.

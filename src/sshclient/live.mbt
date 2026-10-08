@@ -362,6 +362,10 @@ priv struct SessionState {
   recv : @bpacket.RecvCtx
   counters : WireCounters
   we_need : Int
+  /// 首次 KEX 的 H。publickey 认证要拿它当签名的输入(RFC 4252 §7),
+  /// 所以必须是**完整**字节——之前只留了一个 16 字节的十六进制摘要给诊断,
+  /// 那是打印给人看的,不是拿来签名的。
+  session_id : FixedArray[Byte]
   /// 'A'..'F' 的摘要,便于诊断时与独立实现对拍(不打印原始密钥)
   key_head : String
   session_id_head : String
@@ -639,6 +643,7 @@ fn handshake_to_session(
       recv: r,
       counters,
       we_need,
+      session_id: keys.session_id(),
       key_head: hex_bytes_head(keys.enc_key_ctos(), 8) +
       "/" +
       hex_bytes_head(keys.mac_key_ctos(), 8),
@@ -711,8 +716,39 @@ pub fn live_session(conn : @tcp.TcpConn, x : @bigint.BigNat) -> SessionResult {
     None => return Failed(SessionError::NoServiceAccept)
     Some(v) => v
   }
-  let service_bytes = ascii(USERAUTH_SERVICE)
-  let payload = @sshwire.write_ssh_string(service_bytes)
+  match request_userauth_service(conn, st) {
+    (Some(accepted), None) =>
+      ServiceAccepted({
+        handshake,
+        service_name: USERAUTH_SERVICE,
+        accepted_service: accepted,
+        we_need: st.we_need,
+        key_head: st.key_head,
+        session_id_head: st.session_id_head,
+        sent_bytes: st.counters.sent,
+        recv_bytes: st.counters.recv,
+      })
+    (_, Some(err)) => Failed(err)
+    // 成功时必定带上服务名,这里是类型系统看不到的不变量;落到这里说明
+    // request_userauth_service 的两个返回值被写坏了,而不是网络出错。
+    (None, None) => Failed(SessionError::NoServiceAccept)
+  }
+}
+
+///|
+/// 请求 `ssh-userauth` 服务并等 SERVICE_ACCEPT
+///
+/// 返回 `(接受的服务名, 错误)`——成功时错误为 None。这样调用方既能拿到
+/// 服务名(Loop #33 要报告它)又能区分失败原因,不必把错误编码进字符串。
+///
+/// 抽出来是因为 Loop #34 的认证流程要再走一遍同样的两步。把这段留在
+/// `live_session` 里的结果是认证路径要么复制它、要么改回去——前者会漂移,
+/// 后者会动到 Loop #33 已经验证过的字节数。
+fn request_userauth_service(
+  conn : @tcp.TcpConn,
+  st : SessionState,
+) -> (String?, SessionError?) {
+  let payload = @sshwire.write_ssh_string(ascii(USERAUTH_SERVICE))
   if !send_packet(
       conn,
       st.counters,
@@ -720,13 +756,13 @@ pub fn live_session(conn : @tcp.TcpConn, x : @bigint.BigNat) -> SessionResult {
       @sshwire.SSH_MSG_SERVICE_REQUEST,
       payload,
     ) {
-    return Failed(SessionError::NoServiceAccept)
+    return (None, Some(SessionError::NoServiceAccept))
   }
   let mut tries = 0
   let mut answer : FixedArray[Byte]? = None
   while tries < 32 {
     match recv_packet(conn, st.counters, st.recv) {
-      None => return Failed(SessionError::NoServiceAccept)
+      None => return (None, Some(SessionError::NoServiceAccept))
       Some((t, pl)) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
@@ -734,35 +770,197 @@ pub fn live_session(conn : @tcp.TcpConn, x : @bigint.BigNat) -> SessionResult {
           break
         }
         if t == KX_MSG_KEX_FAILURE {
-          return Failed(SessionError::UnexpectedService("kex_failure"))
+          return (
+            None,
+            Some(SessionError::UnexpectedService("kex_failure")),
+          )
         }
       }
     }
   }
   let accepted_body = match answer {
-    None => return Failed(SessionError::NoServiceAccept)
+    None => return (None, Some(SessionError::NoServiceAccept))
     Some(v) => v
   }
   // body 是一个 string,内容应与我们请求的服务名逐字节相同
   let accepted = match read_field(accepted_body, 0) {
-    None => return Failed(SessionError::UnexpectedService("malformed"))
+    None => return (None, Some(SessionError::UnexpectedService("malformed")))
     Some((name, _)) => bytes_to_string(name)
   }
   if accepted != USERAUTH_SERVICE {
-    return Failed(SessionError::UnexpectedService(accepted))
+    return (None, Some(SessionError::UnexpectedService(accepted)))
   }
-  ServiceAccepted({
-    handshake,
-    service_name: USERAUTH_SERVICE,
-    accepted_service: accepted,
-    we_need: st.we_need,
-    key_head: st.key_head,
-    session_id_head: st.session_id_head,
-    sent_bytes: st.counters.sent,
-    recv_bytes: st.counters.recv,
-  })
+  (Some(accepted), None)
 }
 
 ///|
 /// SSH_MSG_KEX_FAILURE (RFC 4253 section 7)
 pub const KX_MSG_KEX_FAILURE : Byte = b'\x14'
+
+// ---------------------------------------------------------------------------
+// Loop #34: RFC 4252 publickey authentication
+// ---------------------------------------------------------------------------
+
+///|
+/// 认证结果
+pub(all) enum AuthResult {
+  /// 服务端回了 SSH_MSG_USERAUTH_SUCCESS
+  Authenticated(AuthReport)
+  Failed(AuthError)
+}
+
+///|
+pub(all) enum AuthError {
+  /// 传输握手/服务协商阶段就没走通,认证还没开始
+  Transport(SessionError)
+  /// USERAUTH_REQUEST 没能构造出来(私钥越界,或 RFC 6979 的 k 退化)
+  SignFailed
+  /// 请求发出去了,但既没有 SUCCESS 也没有 FAILURE
+  NoAuthReply
+  /// 服务端明确拒绝了。带上它给的原因,以及我们**实际签名的那串字节**和
+  /// 签名的十六进制。
+  ///
+  /// 之所以把这两样带出来:在服务端看来「公钥不在 authorized_keys 里」和
+  /// 「签名算错了」是完全相同的 FAILURE,不留证据就只能靠猜。带出来之后,
+  /// 第二实现可以拿同一段 session_id 重算一遍并指出到底差在哪。
+  AuthRejected(String, String, String)
+}
+
+///|
+pub(all) struct AuthReport {
+  user : String
+  method : String
+  key_type : String
+  /// 签名输入与签名的十六进制。带出来是为了让第二实现能逐字节复核:
+  /// 认证失败在服务端看来只有一种(FAILURE),本地若不留证据就只能靠猜。
+  signed_blob_hex : String
+  sig_blob_hex : String
+  request_hex : String
+  session : SessionReport
+}
+
+///|
+/// 握手 → 请求 ssh-userauth 服务 → publickey 认证,直到 SSH_MSG_USERAUTH_SUCCESS
+///
+/// 这是 Loop #34 的终点。走到 USERAUTH_SUCCESS 意味着服务端做了三件事:
+/// 解开并校验了我们 Loop #33 的加密包、用 authorized_keys 里那把公钥验了我们
+/// 的 RFC 6979 签名、然后接受了身份。三者里任何一环错,服务端都只会回一句
+/// FAILURE ——所以这一步同时是对整条链路的端到端验证。
+///
+/// 只走 publickey:它是 SSH 里唯一不需要把**秘密**交给服务端的认证方式,
+/// 对「浏览器零依赖」的客户端来说这是唯一说得通的选择。password 认证会把
+/// 口令的存储、清洗与比较拖进客户端,而 Loop #33 刚把 userauth 服务协商好,
+/// 这里没有任何理由去碰它。
+pub fn live_auth(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+) -> AuthResult {
+  let (res, state) = handshake_to_session(conn, x)
+  let handshake = match res {
+    Established(rep) => rep
+    Failed(e) => return Failed(AuthError::Transport(SessionError::HandshakeFailed(e)))
+  }
+  let st = match state {
+    None => return Failed(AuthError::Transport(SessionError::NoServiceAccept))
+    Some(v) => v
+  }
+  let (accepted_opt, err) = request_userauth_service(conn, st)
+  match err {
+    Some(e) => return Failed(AuthError::Transport(e))
+    None => ()
+  }
+  let accepted = match accepted_opt {
+    None => return Failed(AuthError::Transport(SessionError::NoServiceAccept))
+    Some(a) => a
+  }
+  let curve = @ecdsa.Curve::p256()
+  let (pk_blob, sig_blob, payload) = match @userauth.userauth_publickey_signed_request(
+      curve,
+      d,
+      st.session_id,
+      user,
+      @userauth.AUTH_SERVICE_CONNECTION,
+    ) {
+    None => return Failed(AuthError::SignFailed)
+    Some(v) => v
+  }
+  let to_sign = @userauth.userauth_signed_blob(
+    st.session_id,
+    user,
+    @userauth.AUTH_SERVICE_CONNECTION,
+    curve.ssh_key_type(),
+    pk_blob,
+  )
+  if !send_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_USERAUTH_REQUEST,
+      payload,
+    ) {
+    return Failed(AuthError::NoAuthReply)
+  }
+  let mut tries = 0
+  let mut verdict : (Byte, FixedArray[Byte])? = None
+  while tries < 32 {
+    match recv_packet(conn, st.counters, st.recv) {
+      None => return Failed(AuthError::NoAuthReply)
+      Some((t, pl)) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS ||
+          t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+          verdict = Some((t, pl))
+          break
+        }
+      }
+    }
+  }
+  let (msg_type, body) = match verdict {
+    None => return Failed(AuthError::NoAuthReply)
+    Some(v) => v
+  }
+  if msg_type == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+    return Failed(
+      AuthError::AuthRejected(
+        userauth_failure_reason(body),
+        @ecdsa.bytes_to_hex(to_sign),
+        @ecdsa.bytes_to_hex(sig_blob),
+      ),
+    )
+  }
+  Authenticated({
+    user,
+    method: @userauth.AUTH_METHOD_PUBLICKEY,
+    key_type: curve.ssh_key_type(),
+    signed_blob_hex: @ecdsa.bytes_to_hex(to_sign),
+    sig_blob_hex: @ecdsa.bytes_to_hex(sig_blob),
+    request_hex: @ecdsa.bytes_to_hex(payload),
+    session: {
+      handshake,
+      service_name: USERAUTH_SERVICE,
+      accepted_service: accepted,
+      we_need: st.we_need,
+      key_head: st.key_head,
+      session_id_head: st.session_id_head,
+      sent_bytes: st.counters.sent,
+      recv_bytes: st.counters.recv,
+    },
+  })
+}
+
+///|
+/// USERAUTH_FAILURE 的可读原因(RFC 4252 §5.1)
+///
+/// body 是一串 `name-list` + boolean + `name-list` + `name-list`,其中第一个
+/// 是服务端的说明文字。取不出来就返回占位串——宁可说"不知道"也不要编一个。
+/// 从 USERAUTH_FAILURE 的 body 里取出服务端给的 method name-list。
+///
+/// 浏览器路径(`src/wtlive`)要打印同一条信息,所以是 `pub`。
+pub fn userauth_failure_reason(body : FixedArray[Byte]) -> String {
+  match read_field(body, 0) {
+    None => "unknown"
+    Some((name, _)) => bytes_to_string(name)
+  }
+}

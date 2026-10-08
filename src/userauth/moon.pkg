@@ -1,0 +1,20 @@
+import {
+  "openssh/openssh_moonbit/src/sshwire",
+  "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/bigint",
+}
+
+///| Loop #34: the RFC 4252 section 7 publickey authentication request.
+///
+/// It is a separate package rather than another file in `src/sshclient` for
+/// one reason: `src/sshclient` pulls in `src/tcp`, so anything depending on it
+/// is native-only. This file is pure byte assembly over `src/sshwire`, and
+/// keeping it separate is what lets `cmd/userauth_test` cover the signing
+/// input on all four backends instead of just the one that has a socket.
+///
+/// The cost is two five-line helpers below. They duplicate `sshclient.ascii`
+/// and `sshclient.cat2` on purpose: importing those would drag `@tcp` back
+/// in, and moving them into `src/sshwire` would touch every byte-exact
+/// baseline from Loops #31-#33 to save eight lines. Duplication in a leaf
+/// package is the cheaper of the two, and it is contained to this file.
+pkgtype(kind: "library")

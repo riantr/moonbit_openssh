@@ -33,12 +33,19 @@ fn build_pk(alg : String, cname : String, q : FixedArray[Byte]) -> FixedArray[By
 }
 
 ///| Build a signature blob from raw r/s byte strings, for the negative cases.
+///
+/// 布局必须和 `encode_sig_blob` 一致 —— `string alg` + `string( mpint r ‖ mpint s )`。
+/// 少包外面那层 string 的话,每一条负例都会在**解析层**就失败,于是
+/// "is None" 恒真:测试看起来全绿,实际什么都没测。Loop #34 修
+/// `encode_sig_blob` 时正是被这一点挡了一下,所以这里显式写死正确布局,
+/// 并在下面单独用一条正例(`_wire_sig` 往返)守住它。
 fn build_sig(alg : String, rb : FixedArray[Byte], sb : FixedArray[Byte]) -> FixedArray[Byte] {
   @ecdsa.cat(
-    @ecdsa.cat(
-      @ecdsa.put_string(@ecdsa.str_bytes(alg)),
-      @ecdsa.put_string(rb)),
-    @ecdsa.put_string(sb))
+    @ecdsa.put_string(@ecdsa.str_bytes(alg)),
+    @ecdsa.put_string(
+      @ecdsa.cat(@ecdsa.put_string(rb), @ecdsa.put_string(sb)),
+    ),
+  )
 }
 
 fn run_curve(name : String, c : @ecdsa.Curve) -> Unit {
