@@ -105,6 +105,10 @@ function hashOut(out) {
   return createHash('sha256').update(out.replace(/\r\n/g, '\n')).digest('hex').slice(0, 16);
 }
 
+// moon 的诊断和程序输出都走这一侧管道,Windows 下又是 CRLF。所有带锚点的
+// 正则都假设 LF,所以在边界统一归一化一次,而不是在每处写 \r?$。
+const norm = s => `${s}`.replace(/\r\n/g, '\n');
+
 // ------------------------------------------------------------------ oracle --
 // Ask Python for the reference wires. The oracle itself refuses to print
 // anything unless paramiko agrees with it, so reaching this point already
@@ -116,9 +120,15 @@ function oracleWires() {
   });
   if (r.status !== 0) throw new Error(`oracle failed: ${r.stderr || r.stdout}`);
   const doc = JSON.parse(r.stdout);
+  // Keep the whole case, not just the joined hex: the fixture's shape is part
+  // of what these checks mean (see the counter-continuity check below).
   const byCase = {};
-  for (const c of doc.cases) byCase[c.name] = c.wires.join('');
-  return { doc, byCase };
+  const byName = {};
+  for (const c of doc.cases) {
+    byCase[c.name] = c.wires.join('');
+    byName[c.name] = c;
+  }
+  return { doc, byCase, byName };
 }
 
 async function runInWorker(browser, cfg, timeoutMs) {
@@ -188,7 +198,7 @@ async function main() {
 
   // ------------------------------------------------------------------- G1 --
   console.log('=== G1: aes128-ctr + hmac-sha2-256 packet layer ===');
-  const { byCase } = oracleWires();
+  const { byCase, byName } = oracleWires();
   const runs = [];
   for (const t of TARGETS) {
     for (const m of MODES) {
@@ -223,9 +233,47 @@ async function main() {
   for (const probe of ['ctr_mac_tamper_all', 'ctr_mac_emit_all', 'ctr_mac_recv_all', 'ctr_mac_stream_all']) {
     check(`${probe}: PASS`, text.includes(`${probe}: PASS`));
   }
-  check('counter continuity across packets (3-packet cases)',
-    text.includes('ctr_mac_emit_svc_request: PASS') &&
-    text.includes('ctr_mac_wire_svc_request:'));
+  // Counter continuity is a property of the FIXTURE as much as of the code.
+  //
+  // If every case only ever emitted one packet, then re-seeding the CTR
+  // counter from the IV before each packet would be byte-identical to the
+  // correct behaviour -- packet 1 is right either way -- and every check above
+  // would still be green. The old version of this line asserted
+  // `ctr_mac_emit_svc_request: PASS` and the presence of a wire line, both of
+  // which were already implied by the two checks above it, so it could not fail
+  // for any reason at all. What actually has to hold:
+  //
+  //   1. the vector set really contains multi-packet cases, and
+  //   2. inside one, the packets are pairwise distinct (a re-seeded counter
+  //      would emit packet 2 identical to packet 1), and
+  //   3. MoonBit's concatenated stream is the oracle's, packet for packet.
+  //
+  // (3) is the wire-bytes check above. (1) and (2) are new, and they are what
+  // turns (3) into a statement about counter continuity.
+  const multi = Object.entries(byName).filter(([, c]) => c.count > 1);
+  check('the vector set contains multi-packet cases', multi.length > 0,
+    `${multi.length}/${Object.keys(byName).length} cases`);
+  const notDistinct = multi.filter(([n, c]) => new Set(c.wires).size !== c.wires.length);
+  check('multi-packet cases have pairwise-distinct packets', notDistinct.length === 0,
+    notDistinct.length === 0
+      ? multi.map(([n, c]) => `${n}x${c.count}`).join(' ')
+      : `identical packets in: ${notDistinct.map(([n]) => n).join(', ')}`);
+  // And prove the claim end-to-end on the largest case, by cutting MoonBit's
+  // concatenated stream into per-packet pieces and comparing each one.
+  if (multi.length) {
+    const [name, c] = multi.sort((a, b) => b[1].count - a[1].count)[0];
+    const got = (text.match(new RegExp(`ctr_mac_wire_${name}: ([0-9a-f]+)`)) || [])[1] || '';
+    const slices = [];
+    let at = 0;
+    let sliceOk = got.length === c.wires.join('').length;
+    for (const w of c.wires) {
+      slices.push(got.slice(at, at + w.length));
+      at += w.length;
+    }
+    sliceOk = sliceOk && slices.every((s, i) => s === c.wires[i]);
+    check(`${name}: ${c.count} packets recovered one by one`, sliceOk,
+      sliceOk ? `${c.count} packets` : `stream ${got.length}B vs expected ${c.wires.join('').length}B`);
+  }
 
   // ------------------------------------------------------------- regression --
   if (!SKIP_REGRESSION) {
@@ -234,10 +282,14 @@ async function main() {
       const c = moonCheck('src/bpacket', t);
       check(`src/bpacket type-checks on ${t}`, c.errors === 0, `${c.warnings} warnings`);
     }
-    const unit = moon(['test', '-p', 'src/bpacket']);
-    const unitText = `${unit.stdout || ''}${unit.stderr || ''}`;
+    // `moon test -p <pkg>` 在这个 moon 版本上把 -p 当成别的选项,恒定报
+    // "0 tests",而 0/0 恰好满足下面那个断言——所以这层回归一直在空跑。
+    // 正确写法是 PATH 形式,并且要求 total > 0,否则一个「没跑到任何测试」
+    // 的包会伪装成全绿。
+    const unit = moon(['test', 'src/bpacket']);
+    const unitText = norm(`${unit.stdout || ''}${unit.stderr || ''}`);
     const m = unitText.match(/Total tests: (\d+), passed: (\d+), failed: (\d+)/);
-    check('src/bpacket unit tests', !!m && m[2] === m[1] && m[3] === '0',
+    check('src/bpacket unit tests', !!m && Number(m[1]) > 0 && m[2] === m[1] && m[3] === '0',
       m ? `${m[2]}/${m[1]} passed` : unitText.slice(-200));
 
     for (const [name, want] of Object.entries(BASELINE)) {
@@ -257,7 +309,7 @@ async function main() {
   check('private sshd up', await waitForLog(sshd, 'sshd listening'));
 
   const nat = moon(['run', 'cmd/ssh_live', '--target', 'native', '--', '--session', String(SSHD_PORT)]);
-  const natText = `${nat.stdout || ''}${nat.stderr || ''}`;
+  const natText = norm(`${nat.stdout || ''}${nat.stderr || ''}`);
   for (const l of natText.split('\n')) if (/^(result|service|accepted|we_need|cipher_ctos|mac_ctos|total_|handshake_)/.test(l)) console.log(`      ${l.trim()}`);
   check('result: SERVICE_ACCEPTED', natText.includes('result: SERVICE_ACCEPTED'));
   check('we_need = 32 (max of key/block/iv/mac)',
@@ -313,19 +365,28 @@ async function main() {
   // fresh DH exponent every time, so K, the exchange hash and therefore
   // session_id differ between any two runs -- native vs browser included. What
   // must hold is the shape of what each side derived: a 32-hex session_id
-  // (16 bytes of a SHA-256) and a key_head of <enc>/<mac>, both 16 hex chars.
+  // (16 bytes of a SHA-256) and a key_tag of <enc>/<mac>, both 12 hex chars
+  // of a SHA-256 over the session keys.
   // Asserting equality here would be asserting a coincidence, and it would
   // fail the moment the server rotated keys.
   const sidOk = s => /^[0-9a-f]{32}$/.test(s || '');
-  const keyOk = s => /^[0-9a-f]{16}\/[0-9a-f]{16}$/.test(s || '');
+  const keyOk = s => /^[0-9a-f]{12}\/[0-9a-f]{12}$/.test(s || '');
   const natSid = (natText.match(/session_id_head: ([0-9a-f]+)/) || [])[1];
   const wtSid = (lines.match(/session_id_head: ([0-9a-f]+)/) || [])[1];
-  const natKey = (natText.match(/key_head: ([0-9a-f/]+)/) || [])[1];
-  const wtKey = (lines.match(/key_head: ([0-9a-f/]+)/) || [])[1];
+  const natKey = (natText.match(/key_tag: ([0-9a-f/]+)/) || [])[1];
+  const wtKey = (lines.match(/key_tag: ([0-9a-f/]+)/) || [])[1];
   check('both transports derived a well-formed session_id',
     sidOk(natSid) && sidOk(wtSid), `${natSid} / ${wtSid}`);
-  check('both transports derived a well-formed key head',
+  check('both transports derived a well-formed key tag',
     keyOk(natKey) && keyOk(wtKey), `${natKey} / ${wtKey}`);
+  // The two directions must not be the same key. A tag cannot prove that on
+  // its own -- equality across a fresh connection is a coincidence -- but a
+  // client that handed c2s and s2c the same key would print the same tag on
+  // both sides of the slash, and that IS a real, checkable failure.
+  check('the two directions did not get the same key',
+    !!natKey && natKey.split('/')[0] !== natKey.split('/')[1] &&
+    !!wtKey && wtKey.split('/')[0] !== wtKey.split('/')[1],
+    `${natKey} / ${wtKey}`);
 
   await browser.close();
   httpSrv.close();

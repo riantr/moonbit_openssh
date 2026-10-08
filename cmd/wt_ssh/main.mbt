@@ -65,6 +65,7 @@ fn error_name(e : @wtlive.WtLiveError) -> String {
     SignatureInvalid(_) => "SignatureInvalid"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
+    BadPacket(w) => "BadPacket:" + w
   }
 }
 
@@ -74,6 +75,7 @@ fn session_error_name(e : @wtlive.WtSessionError) -> String {
     @wtlive.HandshakeFailed(h) => "handshake:" + error_name(h)
     @wtlive.NoServiceAccept => "NoServiceAccept"
     @wtlive.UnexpectedService(s) => "UnexpectedService:" + s
+    @wtlive.BadPacket(w) => "BadPacket:" + w
   }
 }
 
@@ -116,6 +118,7 @@ fn auth_error_name(e : @wtlive.WtAuthError) -> String {
     @wtlive.SignFailed => "SignFailed"
     @wtlive.NoAuthReply => "NoAuthReply"
     @wtlive.AuthRejected(_, _, _) => "AuthRejected"
+    @wtlive.BadPacket(w) => "BadPacket:" + w
   }
 }
 
@@ -194,7 +197,7 @@ async fn main {
         println("we_need: " + r.we_need.to_string())
         println("cipher_ctos: " + r.handshake.cipher_ctos)
         println("mac_ctos: " + r.handshake.mac_ctos)
-        println("key_head: " + r.key_head)
+        println("key_tag: " + r.key_tag)
         println("session_id_head: " + r.session_id_head)
         println("handshake_sent_bytes: " + r.handshake.sent_bytes.to_string())
         println("handshake_recv_bytes: " + r.handshake.recv_bytes.to_string())

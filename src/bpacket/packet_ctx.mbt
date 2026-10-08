@@ -88,12 +88,15 @@ fn maclen_of(mode : Mode) -> Int {
 /// 对应 state->p_send(seqnr/packets/blocks/bytes 中只保留协议相关的 seqnr)。
 /// strict_kex: strict-kex 扩展下 NEWKEYS 后 seqnr 归零(packet.c:1376-1379)。
 /// initial_kex: 初始密钥交换期间 seqnr 回绕是致命错误(packet.c:1363-1367);
-/// rekey 场景由调用方置 false。
+/// rekey 场景由调用方置 false。它是**有生命周期**的:过 NEWKEYS 时必须由
+/// 调用方调 `end_initial_kex` 清掉(kex.c:567 `kex->flags &= ~KEX_INITIAL`),
+/// 否则之后每一个正常的包都要多走一次"回绕检查"——目前不致命,只是没人
+/// 调过 setter,所以这个标志从建立起就一直是 true。
 pub struct SendCtx {
   priv mut mode : Mode
   priv mut seqnr : UInt
   priv strict_kex : Bool
-  priv initial_kex : Bool
+  priv mut initial_kex : Bool
 }
 
 ///|
@@ -106,7 +109,7 @@ pub struct RecvCtx {
   priv mut seqnr : UInt
   priv mut packlen : UInt
   priv strict_kex : Bool
-  priv initial_kex : Bool
+  priv mut initial_kex : Bool
 }
 
 ///|
@@ -142,6 +145,34 @@ pub fn SendCtx::set_mode(self : SendCtx, mode : Mode) -> Unit {
 }
 
 ///|
+/// 初始密钥交换结束。
+///
+/// 对应 `kex.c:567` 的 `kex->flags &= ~KEX_INITIAL`:
+///
+/// ```
+/// 	if ((kex->flags & KEX_INITIAL) != 0) {
+/// 		/*
+/// 		 * ... 初始 KEX 已经完成 ...
+/// 		 */
+/// 		kex->flags &= ~KEX_INITIAL;
+/// 	}
+/// ```
+///
+/// 在 NEWKEYS 之后调用。过了这个点之后 seqnr 回绕就不再是协议错误
+/// (packet.c:1363-1367 只在 `KEX_INITIAL` 期间致命),而继续带着这个标志
+/// 会让「回绕」在正常流量上一直是一个待触发的错误分支——所以它必须由
+/// 调用方在正确的时间点清掉,而不是构造时就决定不管了。
+pub fn SendCtx::end_initial_kex(self : SendCtx) -> Unit {
+  self.initial_kex = false
+}
+
+///|
+/// 是否仍处于初始密钥交换中(观测用)
+pub fn SendCtx::in_initial_kex(self : SendCtx) -> Bool {
+  self.initial_kex
+}
+
+///|
 /// 构造接收上下文(参数含义同 SendCtx::make)
 pub fn RecvCtx::make(
   mode : Mode,
@@ -168,6 +199,18 @@ pub fn RecvCtx::seqnr(self : RecvCtx) -> UInt {
 /// 切换加密模式(NEWKEYS 之后调用,语义对应 ssh_set_newkeys(MODE_IN))
 pub fn RecvCtx::set_mode(self : RecvCtx, mode : Mode) -> Unit {
   self.mode = mode
+}
+
+///|
+/// 初始密钥交换结束,语义同 `SendCtx::end_initial_kex`(kex.c:567)
+pub fn RecvCtx::end_initial_kex(self : RecvCtx) -> Unit {
+  self.initial_kex = false
+}
+
+///|
+/// 是否仍处于初始密钥交换中(观测用)
+pub fn RecvCtx::in_initial_kex(self : RecvCtx) -> Bool {
+  self.initial_kex
 }
 
 ///|

@@ -75,7 +75,30 @@ pub(all) enum LiveError {
   NoNewkeys
   /// A packet arrived but could not be framed -- bad length, bad padding, or
   /// (post-NEWKEYS) a MAC that did not verify.
-  BadPacket
+  ///
+  /// 带上具体原因,因为这一类和「对端关闭」在旧版本里都塌成了 None:一条
+  /// MAC 不匹配的包会让 SERVICE_ACCEPT 的等待超时,然后被报成
+  /// `NoServiceAccept`,于是最可能的故障点被指向了错误的方向。
+  BadPacket(String)
+}
+
+///|
+/// `PacketError` 的短标签,供诊断输出与 `LiveError::BadPacket` 共用。
+///
+/// 放在 `src/sshclient` 而不是只留在本文件,是因为 `src/wtlive` 要给
+/// 同一个错误起同样的名字——两边各写一份的话,某个 label 改了另一个不会。
+pub fn packet_error_label(e : @bpacket.PacketError) -> String {
+  match e {
+    @bpacket.BadLength(n) => "bad_length:" + n.to_string()
+    @bpacket.AlignError(n) => "align_error:" + n.to_string()
+    @bpacket.AuthFailed => "auth_failed"
+    @bpacket.MacInvalid => "mac_invalid"
+    @bpacket.BadPadlen(n) => "bad_padlen:" + n.to_string()
+    @bpacket.PadOverflow(n) => "pad_overflow:" + n.to_string()
+    @bpacket.EmptyPayload => "empty_payload"
+    @bpacket.BadType(n) => "bad_type:" + n.to_string()
+    @bpacket.SeqnrWrapInitial => "seqnr_wrap_initial"
+  }
 }
 
 ///|
@@ -157,7 +180,14 @@ fn hex_head(v : @bigint.BigNat, n : Int) -> String {
 }
 
 ///|
-fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
+/// 字节前缀的十六进制,用于诊断输出。
+///
+/// 只可用于**非秘密**字节(目前只有 session_id,也就是交换哈希,它本来就在
+/// 协议里明文出现)。会话密钥请走 `key_fingerprint`。
+///
+/// `pub` 是因为 `src/wtlive` 需要同一个定义;各写一份的话,两边可能对
+/// 「前缀取几字节」产生分歧,而那只会体现为两个传输路径的诊断字段不一致。
+pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
   let m = if b.length() < n { b.length() } else { n }
   let sb = StringBuilder()
   let hex_chars : String = "0123456789abcdef"
@@ -257,6 +287,21 @@ fn send_packet(
 }
 
 ///|
+/// `recv_packet` 的结果。
+///
+/// 以前只有 `?`,于是「对端关闭」和「MAC 不匹配」共用一个 None——前者
+/// 是正常的传输终止,后者是我们和对端对同一段明文的看法不一致,必须终止
+/// 连接(packet.c:1758-1769)。把两者分开之后,后者能一路走到
+/// `LiveError::BadPacket` 并带上原因,诊断才不用靠猜。
+pub(all) enum RecvOutcome {
+  Packet(Byte, FixedArray[Byte])
+  /// 对端关闭,或在一个包的中途断了
+  Closed
+  /// 读到了完整一段,但它不是一个合法的包
+  BadPacket(String)
+}
+
+///|
 /// Read exactly one SSH packet through a `@bpacket.RecvCtx`.
 ///
 ///   The read has to be *exact*, not chunked: once a packet has been consumed
@@ -269,30 +314,33 @@ fn recv_packet(
   conn : @tcp.TcpConn,
   counters : WireCounters,
   r : @bpacket.RecvCtx,
-) -> (Byte, FixedArray[Byte])? {
+) -> RecvOutcome {
   let hdr = match conn.read_exact(4) {
-    None => return None
+    None => return Closed
     Some(h) => h
   }
   let rest = match r.wire_len_from_header(hdr) {
-    None => return None
+    // 头部都解不开:加密态下这几乎总是「本该重放同一段密钥流却拿到了别的
+    // 字节」,和 MAC 失败同源,所以归到 BadPacket 而不是 Closed。
+    None => return BadPacket("undecryptable_header")
     Some(v) => v
   }
   if rest < 0 || rest > 1048576 {
-    return None
+    return BadPacket("length_out_of_range:" + rest.to_string())
   }
   let body = if rest == 0 {
     FixedArray::make(0, b'\x00')
   } else {
     match conn.read_exact(rest) {
-      None => return None
+      None => return Closed
       Some(b) => b
     }
   }
   counters.recv = counters.recv + 4 + rest
   match r.recv(cat2(hdr, body)).event {
-    @bpacket.Packet(_, t, payload) => Some((t, payload))
-    _ => None
+    @bpacket.Packet(_, t, payload) => Packet(t, payload)
+    @bpacket.NeedMore => Closed
+    @bpacket.Failed(e) => BadPacket(packet_error_label(e))
   }
 }
 
@@ -366,8 +414,14 @@ priv struct SessionState {
   /// 所以必须是**完整**字节——之前只留了一个 16 字节的十六进制摘要给诊断,
   /// 那是打印给人看的,不是拿来签名的。
   session_id : FixedArray[Byte]
-  /// 'A'..'F' 的摘要,便于诊断时与独立实现对拍(不打印原始密钥)
-  key_head : String
+  /// 两个方向的会话密钥指纹(各 12 个十六进制字符),`enc/mac` 分隔。
+  ///
+  /// 之前这里叫 `key_head`,打印的是 enc_key_ctos 的**前 8 个原始字节**和
+  /// mac_key_ctos 的前 8 个原始字节——也就是每次握手往 stdout / CI 日志里
+  /// 漏 32 字节会话密钥材料,注释却写着「不打印原始密钥」。它被改成了
+  /// SHA-256 截断指纹:同样能用来判断「两条路径各自派生出了不同的密钥、
+  /// 方向没有搞反」,但拿不回任何可用的密钥字节。
+  key_tag : String
   session_id_head : String
 }
 
@@ -378,13 +432,49 @@ priv struct SessionState {
 /// cipher 的只有 key_len / iv_len 字节——OpenSSH 在 ssh_set_newkeys 里传的是
 /// `cipher_new(..., key, cipher_keylen(c), iv, cipher_ivlen(c), ...)`,
 /// 也就是各取前缀。直接把 32 字节塞给 aes128-ctr 会在 cipher 初始化时就长度不符。
-fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+///
+/// `pub` 是因为 `src/wtlive` 的握手做完全一样的事;两边各写一份的话,任何
+/// 一处「前缀取多取少」都会只在一条路径上生效,而那正是最难发现的方向。
+pub fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
   let m = if b.length() < n { b.length() } else { n }
   let out : FixedArray[Byte] = FixedArray::make(m, b'\x00')
   for i = 0; i < m; i = i + 1 {
     out[i] = b[i]
   }
   out
+}
+
+///|
+/// 会话密钥的诊断指纹:SHA-256 的前 12 个十六进制字符。
+///
+/// 用途是「两次运行 / 两条传输路径派生出的密钥是不是同一个、两个方向有没有
+/// 搞反」,这两件事 SHA-256 前 48 bit 都足够回答,而且不可逆;直接截原始字节
+/// 则把密钥写进了日志。这里**不能**换成一个更短的原文前缀——任何长度的原文
+/// 都是密钥材料。
+pub fn key_fingerprint(k : FixedArray[Byte]) -> String {
+  let h = @hostkey.sha256(k)
+  let m = if h.length() < 6 { h.length() } else { 6 }
+  let sb = StringBuilder()
+  let hex_chars : String = "0123456789abcdef"
+  for i = 0; i < m; i = i + 1 {
+    let hi = h[i].to_int() / 16
+    let lo = h[i].to_int() % 16
+    sb.write_string(hex_chars.unsafe_substring(start=hi, end=hi + 1))
+    sb.write_string(hex_chars.unsafe_substring(start=lo, end=lo + 1))
+  }
+  sb.to_string()
+}
+
+///|
+/// 两个方向的密钥指纹,`<enc>/<mac>`。
+///
+/// 保留分隔符是有意的:两条方向必须能被区分,否则「两个方向拿到了同一把
+/// 密钥」这种错误会被这个字段掩盖掉。
+pub fn key_tag_of(
+  enc_key_ctos : FixedArray[Byte],
+  mac_key_ctos : FixedArray[Byte],
+) -> String {
+  key_fingerprint(enc_key_ctos) + "/" + key_fingerprint(mac_key_ctos)
 }
 
 ///|
@@ -437,8 +527,9 @@ fn handshake_to_session(
   let mut tries = 0
   while !got_kexinit && tries < 32 {
     match recv_packet(conn, counters, r) {
-      None => return (Failed(NoPeerKexinit), None)
-      Some((t, payload)) => {
+      Closed => return (Failed(NoPeerKexinit), None)
+      BadPacket(why) => return (Failed(BadPacket(why)), None)
+      Packet(t, payload) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_KEXINIT {
           peer_ic_payload = payload
@@ -480,8 +571,9 @@ fn handshake_to_session(
   let mut tries2 = 0
   while tries2 < 32 {
     match recv_packet(conn, counters, r) {
-      None => return (Failed(NoEcdhReply), None)
-      Some((t, payload)) => {
+      Closed => return (Failed(NoEcdhReply), None)
+      BadPacket(why) => return (Failed(BadPacket(why)), None)
+      Packet(t, payload) => {
         tries2 = tries2 + 1
         if t == @sshwire.SSH_MSG_KEX_ECDH_REPLY {
           reply = Some(payload)
@@ -584,8 +676,9 @@ fn handshake_to_session(
   let mut tries3 = 0
   while !got_newkeys && tries3 < 32 {
     match recv_packet(conn, counters, r) {
-      None => return (Failed(NoNewkeys), None)
-      Some((t, _)) => {
+      Closed => return (Failed(NoNewkeys), None)
+      BadPacket(why) => return (Failed(BadPacket(why)), None)
+      Packet(t, _) => {
         tries3 = tries3 + 1
         if t == @sshwire.SSH_MSG_NEWKEYS {
           got_newkeys = true
@@ -619,6 +712,12 @@ fn handshake_to_session(
   )
   s.set_mode(@bpacket.MacEncrypt(ctos))
   r.set_mode(@bpacket.MacEncrypt(stoc))
+  // 初始 KEX 到此结束。kex.c:567 在这里清 KEX_INITIAL:过了这个点,
+  // seqnr 回绕不再是致命错误(packet.c:1363-1367 只在 KEX_INITIAL 期间
+  // 终止连接)。不调用的话,这个标志会一直带着,每收一个包都白走一次
+  // 「回绕是不是致命」的分支,而且语义上它已经错了。
+  s.end_initial_kex()
+  r.end_initial_kex()
   let report = Established({
     server_ident,
     client_ident,
@@ -644,9 +743,7 @@ fn handshake_to_session(
       counters,
       we_need,
       session_id: keys.session_id(),
-      key_head: hex_bytes_head(keys.enc_key_ctos(), 8) +
-      "/" +
-      hex_bytes_head(keys.mac_key_ctos(), 8),
+      key_tag: key_tag_of(keys.enc_key_ctos(), keys.mac_key_ctos()),
       session_id_head: hex_bytes_head(keys.session_id(), 16),
     }),
   )
@@ -678,6 +775,12 @@ pub(all) enum SessionError {
   NoServiceAccept
   /// The server answered, but not with the service we asked for.
   UnexpectedService(String)
+  /// 一整段字节读回来了,但它不是一个合法的包(MAC 不匹配、对齐错、padding 非法)。
+  ///
+  /// 与 `NoServiceAccept` 分开是必须的:加密信道上「等不到 SERVICE_ACCEPT」
+  /// 最常见的原因就是 MAC 失败,而把这个原因丢掉之后,唯一能看到的现象是
+  /// 一个指向错误方向的超时。
+  BadPacket(String)
 }
 
 ///|
@@ -687,7 +790,7 @@ pub(all) struct SessionReport {
   service_name : String
   accepted_service : String
   we_need : Int
-  key_head : String
+  key_tag : String
   session_id_head : String
   /// Total bytes sent / received across handshake *and* encrypted phase.
   sent_bytes : Int
@@ -723,7 +826,7 @@ pub fn live_session(conn : @tcp.TcpConn, x : @bigint.BigNat) -> SessionResult {
         service_name: USERAUTH_SERVICE,
         accepted_service: accepted,
         we_need: st.we_need,
-        key_head: st.key_head,
+        key_tag: st.key_tag,
         session_id_head: st.session_id_head,
         sent_bytes: st.counters.sent,
         recv_bytes: st.counters.recv,
@@ -762,18 +865,16 @@ fn request_userauth_service(
   let mut answer : FixedArray[Byte]? = None
   while tries < 32 {
     match recv_packet(conn, st.counters, st.recv) {
-      None => return (None, Some(SessionError::NoServiceAccept))
-      Some((t, pl)) => {
+      Closed => return (None, Some(SessionError::NoServiceAccept))
+      BadPacket(why) => return (None, Some(SessionError::BadPacket(why)))
+      Packet(t, pl) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
           answer = Some(pl)
           break
         }
         if t == KX_MSG_KEX_FAILURE {
-          return (
-            None,
-            Some(SessionError::UnexpectedService("kex_failure")),
-          )
+          return (None, Some(SessionError::UnexpectedService("kex_failure")))
         }
       }
     }
@@ -824,6 +925,11 @@ pub(all) enum AuthError {
   /// 「签名算错了」是完全相同的 FAILURE,不留证据就只能靠猜。带出来之后,
   /// 第二实现可以拿同一段 session_id 重算一遍并指出到底差在哪。
   AuthRejected(String, String, String)
+  /// 认证包读回来了,但它不是一个合法的包。
+  ///
+  /// 和 `NoAuthReply` 分开是因为后者只说明「对端没说话」,而 MAC 失败是
+  /// 我们确实读到了东西、只是它不是我们以为的那段字节。
+  BadPacket(String)
 }
 
 ///|
@@ -860,7 +966,8 @@ pub fn live_auth(
   let (res, state) = handshake_to_session(conn, x)
   let handshake = match res {
     Established(rep) => rep
-    Failed(e) => return Failed(AuthError::Transport(SessionError::HandshakeFailed(e)))
+    Failed(e) =>
+      return Failed(AuthError::Transport(SessionError::HandshakeFailed(e)))
   }
   let st = match state {
     None => return Failed(AuthError::Transport(SessionError::NoServiceAccept))
@@ -876,7 +983,8 @@ pub fn live_auth(
     Some(a) => a
   }
   let curve = @ecdsa.Curve::p256()
-  let (pk_blob, sig_blob, payload) = match @userauth.userauth_publickey_signed_request(
+  let (pk_blob, sig_blob, payload) = match
+    @userauth.userauth_publickey_signed_request(
       curve,
       d,
       st.session_id,
@@ -906,8 +1014,9 @@ pub fn live_auth(
   let mut verdict : (Byte, FixedArray[Byte])? = None
   while tries < 32 {
     match recv_packet(conn, st.counters, st.recv) {
-      None => return Failed(AuthError::NoAuthReply)
-      Some((t, pl)) => {
+      Closed => return Failed(AuthError::NoAuthReply)
+      BadPacket(why) => return Failed(AuthError::BadPacket(why))
+      Packet(t, pl) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS ||
           t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
@@ -942,7 +1051,7 @@ pub fn live_auth(
       service_name: USERAUTH_SERVICE,
       accepted_service: accepted,
       we_need: st.we_need,
-      key_head: st.key_head,
+      key_tag: st.key_tag,
       session_id_head: st.session_id_head,
       sent_bytes: st.counters.sent,
       recv_bytes: st.counters.recv,

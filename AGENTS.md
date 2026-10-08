@@ -123,6 +123,28 @@ For each crypto module:
 - `moon check` shows 0 errors (warnings allowed only if pre-existing
   and unrelated to the module under test).
 
+And one rule that the rest of this file keeps rediscovering the hard way:
+
+> **A check that cannot fail is worse than no check.** Before believing any
+> green line, ask what change would have turned it red. If nothing can, either
+> delete it or fix the thing it was supposed to cover.
+
+Three ways this repo got it wrong, all found by review rather than by a test:
+
+- `moon test -p src/bpacket` — `-p` is not `moon test`'s package flag in this
+  moon version (it takes a PATH), so it reported **0 tests**; and the assertion
+  was written `passed === total && failed === '0'`, which `0/0` satisfies.
+  The whole `src/bpacket` regression was therefore never running. Correct call:
+  `moon test src/bpacket`, which immediately surfaced 13 real tests in
+  `src/sha256`. A `total > 0` clause belongs in every such assertion.
+- `check('counter continuity ...', text.includes('emit: PASS') && text.includes('wire:'))`
+  — both conjuncts were already implied by the two checks above it. Rewritten
+  to assert the *fixture* actually has multi-packet cases with pairwise-distinct
+  packets, which is the precondition that makes the byte comparison a claim
+  about counter continuity at all.
+- A negative wire test whose *builder* used a different blob layout than the
+  decoder under test: it kept passing, for the wrong reason.
+
 ### Build commands
 
 ```bash
@@ -420,4 +442,57 @@ Run the gate with `node host/verify_loop34.mjs` (`--skip-regression` to skip the
 Loop #32/#33 harnesses and the crypto baselines). It re-derives
 `cmd/userauth_test/vectors.mbt` from `host/ecdsa_auth_oracle.py` and fails if the
 committed copy has drifted, so the KAT cannot be satisfied by hand-editing it.
+
+### Loop #33 review fixes
+
+A review of Loop #33 turned up six items. Three were real defects, and the
+other three were the same failure mode wearing different hats: a green check
+that could not go red.
+
+- **`recv_packet` collapsed every `PacketError` into `None`.** A MAC mismatch
+  therefore looked identical to "the peer closed", so the only symptom on an
+  encrypted channel was *waiting for SERVICE_ACCEPT and timing out* — a
+  timeout that points at the wrong layer entirely. `recv_packet` and
+  `wt_recv_plain_packet` now return `RecvOutcome { Packet, Closed, BadPacket }`
+  and carry the `PacketError` label up through `LiveError::BadPacket(String)` /
+  `SessionError::BadPacket` / `AuthError::BadPacket`. Both transports share the
+  one enum and the one `packet_error_label`, so the browser path cannot invent a
+  second name for the same fault.
+- **`initial_kex` was never cleared.** `kex.c:567` does
+  `kex->flags &= ~KEX_INITIAL` once the first key exchange is done; without it
+  the flag stays true forever and every packet keeps evaluating a
+  "is this wrap fatal?" branch whose answer stopped being right after NEWKEYS.
+  Added `SendCtx/RecvCtx::end_initial_kex` + `in_initial_kex`, called right
+  after `set_mode` in both paths, and `src/bpacket/packet_ctx_wbtest.mbt` pins
+  the difference: same frame, `Failed(SeqnrWrapInitial)` before the call and a
+  cleanly decoded packet after. Verified by mutation — making
+  `end_initial_kex` a no-op turns 4 of the 25 tests red.
+- **`key_head` printed key material.** It was the first 8 raw bytes of
+  `enc_key_ctos` and the first 8 raw bytes of `mac_key_ctos`, hex-encoded —
+  32 bytes of live session key into stdout and CI logs on every handshake,
+  under a comment reading "does not print raw keys". Replaced with `key_tag`:
+  `sha256(key)` truncated to 12 hex chars, `<enc>/<mac>`. Same diagnostic
+  value (are the two directions different? did both paths derive the same
+  keys?) with nothing recoverable. The harnesses now assert 12-hex halves and
+  additionally check the two directions are *not* equal.
+- **`head_bytes` / `hex_bytes_head` were duplicated** in `src/sshclient` and
+  `src/wtlive`. They are now `pub` in `src/sshclient` and called from wtlive;
+  a divergence in "how many leading bytes" would otherwise only bite the
+  browser path, with the symptom "the server can't decrypt us".
+- **`SentPacket.wire` documented only the AEAD shape** (`ct‖tag(16)`) and
+  `emit`'s `pad_src` doc did not mention `MacEncrypt` at all. For the encrypt-
+  and-MAC mode both are wrong in ways that read as plausible: the tag is 32
+  bytes (`mac.c:62`, `truncatebits = 0` — and 16 is what chacha20-poly1305
+  uses, so the wrong number looks right), and padding does come from `pad_src`
+  even though the mode is not AEAD.
+- **The counter-continuity check was tautological.** See the "cannot fail"
+  rule above; it is now three checks, including that the vector set really
+  contains multi-packet cases whose packets are pairwise distinct — without
+  that, re-seeding the CTR counter per packet is byte-identical to correct
+  behaviour on packet 1 and the whole property is untested.
+
+Recomputed baselines: `src/bpacket/pkg.generated.mbti` catches up with Loop
+#33's `AesCtrMacCtx` (it was stale because `moon info` aborts on three js-only
+`cmd/wt_*` packages that report `Missing main function` under a native check —
+generate it per package instead of project-wide).
 

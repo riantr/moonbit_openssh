@@ -54,6 +54,11 @@ pub(all) enum WtLiveError {
   SignatureInvalid(FixedArray[Byte])
   NewkeysSendFailed
   NoNewkeys
+  /// 一整段字节读回来了,但它不是一个合法的包。
+  ///
+  /// 与原生路径的 `LiveError::BadPacket` 同名同义:两条路径对同一个故障
+  /// 必须给出同一个名字,否则「浏览器复现不了」这种结论会退化成猜测。
+  BadPacket(String)
 }
 
 ///|
@@ -111,7 +116,7 @@ priv struct WtSessionState {
   /// 首次 KEX 的 H。publickey 认证要拿它当签名输入(RFC 4252 §7),
   /// 必须是**完整**字节——`session_id_head` 只是给人看的十六进制摘要。
   session_id : FixedArray[Byte]
-  key_head : String
+  key_tag : String
   session_id_head : String
 }
 
@@ -138,6 +143,9 @@ pub(all) enum WtSessionError {
   HandshakeFailed(WtLiveError)
   NoServiceAccept
   UnexpectedService(String)
+  /// 一整段字节读回来了,但它不是一个合法的包。与「等不到 SERVICE_ACCEPT」
+  /// 分开,理由同 `src/sshclient` 的 `SessionError::BadPacket`。
+  BadPacket(String)
 }
 
 ///|
@@ -146,7 +154,7 @@ pub(all) struct WtSessionReport {
   service_name : String
   accepted_service : String
   we_need : Int
-  key_head : String
+  key_tag : String
   session_id_head : String
   sent_bytes : Int
   recv_bytes : Int
@@ -196,29 +204,34 @@ async fn wt_send_plain_packet(
 /// length field is itself ciphertext, so only the context can recover it.
 /// Chunking by block size would have been simpler and wrong -- it works
 /// precisely until the first encrypted packet arrives.
+///
+/// 复用 `@sshclient.RecvOutcome` 而不是自己再定一个:两条传输路径对
+/// 「MAC 失败」和「对端关闭」必须给出同一个答案,否则同一个 bug 在两条
+/// 路径上报出两个名字,排查时只会怀疑错方向。
 async fn wt_recv_plain_packet(
   conn : @wt.WtConn,
   counters : WtWireCounters,
   r : @bpacket.RecvCtx,
-) -> (Byte, FixedArray[Byte])? {
-  let hdr = conn.read_exact(4) catch { _ => return None }
+) -> @sshclient.RecvOutcome {
+  let hdr = conn.read_exact(4) catch { _ => return Closed }
   let rest = match r.wire_len_from_header(hdr) {
-    None => return None
+    None => return BadPacket("undecryptable_header")
     Some(v) => v
   }
   if rest < 0 || rest > 1048576 {
-    return None
+    return BadPacket("length_out_of_range:" + rest.to_string())
   }
   let body = if rest == 0 {
     FixedArray::make(0, b'\x00')
   } else {
-    let b = conn.read_exact(rest) catch { _ => return None }
+    let b = conn.read_exact(rest) catch { _ => return Closed }
     b
   }
   counters.recv = counters.recv + 4 + rest
   match r.recv(@sshclient.cat2(hdr, body)).event {
-    @bpacket.Packet(_, t, payload) => Some((t, payload))
-    _ => None
+    @bpacket.Packet(_, t, payload) => Packet(t, payload)
+    @bpacket.NeedMore => Closed
+    @bpacket.Failed(e) => BadPacket(@sshclient.packet_error_label(e))
   }
 }
 
@@ -341,8 +354,9 @@ async fn wt_handshake_into(
   let mut tries = 0
   while !got_kexinit && tries < 32 {
     match wt_recv_plain_packet(conn, counters, r) {
-      None => return Failed(NoPeerKexinit)
-      Some((t, payload)) => {
+      Closed => return Failed(NoPeerKexinit)
+      BadPacket(why) => return Failed(BadPacket(why))
+      Packet(t, payload) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_KEXINIT {
           peer_ic_payload = payload
@@ -390,8 +404,9 @@ async fn wt_handshake_into(
   let mut tries2 = 0
   while tries2 < 32 {
     match wt_recv_plain_packet(conn, counters, r) {
-      None => return Failed(NoEcdhReply)
-      Some((t, payload)) => {
+      Closed => return Failed(NoEcdhReply)
+      BadPacket(why) => return Failed(BadPacket(why))
+      Packet(t, payload) => {
         tries2 = tries2 + 1
         if t == @sshwire.SSH_MSG_KEX_ECDH_REPLY {
           reply = Some(payload)
@@ -480,8 +495,9 @@ async fn wt_handshake_into(
   let mut tries3 = 0
   while !got_newkeys && tries3 < 32 {
     match wt_recv_plain_packet(conn, counters, r) {
-      None => return Failed(NoNewkeys)
-      Some((t, _)) => {
+      Closed => return Failed(NoNewkeys)
+      BadPacket(why) => return Failed(BadPacket(why))
+      Packet(t, _) => {
         tries3 = tries3 + 1
         if t == @sshwire.SSH_MSG_NEWKEYS {
           got_newkeys = true
@@ -510,16 +526,17 @@ async fn wt_handshake_into(
   )
   s.set_mode(@bpacket.MacEncrypt(ctos))
   r.set_mode(@bpacket.MacEncrypt(stoc))
+  // 与原生路径同一步:kex.c:567 在 NEWKEYS 之后清 KEX_INITIAL
+  s.end_initial_kex()
+  r.end_initial_kex()
   box.state = Some({
     send: s,
     recv: r,
     counters,
     we_need,
     session_id: keys.session_id(),
-    key_head: hex_bytes_head(keys.enc_key_ctos(), 8) +
-    "/" +
-    hex_bytes_head(keys.mac_key_ctos(), 8),
-    session_id_head: hex_bytes_head(keys.session_id(), 16),
+    key_tag: @sshclient.key_tag_of(keys.enc_key_ctos(), keys.mac_key_ctos()),
+    session_id_head: @sshclient.hex_bytes_head(keys.session_id(), 16),
   })
   Established({
     server_ident,
@@ -541,31 +558,22 @@ async fn wt_handshake_into(
 }
 
 ///|
-/// 前 n 个字节(见 src/sshclient/live.mbt 同名函数的说明)
+/// 前 n 个字节 —— 直接用 `@sshclient.head_bytes`。
+///
+/// 这里原本有一份自己的实现,和 `src/sshclient` 的逐字符相同。两份副本在
+/// 「前缀取多少字节」上分叉过一次的话,只有一条传输路径会拿到正确的密钥,
+/// 而且症状是对方解不开——极难定位。所以共享函数,不留副本。
 fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
-  let m = if b.length() < n { b.length() } else { n }
-  let out : FixedArray[Byte] = FixedArray::make(m, b'\x00')
-  for i = 0; i < m; i = i + 1 {
-    out[i] = b[i]
-  }
-  out
+  @sshclient.head_bytes(b, n)
 }
 
 ///|
-/// 字节前缀的十六进制,用于诊断输出
+/// 字节前缀的十六进制 —— 直接用 `@sshclient.hex_bytes_head`。
+///
+/// 理由同上。注意它只用于非秘密字节(session_id);会话密钥走
+/// `@sshclient.key_tag_of`。
 fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
-  let m = if b.length() < n { b.length() } else { n }
-  let sb = StringBuilder()
-  let hex_chars : String = "0123456789abcdef"
-  let mut i = 0
-  while i < m {
-    let hi = b[i].to_int() / 16
-    let lo = b[i].to_int() % 16
-    sb.write_string(hex_chars.unsafe_substring(start=hi, end=hi + 1))
-    sb.write_string(hex_chars.unsafe_substring(start=lo, end=lo + 1))
-    i = i + 1
-  }
-  sb.to_string()
+  @sshclient.hex_bytes_head(b, n)
 }
 
 ///|
@@ -614,7 +622,7 @@ pub async fn wt_live_session(
     service_name: WT_USERAUTH_SERVICE,
     accepted_service: accepted,
     we_need: st.we_need,
-    key_head: st.key_head,
+    key_tag: st.key_tag,
     session_id_head: st.session_id_head,
     sent_bytes: st.counters.sent,
     recv_bytes: st.counters.recv,
@@ -642,6 +650,8 @@ pub(all) enum WtAuthError {
   /// FAILURE,本地不留证据就只能靠猜。Loop #34 定位那个
   /// `encode_sig_blob` 少包一层 string 的缺陷,靠的就是这三样。
   AuthRejected(String, String, String)
+  /// 认证包读回来了,但它不是一个合法的包。
+  BadPacket(String)
 }
 
 ///|
@@ -664,9 +674,7 @@ async fn wt_request_userauth_service(
   conn : @wt.WtConn,
   st : WtSessionState,
 ) -> (String?, WtSessionError?) {
-  let payload = @sshwire.write_ssh_string(
-    @sshclient.ascii(WT_USERAUTH_SERVICE),
-  )
+  let payload = @sshwire.write_ssh_string(@sshclient.ascii(WT_USERAUTH_SERVICE))
   if !wt_send_plain_packet(
       conn,
       st.counters,
@@ -680,8 +688,9 @@ async fn wt_request_userauth_service(
   let mut answer : FixedArray[Byte]? = None
   while tries < 32 {
     match wt_recv_plain_packet(conn, st.counters, st.recv) {
-      None => return (None, Some(WtSessionError::NoServiceAccept))
-      Some((t, pl)) => {
+      Closed => return (None, Some(WtSessionError::NoServiceAccept))
+      BadPacket(why) => return (None, Some(WtSessionError::BadPacket(why)))
+      Packet(t, pl) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
           answer = Some(pl)
@@ -739,13 +748,14 @@ pub async fn wt_live_auth(
   // 字节计数在认证往返之后才最终确定,所以报告在这里才构造——早建一次再改字段
   // 既没地方改(WtSessionReport 的字段是 pub(all),不可变),也没必要。
   let curve = @ecdsa.Curve::p256()
-  let (pk_blob, sig_blob, payload) = match @userauth.userauth_publickey_signed_request(
-    curve,
-    d,
-    st.session_id,
-    user,
-    @userauth.AUTH_SERVICE_CONNECTION,
-  ) {
+  let (pk_blob, sig_blob, payload) = match
+    @userauth.userauth_publickey_signed_request(
+      curve,
+      d,
+      st.session_id,
+      user,
+      @userauth.AUTH_SERVICE_CONNECTION,
+    ) {
     None => return Failed(WtAuthError::SignFailed)
     Some(v) => v
   }
@@ -769,8 +779,9 @@ pub async fn wt_live_auth(
   let mut verdict : (Byte, FixedArray[Byte])? = None
   while tries < 32 {
     match wt_recv_plain_packet(conn, st.counters, st.recv) {
-      None => return Failed(WtAuthError::NoAuthReply)
-      Some((t, pl)) => {
+      Closed => return Failed(WtAuthError::NoAuthReply)
+      BadPacket(why) => return Failed(WtAuthError::BadPacket(why))
+      Packet(t, pl) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS ||
           t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
@@ -805,7 +816,7 @@ pub async fn wt_live_auth(
       service_name: WT_USERAUTH_SERVICE,
       accepted_service: accepted,
       we_need: st.we_need,
-      key_head: st.key_head,
+      key_tag: st.key_tag,
       session_id_head: st.session_id_head,
       sent_bytes: st.counters.sent,
       recv_bytes: st.counters.recv,

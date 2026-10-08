@@ -8,7 +8,24 @@
 pub struct SentPacket {
   /// 明文帧 [packlen u32][padlen u8][type][payload][padding],长 4+packlen
   frame : FixedArray[Byte]
-  /// 线上字节 = Unencrypted ? frame : ct头(4) ‖ ct体(packlen) ‖ tag(16)
+  /// 真正上线的字节,按模式分三种形状:
+  ///
+  /// ```
+  /// Unencrypted   frame                                  (4+packlen)
+  /// Aead          ct_body ‖ tag(16)                     (长度字段不加密,aadlen=4)
+  /// MacEncrypt    ct(frame) ‖ mac(32)                   (整帧加密 + 32 字节 HMAC)
+  /// ```
+  ///
+  /// MacEncrypt 这一行是 Loop #33 补的,和 AEAD 有两处不一样,写在一起
+  /// 容易被读成 AEAD 的翻版:
+  ///
+  ///   * **tag 是 32 字节不是 16。** `mac.c:62` 给 hmac-sha2-256 的
+  ///     `truncatebits = 0`。AEAD 的 chacha20-poly1305 tag 恰好也是 16,
+  ///     于是「16」这个数字在这里看起来仍然像是对的——但它错得毫无提示。
+  ///   * **MAC 在密文之后、覆盖的是明文。** 非 EtM 路径
+  ///     (`packet.c:1352-1358`)把未加密的 send_packet 喂给 mac_compute。
+  ///     顺序反过来就是「先 MAC 后加密」,对面会拿 MAC 去比密文,于是每一
+  ///     个包都验不过。
   wire : FixedArray[Byte]
 }
 
@@ -30,9 +47,14 @@ pub enum EmitResult {
 /// - msg_type: 消息号(1..=255;0 是程序员错误 → abort,对齐 C 中
 ///   sshpkt_start 的调用方契约——消息号恒 >= SSH2_MSG_MIN)
 /// - payload: 不含消息号本身的消息体
-/// - pad_src: 随机 padding 源(Aead 模式取前 padlen 字节);生产环境接
-///   CSPRNG,测试注入确定性字节。Unencrypted 模式强制全零
+/// - pad_src: 随机 padding 源。**Aead 与 MacEncrypt 都取前 padlen 字节**
+///   (加密态下 padding 必须随机,否则同一条明文会产出同一条密文);生产环境
+///   接 CSPRNG,测试注入确定性字节。Unencrypted 模式强制全零
 ///   (packet.c:1307-1315 explicit_bzero 分支),pad_src 被忽略。
+///
+///   注意 MacEncrypt 也用 pad_src:它是 Loop #33 加进来的加密模式,如果按
+///   「非 AEAD 就算明文」的直觉去读旧文档,会以为这里传全零没问题——
+///   实际上那样做不会报错,只会让 padding 失去随机性。
 ///
 /// 程序员错误(msg_type==0 / pad_src 不足 / 总长越界)用 abort,
 /// 协议级错误只在接收方向产生。

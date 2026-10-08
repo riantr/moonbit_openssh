@@ -2,6 +2,10 @@
 package "openssh/openssh_moonbit/src/bpacket"
 
 // Values
+pub const AESCTR_BLOCK : Int = 16
+
+pub const HMAC_SHA256_LEN : Int = 32
+
 pub const MAX_PACKET_SIZE : Int = 262144
 
 pub const MIN_PACKET_LENGTH : Int = 5
@@ -49,6 +53,16 @@ pub fn u8_to_32_le(FixedArray[Byte], Int) -> UInt
 // Errors
 
 // Types and methods
+pub struct AesCtrMacCtx {
+  // private fields
+}
+pub fn AesCtrMacCtx::counter(Self) -> FixedArray[Byte]
+pub fn AesCtrMacCtx::crypt(Self, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn AesCtrMacCtx::mac(Self, UInt, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn AesCtrMacCtx::mac_ok(Self, UInt, FixedArray[Byte], FixedArray[Byte]) -> Bool
+pub fn AesCtrMacCtx::new(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> Self
+pub fn AesCtrMacCtx::peek_len(Self, FixedArray[Byte]) -> UInt?
+
 pub struct ChaChaState {
   // private fields
 }
@@ -72,12 +86,14 @@ pub enum EmitResult {
 pub(all) enum Mode {
   Unencrypted
   Aead(ChachaPolyCtx)
+  MacEncrypt(AesCtrMacCtx)
 }
 
 pub enum PacketError {
   BadLength(UInt)
   AlignError(UInt)
   AuthFailed
+  MacInvalid
   BadPadlen(UInt)
   PadOverflow(UInt)
   EmptyPayload
@@ -88,11 +104,14 @@ pub enum PacketError {
 pub struct RecvCtx {
   // private fields
 }
+pub fn RecvCtx::end_initial_kex(Self) -> Unit
+pub fn RecvCtx::in_initial_kex(Self) -> Bool
 pub fn RecvCtx::make(Mode, UInt, Bool, Bool) -> Self
 pub fn RecvCtx::new() -> Self
 pub fn RecvCtx::recv(Self, FixedArray[Byte]) -> RecvResult
 pub fn RecvCtx::seqnr(Self) -> UInt
 pub fn RecvCtx::set_mode(Self, Mode) -> Unit
+pub fn RecvCtx::wire_len_from_header(Self, FixedArray[Byte]) -> Int?
 
 pub enum RecvEvent {
   NeedMore
@@ -109,6 +128,8 @@ pub struct SendCtx {
   // private fields
 }
 pub fn SendCtx::emit(Self, Byte, FixedArray[Byte], FixedArray[Byte]) -> EmitResult
+pub fn SendCtx::end_initial_kex(Self) -> Unit
+pub fn SendCtx::in_initial_kex(Self) -> Bool
 pub fn SendCtx::make(Mode, UInt, Bool, Bool) -> Self
 pub fn SendCtx::new() -> Self
 pub fn SendCtx::seqnr(Self) -> UInt

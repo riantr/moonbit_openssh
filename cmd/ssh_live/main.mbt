@@ -53,6 +53,9 @@ fn session_error_name(e : @sshclient.SessionError) -> String {
     @sshclient.HandshakeFailed(h) => "handshake:" + live_error_name(h)
     @sshclient.NoServiceAccept => "NoServiceAccept"
     @sshclient.UnexpectedService(s) => "UnexpectedService:" + s
+    // BadPacket 带上原因而不是一个光秃秃的标签:它是整条链上唯一能区分
+    // 「对端没说话」和「对端说了但我们解不开」的地方。
+    @sshclient.BadPacket(w) => "BadPacket:" + w
   }
 }
 
@@ -66,6 +69,7 @@ fn auth_error_name(e : @sshclient.AuthError) -> String {
     @sshclient.SignFailed => "SignFailed"
     @sshclient.NoAuthReply => "NoAuthReply"
     @sshclient.AuthRejected(_, _, _) => "AuthRejected"
+    @sshclient.BadPacket(w) => "BadPacket:" + w
   }
 }
 
@@ -272,7 +276,7 @@ fn main {
             println("we_need: " + r.we_need.to_string())
             println("cipher_ctos: " + r.handshake.cipher_ctos)
             println("mac_ctos: " + r.handshake.mac_ctos)
-            println("key_head: " + r.key_head)
+            println("key_tag: " + r.key_tag)
             println("session_id_head: " + r.session_id_head)
             println(
               "handshake_sent_bytes: " + r.handshake.sent_bytes.to_string(),
