@@ -314,6 +314,14 @@ fn dump_prefix(b : FixedArray[Byte]) -> String {
   }
 }
 
+fn yn(b : Bool) -> String {
+  if b {
+    "true"
+  } else {
+    "false"
+  }
+}
+
 fn exec_error_name(e : @sshclient.ExecError) -> String {
   match e {
     NoSessionState => "NoSessionState"
@@ -328,9 +336,208 @@ fn exec_error_name(e : @sshclient.ExecError) -> String {
 }
 
 ///|
+/// `--shell <cmd>` 之后的整段是远端要敲的命令,`--cols/--rows/--resize` 控制
+/// 窗口尺寸(给了 `--resize` 就再发一条 window-change)。
+fn shell_mode(argv : Array[String]) -> (String, Int, Int, (Int, Int)?) {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--shell" && i + 1 < argv.length() {
+      let sb = StringBuilder()
+      for j = i + 1; j < argv.length(); j = j + 1 {
+        // 遇到下一个开关就停。不停的话 `--shell echo hi --resize 132x43`
+        // 会把 "--resize 132x43" 当成远端命令的一部分敲给 shell,而 shell
+        // 照样会回显它——于是 marker 照样出现,一切「看起来」正常。
+        if is_switch(argv[j]) {
+          break
+        }
+        if sb.to_string().length() > 0 {
+          sb.write_char(' ')
+        }
+        sb.write_string(argv[j])
+      }
+      return (sb.to_string(), 80, 24, None)
+    }
+    i = i + 1
+  }
+  ("", 80, 24, None)
+}
+
+///| 扫一个 `--flag <n>` 形式的数值参数
+fn int_flag(argv : Array[String], name : String, fallback : Int) -> Int {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == name && i + 1 < argv.length() {
+      let s = argv[i + 1]
+      let mut v = 0
+      let mut k = 0
+      let mut any = false
+      while k < s.length() {
+        let d = s[k].to_int()
+        if d >= 48 && d <= 57 {
+          v = v * 10 + (d - 48)
+          any = true
+        }
+        k = k + 1
+      }
+      if any {
+        return v
+      }
+    }
+    i = i + 1
+  }
+  fallback
+}
+
+///| 把 "132x43" 这样的字符串拆成 `(132, 43)`;不是这个形状就返回 None
+///
+/// 守卫用一个显式的 `seen_x`,而不是拿 `second` 是否为 0 代替——后者在读完
+/// 第一个数、还没遇到 'x' 时也是 0,于是 "132x43" 被判成非法,而失败方式
+/// 是「resize 没生效」而不是报错。
+fn parse_size(s : String) -> (Int, Int)? {
+  let mut first = -1
+  let mut second = -1
+  let mut seen_x = false
+  let mut any_digit = false
+  for i = 0; i < s.length(); i = i + 1 {
+    let d = s[i].to_int()
+    if d >= 48 && d <= 57 {
+      if seen_x {
+        if second < 0 {
+          second = d - 48
+        } else {
+          second = second * 10 + (d - 48)
+        }
+      } else {
+        if first < 0 {
+          first = d - 48
+        } else {
+          first = first * 10 + (d - 48)
+        }
+      }
+      any_digit = true
+    } else if d == 120 || d == 88 {
+      if seen_x || first <= 0 {
+        return None
+      }
+      seen_x = true
+    } else {
+      return None
+    }
+  }
+  if !seen_x || !any_digit || first <= 0 || second <= 0 {
+    None
+  } else {
+    Some((first, second))
+  }
+}
+
+///| `--resize <cols>x<rows>`;没给就返回 None(不发 window-change)
+fn resize_flag(argv : Array[String]) -> (Int, Int)? {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--resize" && i + 1 < argv.length() {
+      return parse_size(argv[i + 1])
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// Loop #36:开一个交互式 shell(带 pty),敲一条命令,可选地 resize,再退出。
+fn run_shell(
+  port : Int,
+  command : String,
+  cols : Int,
+  rows : Int,
+  resize : (Int, Int)?,
+) -> Unit {
+  let user = find_user(@env.args())
+  println("=== Loop #36 interactive shell vs real sshd ===")
+  println("port: " + port.to_string())
+  println("user: " + user)
+  println("command: " + command)
+  println("cols: " + cols.to_string())
+  println("rows: " + rows.to_string())
+  match resize {
+    Some((c, r)) => println("resize: " + c.to_string() + "x" + r.to_string())
+    None => println("resize: none")
+  }
+  match @tcp.TcpConn::connect("127.0.0.1", port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      return
+    }
+    Some(conn) => {
+      let outcome = @sshclient.live_shell(
+        conn,
+        fixed_x(),
+        user,
+        test_auth_key(),
+        command,
+        "xterm-256color",
+        cols,
+        rows,
+        resize,
+      )
+      conn.close()
+      match outcome {
+        @sshclient.Done(r) => {
+          println("result: SHELL_DONE")
+          println("pty_granted: " + yn(r.pty_granted))
+          println("resize_sent: " + yn(r.resize_sent))
+          println("stdout_len: " + r.stdout.length().to_string())
+          println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+          println("stderr_len: " + r.stderr.length().to_string())
+          println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+          println("exit_status: " + r.exit_status.to_string())
+          match r.exit_signal {
+            None => println("exit_signal: none")
+            Some((n, core)) =>
+              println(
+                "exit_signal: " + n + " core=" + yn(core),
+              )
+          }
+          println("adjusts_sent: " + r.adjusts_sent.to_string())
+          println("total_sent_bytes: " + r.sent_bytes.to_string())
+          println("total_recv_bytes: " + r.recv_bytes.to_string())
+          // 标志串是否出现在 stdout 里:pty 会把命令回显出来,这是「shell 真的
+          // 跑起来了」最直接的证据——exit-status 0 只说明它正常退出了。
+          let seen = @sshclient.sh_contains_bytes(r.stdout, @sshclient.sh_ascii(command))
+          println("marker_seen: " + yn(seen))
+          print_bytes(r.stdout)
+          print_bytes(r.stderr)
+        }
+        @sshclient.AuthFailed(e) => {
+          println("result: AUTH_FAILED")
+          print_auth_rejection(e)
+          println("error: " + auth_error_name(e))
+        }
+        @sshclient.ChannelFailed(e) => {
+          println("result: CHANNEL_FAILED")
+          println("error: " + exec_error_name(e))
+        }
+      }
+    }
+  }
+}
+
+///| 参数是不是一个开关(以 `--` 开头)
+fn is_switch(s : String) -> Bool {
+  s.length() > 2 && s[0].to_int() == 45 && s[1].to_int() == 45
+}
+
+///|
 fn main {
   let argv = @env.args()
   let port = find_port(argv)
+  let (shell_cmd, def_cols, def_rows, _) = shell_mode(argv)
+  if shell_cmd != "" {
+    let cols = int_flag(argv, "--cols", def_cols)
+    let rows = int_flag(argv, "--rows", def_rows)
+    run_shell(port, shell_cmd, cols, rows, resize_flag(argv))
+    return
+  }
   match exec_command(argv) {
     Some(cmd) => {
       run_exec(port, cmd)

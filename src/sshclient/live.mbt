@@ -1289,6 +1289,470 @@ fn chan_error(e : @channel.ChanError) -> ExecError {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Interactive session (Loop #36)
+// ---------------------------------------------------------------------------
+
+///| 交互式会话的结果
+pub(all) enum ShellOutcome {
+  Done(ShellResult)
+  AuthFailed(AuthError)
+  ChannelFailed(ExecError)
+}
+
+///|
+/// 一次交互式会话的结果
+///
+/// `pty_granted` 单列出来:服务端可以合法地拒绝 pty(`PermitTTY no`、或用
+/// `-T` 连进来),真实客户端的做法是退回无 pty 继续(clientloop.c:2750 把
+/// `client_tty` 清零)。把这个布尔藏进错误里的话,「没有 pty 但能跑」和
+/// 「彻底失败」会长得一样。
+pub(all) struct ShellResult {
+  stdout : FixedArray[Byte]
+  stderr : FixedArray[Byte]
+  exit_status : Int
+  exit_signal : (String, Bool)?
+  exit_signal_message : String
+  pty_granted : Bool
+  ///| 请求的窗口尺寸;`window-change` 是不是成功发出去了
+  cols : Int
+  rows : Int
+  resize_sent : Bool
+  adjusts_sent : Int
+  sent_bytes : Int
+  recv_bytes : Int
+}
+
+///|
+/// 在真服务器上开一个交互式 shell,敲一条命令,收输出,再退出。
+///
+/// 时序是硬编码的,因为协议本身就是时序:
+///
+///   1. CHANNEL_OPEN                     (我们发)
+///   2. <- CHANNEL_OPEN_CONFIRMATION
+///   3. CHANNEL_REQUEST "pty-req" TRUE   (我们发)
+///   4. <- CHANNEL_SUCCESS / FAILURE     <- 拒了就退回无 pty,不致命
+///   5. CHANNEL_REQUEST "shell"  TRUE    (我们发)
+///   6. <- CHANNEL_SUCCESS
+///   7. CHANNEL_REQUEST "window-change"  (我们发,want_reply=FALSE,不等回复)
+///   8. CHANNEL_DATA = 命令 + CRLF       (我们发,这是远端的 stdin)
+///   9. <- DATA ... 直到看到命令回显
+///  10. CHANNEL_DATA = "exit" + CRLF
+///  11. <- ... 直到 CHANNEL_CLOSE
+///
+/// 第 6 步要循环而不是只收一个包:pty 的横幅往往和 CHANNEL_SUCCESS 同批甚至
+/// 更早到达,只收一个包会把横幅当成「shell 已被接受」然后丢掉。
+pub fn live_shell(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  command : String,
+  term : String,
+  cols : Int,
+  rows : Int,
+  resize_to : (Int, Int)?,
+) -> ShellOutcome {
+  let (auth, state_opt) = live_auth_with_state(conn, x, user, d)
+  match auth {
+    Authenticated(_) => ()
+    Failed(e) => return ShellOutcome::AuthFailed(e)
+  }
+  let st = match state_opt {
+    None => return ShellOutcome::ChannelFailed(ExecError::NoSessionState)
+    Some(v) => v
+  }
+  let (chan0, failure, pty_granted, resize_sent) = shell_drive(
+    conn,
+    st,
+    command,
+    term,
+    cols,
+    rows,
+    resize_to,
+  )
+  match failure {
+    Some(e) => ShellOutcome::ChannelFailed(e)
+    None => {
+      let rep = chan0.shell_report()
+      ShellOutcome::Done({
+        stdout: rep.stdout,
+        stderr: rep.stderr,
+        exit_status: rep.exit_status,
+        exit_signal: rep.exit_signal,
+        exit_signal_message: rep.exit_signal_message,
+        pty_granted,
+        cols,
+        rows,
+        resize_sent,
+        adjusts_sent: rep.adjusts_sent,
+        sent_bytes: st.counters.sent,
+        recv_bytes: st.counters.recv,
+      })
+    }
+  }
+}
+
+///|
+/// 收包直到通道被打开(OPEN_CONFIRMATION 或 OPEN_FAILURE)。
+///
+/// 单独写一个而不是复用 `shell_confirm`:那一个等的是 CHANNEL_SUCCESS /
+/// CHANNEL_FAILURE,而开通道这一步来的是 CHANNEL_OPEN_CONFIRMATION ——
+/// 拿错条件的表现不是报错,是**死等**:服务端已经把确认发完了,之后再没有
+/// 任何数据,而读包是阻塞的。
+fn shell_wait_open(
+  conn : @tcp.TcpConn,
+  st : SessionState,
+  chan : @channel.ChanState,
+  cap : Int,
+) -> (SessionState, @channel.ChanState, ExecError?) {
+  let mut s = st
+  let mut c = chan
+  let mut n = 0
+  while n < cap {
+    match recv_packet(conn, s.counters, s.recv) {
+      Closed => return (s, c, Some(ExecError::Closed))
+      BadPacket(why) => return (s, c, Some(ExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        n = n + 1
+        let (c1, actions, err) = @channel.chan_step(c, t, pl)
+        c = c1
+        match err {
+          None => ()
+          Some(chan_err) => return (s, c, Some(chan_error(chan_err)))
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          match send_action(conn, s, actions[i]) {
+            None => return (s, c, Some(ExecError::SendFailed))
+            Some(x) => s = x
+          }
+        }
+        if t == 0x5b || t == 0x5c {
+          return (s, c, None)
+        }
+      }
+    }
+  }
+  (s, c, Some(ExecError::TooManyPackets))
+}
+
+///|
+/// 收包直到看到 CHANNEL_SUCCESS / CHANNEL_FAILURE,顺带把中间的 DATA 喂进状态机。
+///
+/// 交互式流程里这两个包**不是**致命的:pty-req 被拒只意味着没有 tty,shell
+/// 仍然开得起来(`chan_step` 在 `interactive` 模式下只记数不报错)。
+fn shell_confirm(
+  conn : @tcp.TcpConn,
+  st : SessionState,
+  chan : @channel.ChanState,
+  cap : Int,
+) -> (SessionState, @channel.ChanState, ExecError?, Bool) {
+  let mut s = st
+  let mut c = chan
+  let mut n = 0
+  while n < cap {
+    match recv_packet(conn, s.counters, s.recv) {
+      Closed => return (s, c, Some(ExecError::Closed), false)
+      BadPacket(why) => return (s, c, Some(ExecError::BadPacket(why)), false)
+      Packet(t, pl) => {
+        n = n + 1
+        let (c1, actions, err) = @channel.chan_step(c, t, pl)
+        c = c1
+        match err {
+          None => ()
+          Some(chan_err) => return (s, c, Some(chan_error(chan_err)), false)
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          match send_action(conn, s, actions[i]) {
+            None => return (s, c, Some(ExecError::SendFailed), false)
+            Some(x) => s = x
+          }
+        }
+        if t == 0x63 {
+          return (s, c, None, true)
+        }
+        if t == 0x64 {
+          // CHANNEL_FAILURE:被拒了,但 shell 还能继续。
+          return (s, c, None, false)
+        }
+      }
+    }
+  }
+  (s, c, Some(ExecError::TooManyPackets), false)
+}
+
+///| 收包直到字节流里出现 `needle`,或者包数超限
+fn shell_read_until(
+  conn : @tcp.TcpConn,
+  st : SessionState,
+  chan : @channel.ChanState,
+  seen : FixedArray[Byte],
+  needle : FixedArray[Byte],
+  cap : Int,
+) -> (SessionState, @channel.ChanState, FixedArray[Byte], ExecError?) {
+  let mut s = st
+  let mut c = chan
+  let mut buf = seen
+  // chan_step 从不丢弃已收的块,所以 `c.stdout` 每次都是**到目前为止的全文**。
+  // 直接把它整个接上会指数增长(第 n 轮接上 n 倍),几十个包就撑爆内存。
+  let mut have = c.stdout_len
+  let mut n = 0
+  while n < cap {
+    match recv_packet(conn, s.counters, s.recv) {
+      Closed => return (s, c, buf, Some(ExecError::Closed))
+      BadPacket(why) => return (s, c, buf, Some(ExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        n = n + 1
+        let (c1, actions, err) = @channel.chan_step(c, t, pl)
+        let grew = c1.stdout_len - have
+        have = c1.stdout_len
+        c = c1
+        match err {
+          None => ()
+          Some(chan_err) => return (s, c, buf, Some(chan_error(chan_err)))
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          match send_action(conn, s, actions[i]) {
+            None => return (s, c, buf, Some(ExecError::SendFailed))
+            Some(x) => s = x
+          }
+        }
+        // 只接新增的那一段:它是 `c.stdout` 末尾 `grew` 个字节。
+        buf = @channel.ch_cat(buf, tail_of(c.stdout, grew))
+        if sh_contains_bytes(buf, needle) {
+          return (s, c, buf, None)
+        }
+        if c.finished() {
+          return (s, c, buf, None)
+        }
+      }
+    }
+  }
+  (s, c, buf, Some(ExecError::TooManyPackets))
+}
+
+///| 一个块序列里最后 `n` 个字节
+fn tail_of(
+  chunks : Array[FixedArray[Byte]],
+  n : Int,
+) -> FixedArray[Byte] {
+  let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
+  let mut need = n
+  let mut i = chunks.length() - 1
+  while i >= 0 && need > 0 {
+    let ch = chunks[i]
+    if ch.length() <= need {
+      for j = 0; j < ch.length(); j = j + 1 {
+        out[j] = ch[j]
+      }
+      need = need - ch.length()
+    } else {
+      let skip = ch.length() - need
+      for j = 0; j < need; j = j + 1 {
+        out[j] = ch[skip + j]
+      }
+      need = 0
+    }
+    i = i - 1
+  }
+  out
+}
+
+fn shell_drive(
+  conn : @tcp.TcpConn,
+  st0 : SessionState,
+  command : String,
+  term : String,
+  cols : Int,
+  rows : Int,
+  resize_to : (Int, Int)?,
+) -> (@channel.ChanState, ExecError?, Bool, Bool) {
+  let mut st = st0
+  let mut chan = @channel.ChanState::new_interactive(
+    @channel.LOCAL_CHANNEL,
+  )
+  let open = chan.open_action()
+  match send_action(conn, st, open) {
+    None => return (chan, Some(ExecError::SendFailed), false, false)
+    Some(x) => st = x
+  }
+  // 1) CHANNEL_OPEN_CONFIRMATION
+  {
+    let (s, c, err) = shell_wait_open(conn, st, chan, 8)
+    st = s
+    chan = c
+    match err {
+      Some(e) => return (chan, Some(e), false, false)
+      None => ()
+    }
+    if !chan.open_done {
+      return (
+        chan,
+        Some(ExecError::Malformed("no_open_confirmation")),
+        false,
+        false,
+      )
+    }
+  }
+  // 2) pty-req。被拒不算致命。
+  let pty = match chan.pty_req_action(
+    term,
+    cols,
+    rows,
+    0,
+    0,
+    @channel.tty_modes_bytes(38400),
+  ) {
+    None => return (chan, Some(ExecError::Malformed("pty_before_open")), false, false)
+    Some(a) => a
+  }
+  match send_action(conn, st, pty) {
+    None => return (chan, Some(ExecError::SendFailed), false, false)
+    Some(x) => st = x
+  }
+  let pty_granted = {
+    let (s, c, err, ok) = shell_confirm(conn, st, chan, 64)
+    st = s
+    chan = c
+    match err {
+      Some(e) => return (chan, Some(e), false, false)
+      None => ok
+    }
+  }
+  // 3) shell
+  let shell = match chan.shell_action() {
+    None => return (chan, Some(ExecError::Malformed("shell_before_open")), false, false)
+    Some(a) => a
+  }
+  match send_action(conn, st, shell) {
+    None => return (chan, Some(ExecError::SendFailed), false, false)
+    Some(x) => st = x
+  }
+  {
+    let (s, c, err, _ok) = shell_confirm(conn, st, chan, 64)
+    st = s
+    chan = c
+    match err {
+      Some(e) => return (chan, Some(e), pty_granted, false)
+      None => ()
+    }
+  }
+  // 4) window-change。want_reply=FALSE,服务端不回任何东西(session.c:1843),
+  //    所以发完就往下走——等一个 CHANNEL_SUCCESS 会永远等下去。
+  let mut resize_sent = false
+  match resize_to {
+    Some((c2, r2)) => {
+      let a = chan.window_change_action(c2, r2, 0, 0)
+      match send_action(conn, st, a) {
+        None => return (chan, Some(ExecError::SendFailed), pty_granted, false)
+        Some(x) => {
+          st = x
+          resize_sent = true
+        }
+      }
+    }
+    None => ()
+  }
+  // 5) 命令本身。CRLF 是因为远端是 Windows shell;LF 在 conhost 上不提交。
+  let mut line = sh_ascii(command)
+  line = @channel.ch_cat(line, FixedArray::from_array([b'\r', b'\n']))
+  match send_action(conn, st, chan.stdin_action(line)) {
+    None => return (chan, Some(ExecError::SendFailed), pty_granted, resize_sent)
+    Some(x) => st = x
+  }
+  // 6) 读到命令回显出现
+  let marker = sh_ascii(command)
+  let (s, c, _buf, err) = shell_read_until(
+    conn,
+    st,
+    chan,
+    sh_empty_bytes(),
+    marker,
+    4096,
+  )
+  st = s
+  chan = c
+  match err {
+    Some(e) => return (chan, Some(e), pty_granted, resize_sent)
+    None => ()
+  }
+  // 7) exit,收到 CLOSE 为止
+  let quit = FixedArray::from_array([b'e', b'x', b'i', b't', b'\r', b'\n'])
+  match send_action(conn, st, chan.stdin_action(quit)) {
+    None => return (chan, Some(ExecError::SendFailed), pty_granted, resize_sent)
+    Some(x) => st = x
+  }
+  let mut n = 0
+  while !chan.finished() {
+    if n >= 4096 {
+      return (chan, Some(ExecError::TooManyPackets), pty_granted, resize_sent)
+    }
+    match recv_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(ExecError::Closed), pty_granted, resize_sent)
+      BadPacket(why) =>
+        return (chan, Some(ExecError::BadPacket(why)), pty_granted, resize_sent)
+      Packet(t, pl) => {
+        n = n + 1
+        let (chan2, actions, e) = @channel.chan_step(chan, t, pl)
+        chan = chan2
+        match e {
+          None => ()
+          Some(chan_err) =>
+            return (chan, Some(chan_error(chan_err)), pty_granted, resize_sent)
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          match send_action(conn, st, actions[i]) {
+            None =>
+              return (chan, Some(ExecError::SendFailed), pty_granted, resize_sent)
+            Some(x) => st = x
+          }
+        }
+      }
+    }
+  }
+  (chan, None, pty_granted, resize_sent)
+}
+
+///|
+/// ASCII -> 字节。`client.mbt` 里已有同名私有函数,这里换个名字免得重复定义。
+///
+/// `pub` 是因为两个 CLI 都要用它来确认「命令确实被 shell 回显了」——
+/// exit-status 0 只说明进程正常退出,回显才说明它真的收到了命令。
+pub fn sh_ascii(s : String) -> FixedArray[Byte] {
+  let out : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
+  for i = 0; i < s.length(); i = i + 1 {
+    out[i] = (s[i].to_int() & 0xFF).to_byte()
+  }
+  out
+}
+
+fn sh_empty_bytes() -> FixedArray[Byte] {
+  FixedArray::make(0, b'\x00')
+}
+
+///| 子串查找(朴素)。用于「命令回显出现了没有」,不追求快。
+///
+/// `pub` 的理由同上:CLI 要用它做同一个判断,两边各写一份就等于有两处可能
+/// 对「回显」理解不一致的地方。
+pub fn sh_contains_bytes(hay : FixedArray[Byte], needle : FixedArray[Byte]) -> Bool {
+  if needle.length() == 0 || needle.length() > hay.length() {
+    return false
+  }
+  for i = 0; i <= hay.length() - needle.length(); i = i + 1 {
+    let mut ok = true
+    for j = 0; j < needle.length(); j = j + 1 {
+      if hay[i + j].to_int() != needle[j].to_int() {
+        ok = false
+        break
+      }
+    }
+    if ok {
+      return true
+    }
+  }
+  false
+}
+
 ///|
 /// USERAUTH_FAILURE 的可读原因(RFC 4252 §5.1)
 ///

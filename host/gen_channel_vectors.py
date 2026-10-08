@@ -105,8 +105,145 @@ pub(all) struct SessionCase {
   final_cur : Int
 }
 
+///|
+/// One packet the *driver* sends, timed by how many server packets preceded it.
+///
+/// An interactive session is mostly the driver's decisions: pty-req only after
+/// OPEN_CONFIRMATION, shell only after pty-req's reply, stdin whenever. Loop #35's
+/// model only recorded what the state machine produced, which would have left
+/// the whole request sequence untested.
+pub(all) struct ClientSend {
+  after : Int
+  msg_type : Int
+  payload_hex : String
+}
+
+///| One interactive transcript.
+pub(all) struct ShellCase {
+  name : String
+  local_channel : Int
+  remote_channel : Int
+  packets : Array[Packet]
+  client_sends : Array[ClientSend]
+  replies : Array[Packet]
+  stdout : Stream
+  stderr : Stream
+  exit_status : Int
+  exit_signal : String
+  success_count : Int
+  failure_count : Int
+  adjusts_sent : Int
+  final_cur : Int
+}
+
+pub(all) struct ShellPayloadCase {
+  name : String
+  recipient : Int
+  term : String
+  cols : Int
+  rows : Int
+  width_px : Int
+  height_px : Int
+  modes_hex : String
+  pty_req_hex : String
+  shell_hex : String
+  resize_cols : Int
+  resize_rows : Int
+  window_change_hex : String
+  stdin_hex : String
+  exit_signal_name : String
+  exit_signal_core : Bool
+  exit_signal_message : String
+  exit_signal_hex : String
+}
+
 // MoonBit does not synthesise a constructor, and `pub(all)` fields are
 // immutable, so each one gets an explicit builder.
+
+
+pub fn ClientSend::new(
+  after : Int,
+  msg_type : Int,
+  payload_hex : String,
+) -> ClientSend {
+  { after, msg_type, payload_hex, }
+}
+
+pub fn ShellCase::new(
+  name : String,
+  local_channel : Int,
+  remote_channel : Int,
+  packets : Array[Packet],
+  client_sends : Array[ClientSend],
+  replies : Array[Packet],
+  stdout : Stream,
+  stderr : Stream,
+  exit_status : Int,
+  exit_signal : String,
+  success_count : Int,
+  failure_count : Int,
+  adjusts_sent : Int,
+  final_cur : Int,
+) -> ShellCase {
+  {
+    name,
+    local_channel,
+    remote_channel,
+    packets,
+    client_sends,
+    replies,
+    stdout,
+    stderr,
+    exit_status,
+    exit_signal,
+    success_count,
+    failure_count,
+    adjusts_sent,
+    final_cur,
+  }
+}
+
+pub fn ShellPayloadCase::new(
+  name : String,
+  recipient : Int,
+  term : String,
+  cols : Int,
+  rows : Int,
+  width_px : Int,
+  height_px : Int,
+  modes_hex : String,
+  pty_req_hex : String,
+  shell_hex : String,
+  resize_cols : Int,
+  resize_rows : Int,
+  window_change_hex : String,
+  stdin_hex : String,
+  exit_signal_name : String,
+  exit_signal_core : Bool,
+  exit_signal_message : String,
+  exit_signal_hex : String,
+) -> ShellPayloadCase {
+  {
+    name,
+    recipient,
+    term,
+    cols,
+    rows,
+    width_px,
+    height_px,
+    modes_hex,
+    pty_req_hex,
+    shell_hex,
+    resize_cols,
+    resize_rows,
+    window_change_hex,
+    stdin_hex,
+    exit_signal_name,
+    exit_signal_core,
+    exit_signal_message,
+    exit_signal_hex,
+  }
+}
 
 pub fn Packet::new(
   msg_type : Int,
@@ -229,6 +366,18 @@ def stream(s):
     return "Stream::new(%s, %d, %d)" % (lit(s["hex"]), s["byte"], s["len"])
 
 
+def client_sends(items, indent):
+    pad = " " * indent
+    if not items:
+        return "[]"
+    out = ["["]
+    for it in items:
+        out.append("%s  ClientSend::new(%d, %d, %s)," %
+                   (pad, it["after"], it["type"], lit(it["payload_hex"])))
+    out.append("%s]" % pad)
+    return "\n".join(out)
+
+
 def ints(items):
     return "[" + ", ".join(str(i) for i in items) + "]"
 
@@ -309,9 +458,67 @@ def render(doc):
     return "\n".join(parts) + "\n"
 
 
+def render_shell(doc):
+    parts = []
+
+    # ---- interactive payloads -------------------------------------------
+    parts.append("\n///| One entry per interactive message, for two channel ids.\n"
+                 "pub let kat_shell_payload_cases : Array[ShellPayloadCase] = [")
+    for p in doc["shell_payloads"]:
+        parts.append("  ShellPayloadCase::new(")
+        parts.append("    %s," % lit(p["name"]))
+        parts.append("    %d," % p["recipient"])
+        parts.append("    %s," % lit(p["term"]))
+        parts.append("    %d," % p["cols"])
+        parts.append("    %d," % p["rows"])
+        parts.append("    %d," % p["width_px"])
+        parts.append("    %d," % p["height_px"])
+        parts.append("    %s," % lit(p["modes_hex"]))
+        parts.append("    %s," % lit(p["pty_req_hex"]))
+        parts.append("    %s," % lit(p["shell_hex"]))
+        parts.append("    %d," % p["resize_cols"])
+        parts.append("    %d," % p["resize_rows"])
+        parts.append("    %s," % lit(p["window_change_hex"]))
+        parts.append("    %s," % lit(p["stdin_hex"]))
+        parts.append("    %s," % lit(p["exit_signal_name"]))
+        parts.append("    %s," % ("true" if p["exit_signal_core"] else "false"))
+        parts.append("    %s," % lit(p["exit_signal_message"]))
+        parts.append("    %s," % lit(p["exit_signal_hex"]))
+        parts.append("  ),")
+    parts.append("]")
+
+    # ---- interactive transcripts ---------------------------------------
+    parts.append("\n///| Interactive transcripts.  `shell_no_pty` is the one that\n"
+                 "///| catches a driver which treats a refused pty-req as fatal\n"
+                 "///| instead of falling back the way clientloop.c:2750 does;\n"
+                 "///| `shell_resize` catches one that waits for a reply that\n"
+                 "///| session.c:1843 never sends.\n"
+                 "pub let kat_shell_cases : Array[ShellCase] = [")
+    for s in doc["shell_sessions"]:
+        parts.append("  ShellCase::new(")
+        parts.append("    %s," % lit(s["name"]))
+        parts.append("    %d," % s["local_channel"])
+        parts.append("    %d," % s["remote_channel"])
+        parts.append("    %s," % packets(s["packets"], 4))
+        parts.append("    %s," % client_sends(s["client_sends"], 4))
+        parts.append("    %s," % packets(s["replies"], 4))
+        parts.append("    %s," % stream(s["stdout"]))
+        parts.append("    %s," % stream(s["stderr"]))
+        parts.append("    %d," % s["exit_status"])
+        parts.append("    %s," % lit(s["exit_signal"] or ""))
+        parts.append("    %d," % s["success_count"])
+        parts.append("    %d," % s["failure_count"])
+        parts.append("    %d," % s["adjusts_sent"])
+        parts.append("    %d," % s["final_cur"])
+        parts.append("  ),")
+    parts.append("]")
+
+    return "\n".join(parts) + "\n"
+
+
 def main():
     doc = O.build_document()
-    text = render(doc)
+    text = render(doc) + render_shell(doc)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)

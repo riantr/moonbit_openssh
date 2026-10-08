@@ -72,6 +72,29 @@ pub(all) struct ChanState {
   close_sent : Bool
   close_recv : Bool
   adjusts_sent : Int
+  ///|
+  /// 收到过几个 CHANNEL_SUCCESS。
+  ///
+  /// exec 只需要一个;pty-req + shell 是两个,而且驱动层必须知道哪一个是哪个
+  /// ——靠计数推断顺序在服务器并发回包时会错位,所以计数只当「收到了几个」用,
+  /// 具体对应哪个请求由驱动层自己按顺序对齐。
+  success_count : Int
+  ///|
+  /// 收到过几个 CHANNEL_FAILURE。
+  ///
+  /// 只有交互式流程会用到:那里的 CHANNEL_FAILURE 通常是在说「服务端不给
+  /// pty」,而 OpenSSH 客户端的做法是 `c->client_tty = 0` 然后继续开 shell
+  /// (clientloop.c:2750)。exec 流程里同一个包仍然是致命的 exec 被拒,所以
+  /// 那一支照旧报 `ExecRejected`。
+  failure_count : Int
+  ///|
+  /// 交互式流程(pty-req + shell)与 exec 流程的失败语义不同,所以显式区分,
+  /// 而不是让 `chan_step` 去猜哪个请求被拒了——它并不跟踪待确认的请求。
+  interactive : Bool
+  ///| 被信号杀死时的 exit-signal(RFC 4254 §6.10):(信号名, 是否 core dump)
+  exit_signal : (String, Bool)?
+  ///| exit-signal 里的 error message(没有 signal 时是空串)
+  exit_signal_message : String
 }
 
 ///|
@@ -93,7 +116,23 @@ pub fn ChanState::new(local_channel : Int) -> ChanState {
     close_sent: false,
     close_recv: false,
     adjusts_sent: 0,
+    success_count: 0,
+    failure_count: 0,
+    interactive: false,
+    exit_signal: None,
+    exit_signal_message: "",
   }
+}
+
+///|
+/// 交互式会话用的初始状态。
+///
+/// 和 `new` 的唯一区别是 `interactive`——它只影响 CHANNEL_FAILURE 怎么算。
+/// 把这个开关摆在状态里而不是让驱动去解释错误,是因为驱动层要分清
+/// 「pty 被拒但还能继续」和「exec 被拒,到此为止」,而同一个包在两种流程里
+/// 含义相反。
+pub fn ChanState::new_interactive(local_channel : Int) -> ChanState {
+  { ..ChanState::new(local_channel), interactive: true }
 }
 
 ///|
@@ -122,6 +161,124 @@ pub fn ChanState::exec_action(
     return None
   }
   Some(Send(0x62, channel_exec_payload(self.remote_id, command)))
+}
+
+// ---------------------------------------------------------------------------
+// Interactive session: pty-req / shell / window-change / stdin
+// ---------------------------------------------------------------------------
+
+///|
+/// 交互式会话的第 1 步:CHANNEL_REQUEST "pty-req"。
+///
+/// 和 exec 一样必须在 OPEN_CONFIRMATION 之后。want_reply=TRUE,所以服务端会回
+/// CHANNEL_SUCCESS 或 CHANNEL_FAILURE——两者都由 `chan_step` 计数,不在这儿判断。
+pub fn ChanState::pty_req_action(
+  self : ChanState,
+  term : String,
+  cols : Int,
+  rows : Int,
+  pixel_width : Int,
+  pixel_height : Int,
+  modes : FixedArray[Byte],
+) -> ChanAction? {
+  if !self.open_done {
+    return None
+  }
+  Some(
+    Send(
+      0x62,
+      channel_pty_req_payload(
+        self.remote_id,
+        term,
+        cols,
+        rows,
+        pixel_width,
+        pixel_height,
+        modes,
+      ),
+    ),
+  )
+}
+
+///| 交互式会话的第 2 步:CHANNEL_REQUEST "shell"
+pub fn ChanState::shell_action(self : ChanState) -> ChanAction? {
+  if !self.open_done {
+    return None
+  }
+  Some(Send(0x62, channel_shell_payload(self.remote_id)))
+}
+
+///|
+/// 窗口尺寸变更(CHANNEL_REQUEST "window-change",want_reply=FALSE)
+///
+/// 任何时候都能发,不需要等 shell 起来——它用的是 `remote_id`,在
+/// OPEN_CONFIRMATION 之后就一直有效。
+pub fn ChanState::window_change_action(
+  self : ChanState,
+  cols : Int,
+  rows : Int,
+  pixel_width : Int,
+  pixel_height : Int,
+) -> ChanAction {
+  Send(
+    0x62,
+    channel_window_change_payload(
+      self.remote_id,
+      cols,
+      rows,
+      pixel_width,
+      pixel_height,
+    ),
+  )
+}
+
+///|
+/// 往通道里写数据(CHANNEL_DATA,当作远端的 stdin)。
+///
+/// 受**远端**窗口约束:我们的发送量不能超过 `remote_window`。调用方负责在
+/// 收到对端 CHANNEL_WINDOW_ADJUST 后再继续——状态机只能看到 inbound 包,
+/// 而「写多少」是发送侧的事。超发会让服务端按 RFC 4254 §5.2 直接断链。
+pub fn ChanState::stdin_action(
+  self : ChanState,
+  data : FixedArray[Byte],
+) -> ChanAction {
+  Send(0x5e, channel_data_payload(self.remote_id, data))
+}
+
+///|
+/// 交互式会话的结果
+///
+/// `exit_status` 与 `exit_signal` 分开:被信号杀死时服务端发的是
+/// `exit-signal` 而不是 `exit-status`,把两者混成一个字段的话「被 KILL」
+/// 会和「正常返回」长得一模一样。
+pub(all) struct ShellReport {
+  remote_id : Int
+  stdout : FixedArray[Byte]
+  stderr : FixedArray[Byte]
+  exit_status : Int
+  exit_signal : (String, Bool)?
+  exit_signal_message : String
+  adjusts_sent : Int
+  ///| 收到过几个 CHANNEL_SUCCESS(pty-req + shell 应为 2)
+  success_count : Int
+}
+
+///|
+/// 交互式会话的收尾报告。
+///
+/// 没有 exit-status 也没有 exit-signal 时按 SSH 惯例回 255,理由同
+/// `ExecReport`。
+pub fn ChanState::shell_report(self : ChanState) -> ShellReport {
+  {
+    remote_id: self.remote_id,
+    stdout: ch_cat_all(self.stdout),
+    stderr: ch_cat_all(self.stderr),
+    exit_status: if self.exit_status < 0 { 255 } else { self.exit_status },
+    exit_signal: self.exit_signal,
+    exit_signal_message: self.exit_signal_message,
+    adjusts_sent: self.adjusts_sent,
+    success_count: self.success_count,
+  }
 }
 
 ///|
@@ -165,13 +322,24 @@ pub fn chan_step(
           (st, none, Some(ChanError::OpenFailed(reason, desc)))
       }
     0x63 =>
-      // CHANNEL_SUCCESS —— exec 被接受
+      // CHANNEL_SUCCESS —— exec / pty-req / shell 被接受。只数个数:具体是哪个
+      // 请求被确认由驱动层按发送顺序对齐,状态机不去猜。
       if st.open_done {
-        ({ ..st, exec_acked: true }, none, None)
+        ({ ..st, exec_acked: true, success_count: st.success_count + 1 },
+         none,
+         None)
       } else {
         (st, none, Some(ChanError::Malformed("success_before_open")))
       }
-    0x64 => (st, none, Some(ChanError::ExecRejected))
+    0x64 =>
+      if st.interactive {
+        // 交互式流程:CHANNEL_FAILURE 只说明「这个请求被拒了」。最常见的是服务端
+        // 不给 pty(`PermitTTY no`),而真实客户端会退回无 pty 继续开 shell
+        // (clientloop.c:2750)。当成致命错误会让整个 shell 用不了。
+        ({ ..st, failure_count: st.failure_count + 1 }, none, None)
+      } else {
+        (st, none, Some(ChanError::ExecRejected))
+      }
     0x5e =>
       match parse_data(payload) {
         None => (st, none, Some(ChanError::Malformed("data")))
@@ -252,9 +420,20 @@ pub fn chan_step(
                   ({ ..st, exit_status: code }, none, None)
                 }
             }
+          } else if rtype == "exit-signal" {
+            // 被信号杀死时服务端发的是这个。只认 exit-status 的客户端会一直
+            // 等不到退出码,最后按 255 收场——看起来就像「命令没有输出」。
+            match parse_exit_signal(payload, off) {
+              None => (st, none, Some(ChanError::Malformed("exit_signal")))
+              Some((name, core, msg)) =>
+                ({ ..st, exit_signal: Some((name, core)),
+                   exit_signal_message: msg },
+                 none,
+                 None)
+            }
           } else {
-            // "exit-signal" / "pty-req" 之类的请求一律不回。真实客户端对
-            // want_reply=FALSE 的请求本来就不回。
+            // "pty-req" 之类的请求一律不回。真实客户端对 want_reply=FALSE 的
+            // 请求本来就不回。
             (st, none, None)
           }
       }

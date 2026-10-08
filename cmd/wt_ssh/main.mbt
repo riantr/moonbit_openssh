@@ -148,6 +148,76 @@ fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   println("--- end raw ---")
 }
 
+fn wt_yn(b : Bool) -> String {
+  if b {
+    "true"
+  } else {
+    "false"
+  }
+}
+
+fn cfg_int(name : String, fallback : Int) -> Int {
+  let s = cfg(name)
+  if s == "" {
+    return fallback
+  }
+  let mut v = 0
+  let mut any = false
+  for i = 0; i < s.length(); i = i + 1 {
+    let d = s[i].to_int()
+    if d >= 48 && d <= 57 {
+      v = v * 10 + (d - 48)
+      any = true
+    }
+  }
+  if any {
+    v
+  } else {
+    fallback
+  }
+}
+
+///| `cfg("resize")` 形如 "132x43";没给或格式不对就返回 None
+fn cfg_resize() -> (Int, Int)? {
+  let s = cfg("resize")
+  if s == "" {
+    return None
+  }
+  let mut first = -1
+  let mut second = -1
+  let mut seen_x = false
+  for i = 0; i < s.length(); i = i + 1 {
+    let d = s[i].to_int()
+    if d >= 48 && d <= 57 {
+      if seen_x {
+        if second < 0 {
+          second = d - 48
+        } else {
+          second = second * 10 + (d - 48)
+        }
+      } else {
+        if first < 0 {
+          first = d - 48
+        } else {
+          first = first * 10 + (d - 48)
+        }
+      }
+    } else if d == 120 || d == 88 {
+      if seen_x || first <= 0 {
+        return None
+      }
+      seen_x = true
+    } else {
+      return None
+    }
+  }
+  if !seen_x || first <= 0 || second <= 0 {
+    None
+  } else {
+    Some((first, second))
+  }
+}
+
 fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
   match e {
     NoSessionState => "NoSessionState"
@@ -172,6 +242,85 @@ async fn main {
   // Loop #35: `exec: <command>` runs a remote command and reads back its
   // stdout / stderr / exit-status.
   let exec_cmd = cfg("exec")
+  // Loop #36: `shell: <command>` opens a pty, types, optionally resizes, exits.
+  // Checked before `exec` so a config carrying both runs the interactive one.
+  let shell_cmd = cfg("shell")
+  if shell_cmd != "" {
+    let user = cfg("user")
+    let uname = if user == "" { "hp" } else { user }
+    let cols = cfg_int("cols", 80)
+    let rows = cfg_int("rows", 24)
+    let resize = cfg_resize()
+    println("=== Loop #36 interactive shell in a browser Worker ===")
+    println("transport_url: " + url)
+    println("user: " + uname)
+    println("command: " + shell_cmd)
+    println("cols: " + cols.to_string())
+    println("rows: " + rows.to_string())
+    match resize {
+      Some((c, r)) => println("resize: " + c.to_string() + "x" + r.to_string())
+      None => println("resize: none")
+    }
+    let sconn2 = @wt.WtConn::connect(url) catch {
+      _ => {
+        println("result: FAILED")
+        println("error: ConnectFailed")
+        wt_finish(false, "connect failed")
+        return
+      }
+    }
+    println("transport: connected")
+    let soutcome = @wtlive.wt_live_shell(
+      sconn2,
+      fixed_x(),
+      uname,
+      test_auth_key(),
+      shell_cmd,
+      "xterm-256color",
+      cols,
+      rows,
+      resize,
+    )
+    match soutcome {
+      @wtlive.Done(r) => {
+        println("result: SHELL_DONE")
+        println("pty_granted: " + wt_yn(r.pty_granted))
+        println("resize_sent: " + wt_yn(r.resize_sent))
+        println("stdout_len: " + r.stdout.length().to_string())
+        println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+        println("stderr_len: " + r.stderr.length().to_string())
+        println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+        println("exit_status: " + r.exit_status.to_string())
+        match r.exit_signal {
+          None => println("exit_signal: none")
+          Some((n, core)) =>
+            println("exit_signal: " + n + " core=" + wt_yn(core))
+        }
+        println("adjusts_sent: " + r.adjusts_sent.to_string())
+        println("total_sent_bytes: " + r.sent_bytes.to_string())
+        println("total_recv_bytes: " + r.recv_bytes.to_string())
+        let seen = @sshclient.sh_contains_bytes(
+          r.stdout,
+          @sshclient.sh_ascii(shell_cmd),
+        )
+        println("marker_seen: " + wt_yn(seen))
+        wt_print_bytes(r.stdout)
+        wt_print_bytes(r.stderr)
+      }
+      @wtlive.AuthFailed(e) => {
+        println("result: AUTH_FAILED")
+        print_auth_rejection(e)
+        println("error: " + auth_error_name(e))
+      }
+      @wtlive.ChannelFailed(e) => {
+        println("result: CHANNEL_FAILED")
+        println("error: " + wt_exec_error_name(e))
+      }
+    }
+    sconn2.close()
+    wt_finish(true, "done")
+    return
+  }
   if exec_cmd != "" {
     let user = cfg("user")
     let uname = if user == "" { "hp" } else { user }

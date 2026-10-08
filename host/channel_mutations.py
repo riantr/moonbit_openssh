@@ -13,7 +13,13 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXEC = os.path.join(ROOT, "src", "channel", "exec.mbt")
+# Loop #35 mutated src/channel/exec.mbt; Loop #36 added the interactive
+# builders to src/channel/channel.mbt, so both files have to be restored
+# together or a failed run leaves the tree mutated.
+FILES = [
+    os.path.join(ROOT, "src", "channel", "exec.mbt"),
+    os.path.join(ROOT, "src", "channel", "channel.mbt"),
+]
 
 # (label, original, mutated, a check name that must go FAIL)
 MUTATIONS = [
@@ -39,21 +45,83 @@ MUTATIONS = [
     ),
     (
         "make exit-status report 0 instead of the SSH 255 fallback",
+        "pub fn ChanState::report(self : ChanState) -> ExecReport {\n"
+        "  {\n"
+        "    remote_id: self.remote_id,\n"
+        "    local_channel: self.local_channel,\n"
+        "    stdout: ch_cat_all(self.stdout),\n"
+        "    stderr: ch_cat_all(self.stderr),\n"
         "    exit_status: if self.exit_status < 0 { 255 } else { self.exit_status },",
+        "pub fn ChanState::report(self : ChanState) -> ExecReport {\n"
+        "  {\n"
+        "    remote_id: self.remote_id,\n"
+        "    local_channel: self.local_channel,\n"
+        "    stdout: ch_cat_all(self.stdout),\n"
+        "    stderr: ch_cat_all(self.stderr),\n"
         "    exit_status: if self.exit_status < 0 { 0 } else { self.exit_status },",
         "chan_sessions",
+    ),
+    # ---- Loop #36 --------------------------------------------------------
+    (
+        "swap cols and rows in pty-req",
+        "      @sshwire.write_ssh_string(ch_ascii(term)),\n"
+        "      u32be(cols),\n"
+        "      u32be(rows),",
+        "      @sshwire.write_ssh_string(ch_ascii(term)),\n"
+        "      u32be(rows),\n"
+        "      u32be(cols),",
+        "chan_pty_payloads",
+    ),
+    (
+        "send the tty modes unwrapped (forget the outer string)",
+        "      u32be(pixel_height),\n"
+        "      @sshwire.write_ssh_string(modes),",
+        "      u32be(pixel_height),\n"
+        "      modes,",
+        "chan_pty_payloads",
+    ),
+    (
+        "drop the TTY_OP_END terminator from the modes string",
+        "    FixedArray::from_array([TTY_OP_OSPEED]),\n"
+        "    u32be(baud),\n"
+        "    FixedArray::from_array([TTY_OP_END]),",
+        "    FixedArray::from_array([TTY_OP_OSPEED]),\n"
+        "    u32be(baud),",
+        "chan_pty_payloads",
+    ),
+    (
+        "ask for a reply to window-change, which the server never sends",
+        "    recipient,\n"
+        "    \"window-change\",\n"
+        "    false,",
+        "    recipient,\n"
+        "    \"window-change\",\n"
+        "    true,",
+        "chan_pty_payloads",
+    ),
+    (
+        "ignore exit-signal again",
+        "          } else if rtype == \"exit-signal\" {",
+        "          } else if rtype == \"exit-signal-never-matches\" {",
+        "chan_shell_sessions",
+    ),
+    (
+        "treat a refused pty-req as fatal instead of falling back",
+        "      if st.interactive {",
+        "      if false {",
+        "chan_shell_sessions",
     ),
 ]
 
 
 def read():
-    with open(EXEC, "r", encoding="utf-8", newline="") as fh:
-        return fh.read()
+    return {p: open(p, "r", encoding="utf-8", newline="").read() for p in FILES}
 
 
-def write(text):
-    with open(EXEC, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
+def write(state):
+    for p, text in state.items():
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
 
 
 def run_kat():
@@ -69,12 +137,21 @@ def main():
     failures = []
     try:
         for label, old, new, must_fail in MUTATIONS:
-            if original.count(old) != 1:
-                print("SKIP  %s -- anchor found %d times"
-                      % (label, original.count(old)))
+            # find the file that contains the anchor
+            target = None
+            for p, text in original.items():
+                if text.count(old) == 1:
+                    target = p
+                    break
+            if target is None:
+                counts = {os.path.basename(p): t.count(old)
+                          for p, t in original.items()}
+                print("SKIP  %s -- anchor count %s" % (label, counts))
                 failures.append(label)
                 continue
-            write(original.replace(old, new))
+            state = dict(original)
+            state[target] = state[target].replace(old, new)
+            write(state)
             out = run_kat()
             caught = ("%s: FAIL" % must_fail) in out
             print("%s  %s" % ("CAUGHT" if caught else "MISSED", label))

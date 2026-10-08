@@ -1047,6 +1047,375 @@ fn wt_chan_error(e : @channel.ChanError) -> WtExecError {
   }
 }
 
+///| 浏览器侧的一次交互式 shell 会话
+pub(all) enum WtShellOutcome {
+  Done(WtShellResult)
+  AuthFailed(WtAuthError)
+  ChannelFailed(WtExecError)
+}
+
+///|
+/// `pty_granted` 单列出来:服务端可以合法地拒绝 pty(`PermitTTY no`、或 `-T`),
+/// 真实客户端的做法是退回无 pty 继续(clientloop.c:2750)。把它藏进错误里的话,
+/// 「没有 pty 但能跑」和「彻底失败」会长得一样。
+pub(all) struct WtShellResult {
+  stdout : FixedArray[Byte]
+  stderr : FixedArray[Byte]
+  exit_status : Int
+  exit_signal : (String, Bool)?
+  exit_signal_message : String
+  pty_granted : Bool
+  cols : Int
+  rows : Int
+  resize_sent : Bool
+  adjusts_sent : Int
+  sent_bytes : Int
+  recv_bytes : Int
+}
+
+///|
+/// 在浏览器里开一个交互式 shell。
+///
+/// 和 `src/sshclient` 的 `live_shell` 是同一条控制流、同一个 `chan_step`,
+/// 只有 `wt_send_plain_packet` / `wt_recv_plain_packet` 不同——协议判断一行
+/// 都没有复制过来,所以两条路径不可能在协议层分叉。
+pub async fn wt_live_shell(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  command : String,
+  term : String,
+  cols : Int,
+  rows : Int,
+  resize_to : (Int, Int)?,
+) -> WtShellOutcome {
+  let box = { state: None, }
+  let res = wt_handshake_into(conn, x, box)
+  match res {
+    Established(_) => ()
+    Failed(e) => return WtShellOutcome::AuthFailed(WtAuthError::HandshakeFailed(e))
+  }
+  let st = match box.state {
+    None => return WtShellOutcome::ChannelFailed(WtExecError::NoSessionState)
+    Some(v) => v
+  }
+  let (accepted_opt, svc_err) = wt_request_userauth_service(conn, st)
+  match svc_err {
+    Some(WtSessionError::UnexpectedService(s)) =>
+      return WtShellOutcome::AuthFailed(WtAuthError::UnexpectedService(s))
+    _ => ()
+  }
+  match accepted_opt {
+    None => return WtShellOutcome::AuthFailed(WtAuthError::NoServiceAccept)
+    Some(_) => ()
+  }
+  let curve = @ecdsa.Curve::p256()
+  let (_, _, payload) = match
+    @userauth.userauth_publickey_signed_request(
+      curve,
+      d,
+      st.session_id,
+      user,
+      @userauth.AUTH_SERVICE_CONNECTION,
+    ) {
+    None => return WtShellOutcome::AuthFailed(WtAuthError::SignFailed)
+    Some(v) => v
+  }
+  if !wt_send_plain_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_USERAUTH_REQUEST,
+      payload,
+    ) {
+    return WtShellOutcome::AuthFailed(WtAuthError::NoAuthReply)
+  }
+  let mut tries = 0
+  let mut ok = false
+  while tries < 32 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return WtShellOutcome::AuthFailed(WtAuthError::NoAuthReply)
+      BadPacket(why) =>
+        return WtShellOutcome::AuthFailed(WtAuthError::BadPacket(why))
+      Packet(t, _) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS {
+          ok = true
+          break
+        }
+        if t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+          return WtShellOutcome::AuthFailed(WtAuthError::NoAuthReply)
+        }
+      }
+    }
+  }
+  if !ok {
+    return WtShellOutcome::AuthFailed(WtAuthError::NoAuthReply)
+  }
+  let (chan0, failure, pty_granted, resize_sent) = wt_shell_drive(
+    conn,
+    st,
+    command,
+    term,
+    cols,
+    rows,
+    resize_to,
+  )
+  match failure {
+    Some(e) => WtShellOutcome::ChannelFailed(e)
+    None => {
+      let rep = chan0.shell_report()
+      WtShellOutcome::Done({
+        stdout: rep.stdout,
+        stderr: rep.stderr,
+        exit_status: rep.exit_status,
+        exit_signal: rep.exit_signal,
+        exit_signal_message: rep.exit_signal_message,
+        pty_granted,
+        cols,
+        rows,
+        resize_sent,
+        adjusts_sent: rep.adjusts_sent,
+        sent_bytes: st.counters.sent,
+        recv_bytes: st.counters.recv,
+      })
+    }
+  }
+}
+
+///|
+/// 收包直到通道被打开。
+///
+/// 单独写而不是复用等 CHANNEL_SUCCESS 的那个:这一步来的是
+/// CHANNEL_OPEN_CONFIRMATION,拿错等待条件的表现不是报错而是**死等**——
+/// 服务端把确认发完就没事了,而读包是阻塞的。
+async fn wt_wait_open(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+  chan : @channel.ChanState,
+  cap : Int,
+) -> (@channel.ChanState, WtExecError?) {
+  let mut c = chan
+  let mut n = 0
+  while n < cap {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return (c, Some(WtExecError::Closed))
+      BadPacket(why) => return (c, Some(WtExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        n = n + 1
+        let (c1, actions, err) = @channel.chan_step(c, t, pl)
+        c = c1
+        match err {
+          None => ()
+          Some(chan_err) => return (c, Some(wt_chan_error(chan_err)))
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          if !wt_send_action(conn, st, actions[i]) {
+            return (c, Some(WtExecError::SendFailed))
+          }
+        }
+        if t == 0x5b || t == 0x5c {
+          return (c, None)
+        }
+      }
+    }
+  }
+  (c, Some(WtExecError::TooManyPackets))
+}
+
+///| 等 CHANNEL_SUCCESS / CHANNEL_FAILURE,并把中间的 DATA 喂进状态机
+async fn wt_confirm(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+  chan : @channel.ChanState,
+  cap : Int,
+) -> (@channel.ChanState, WtExecError?, Bool) {
+  let mut c = chan
+  let mut n = 0
+  while n < cap {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return (c, Some(WtExecError::Closed), false)
+      BadPacket(why) => return (c, Some(WtExecError::BadPacket(why)), false)
+      Packet(t, pl) => {
+        n = n + 1
+        let (c1, actions, err) = @channel.chan_step(c, t, pl)
+        c = c1
+        match err {
+          None => ()
+          Some(chan_err) => return (c, Some(wt_chan_error(chan_err)), false)
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          if !wt_send_action(conn, st, actions[i]) {
+            return (c, Some(WtExecError::SendFailed), false)
+          }
+        }
+        // CHANNEL_FAILURE 在交互式流程里不致命:那通常只是「服务端不给 pty」。
+        if t == 0x63 {
+          return (c, None, true)
+        }
+        if t == 0x64 {
+          return (c, None, false)
+        }
+      }
+    }
+  }
+  (c, Some(WtExecError::TooManyPackets), false)
+}
+
+async fn wt_shell_drive(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+  command : String,
+  term : String,
+  cols : Int,
+  rows : Int,
+  resize_to : (Int, Int)?,
+) -> (@channel.ChanState, WtExecError?, Bool, Bool) {
+  let mut chan = @channel.ChanState::new_interactive(
+    @channel.LOCAL_CHANNEL,
+  )
+  if !wt_send_action(conn, st, chan.open_action()) {
+    return (chan, Some(WtExecError::SendFailed), false, false)
+  }
+  let (c1, err) = wt_wait_open(conn, st, chan, 8)
+  chan = c1
+  match err {
+    Some(e) => return (chan, Some(e), false, false)
+    None => ()
+  }
+  if !chan.open_done {
+    return (
+      chan,
+      Some(WtExecError::Malformed("no_open_confirmation")),
+      false,
+      false,
+    )
+  }
+  let pty = match chan.pty_req_action(
+    term,
+    cols,
+    rows,
+    0,
+    0,
+    @channel.tty_modes_bytes(38400),
+  ) {
+    None =>
+      return (chan, Some(WtExecError::Malformed("pty_before_open")), false, false)
+    Some(a) => a
+  }
+  if !wt_send_action(conn, st, pty) {
+    return (chan, Some(WtExecError::SendFailed), false, false)
+  }
+  let (c2, err, pty_granted) = wt_confirm(conn, st, chan, 64)
+  chan = c2
+  match err {
+    Some(e) => return (chan, Some(e), false, false)
+    None => ()
+  }
+  let shell = match chan.shell_action() {
+    None =>
+      return (chan, Some(WtExecError::Malformed("shell_before_open")), false, false)
+    Some(a) => a
+  }
+  if !wt_send_action(conn, st, shell) {
+    return (chan, Some(WtExecError::SendFailed), false, false)
+  }
+  let (c3, err, _ok) = wt_confirm(conn, st, chan, 64)
+  chan = c3
+  match err {
+    Some(e) => return (chan, Some(e), pty_granted, false)
+    None => ()
+  }
+  // window-change 不等回复:session.c:1843 直接 return 1,服务端什么都不发。
+  let mut resize_sent = false
+  match resize_to {
+    Some((c2, r2)) => {
+      if !wt_send_action(conn, st, chan.window_change_action(c2, r2, 0, 0)) {
+        return (chan, Some(WtExecError::SendFailed), pty_granted, false)
+      }
+      resize_sent = true
+    }
+    None => ()
+  }
+  let marker = @sshclient.sh_ascii(command)
+  let mut line = @sshclient.sh_ascii(command)
+  line = @channel.ch_cat(line, FixedArray::from_array([b'\r', b'\n']))
+  if !wt_send_action(conn, st, chan.stdin_action(line)) {
+    return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+  }
+  let mut n = 0
+  let mut have = chan.stdout_len
+  let mut found = false
+  while n < 4096 && !found {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(WtExecError::Closed), pty_granted, resize_sent)
+      BadPacket(why) =>
+        return (chan, Some(WtExecError::BadPacket(why)), pty_granted, resize_sent)
+      Packet(t, pl) => {
+        n = n + 1
+        let (c4, actions, err) = @channel.chan_step(chan, t, pl)
+        let grew = c4.stdout_len - have
+        have = c4.stdout_len
+        chan = c4
+        match err {
+          None => ()
+          Some(chan_err) =>
+            return (chan, Some(wt_chan_error(chan_err)), pty_granted, resize_sent)
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          if !wt_send_action(conn, st, actions[i]) {
+            return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+          }
+        }
+        if @sshclient.sh_contains_bytes(@channel.ch_cat_all(chan.stdout), marker) {
+          found = true
+        }
+        if chan.finished() {
+          found = true
+        }
+        if grew < 0 {
+          return (chan, Some(WtExecError::Malformed("stdout_shrank")), pty_granted, resize_sent)
+        }
+      }
+    }
+  }
+  if !found {
+    return (chan, Some(WtExecError::TooManyPackets), pty_granted, resize_sent)
+  }
+  let quit = FixedArray::from_array([b'e', b'x', b'i', b't', b'\r', b'\n'])
+  if !wt_send_action(conn, st, chan.stdin_action(quit)) {
+    return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+  }
+  let mut k = 0
+  while !chan.finished() {
+    if k >= 4096 {
+      return (chan, Some(WtExecError::TooManyPackets), pty_granted, resize_sent)
+    }
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(WtExecError::Closed), pty_granted, resize_sent)
+      BadPacket(why) =>
+        return (chan, Some(WtExecError::BadPacket(why)), pty_granted, resize_sent)
+      Packet(t, pl) => {
+        k = k + 1
+        let (c5, actions, err) = @channel.chan_step(chan, t, pl)
+        chan = c5
+        match err {
+          None => ()
+          Some(chan_err) =>
+            return (chan, Some(wt_chan_error(chan_err)), pty_granted, resize_sent)
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          if !wt_send_action(conn, st, actions[i]) {
+            return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+          }
+        }
+      }
+    }
+  }
+  (chan, None, pty_granted, resize_sent)
+}
+
 ///| Render a prefix of the shared secret, enough to correlate two transcripts
 
 ///|

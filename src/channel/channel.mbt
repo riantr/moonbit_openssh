@@ -187,6 +187,178 @@ pub fn channel_bare_payload(recipient : Int) -> FixedArray[Byte] {
 }
 
 // ---------------------------------------------------------------------------
+// Interactive: pty-req / shell / window-change
+// ---------------------------------------------------------------------------
+
+///| tty modes 串的结束符(ttymodes.c:60 `TTY_OP_END`)
+pub const TTY_OP_END : Byte = b'\x00'
+
+///| 波特率 opcode(ttymodes.c:64 `TTY_OP_ISPEED = 128`)
+pub const TTY_OP_ISPEED : Byte = b'\x80'
+
+///| 波特率 opcode(ttymodes.c:65 `TTY_OP_OSPEED = 129`)
+pub const TTY_OP_OSPEED : Byte = b'\x81'
+
+///| 空 string(pty/shell 请求的尾部就是它)
+fn empty_wire() -> FixedArray[Byte] {
+  FixedArray::make(0, b'\x00')
+}
+
+///|
+/// tty modes 串:`opcode-u32` 对,最后跟一个 `TTY_OP_END`(ttymodes.c:371-376)
+///
+/// **注意这个串外面还包了一层 string**——`ssh_tty_make_modes` 先
+/// `sshbuf_put_u8(buf, TTY_OP_END)` 再 `sshbuf_put_stringb(ssh, buf)`
+/// (ttymodes.c:331-332),服务端 `ssh_tty_parse_modes` 第一件事也是
+/// `sshpkt_get_string_direct`(:352)。少包这一层的话,服务端会把 4 字节的
+/// 长度前缀当成 opcode。
+///
+/// 只发一个结束符是合法且最小的:modes 里的 opcode 本来就是「客户端报它知道
+/// 的、服务端忽略它不认识的」,不发任何东西服务端也能接受
+/// (`ttymodes.c:354` 的 `if (len == 0) return;`,paramiko 就是这么发的)。
+/// 我们跟 OpenSSH 客户端(`clientloop.c:2746`)一样把结束符带上。
+pub fn tty_modes_bytes(baud : Int) -> FixedArray[Byte] {
+  ch_cat_all([
+    FixedArray::from_array([TTY_OP_ISPEED]),
+    u32be(baud),
+    FixedArray::from_array([TTY_OP_OSPEED]),
+    u32be(baud),
+    FixedArray::from_array([TTY_OP_END]),
+  ])
+}
+
+///|
+/// CHANNEL_REQUEST "pty-req"(RFC 4254 §6.2 / clientloop.c:2735-2748)
+///
+///     uint32  recipient channel
+///     string  "pty-req"
+///     boolean TRUE
+///     string  TERM
+///     uint32  terminal width  (characters)
+///     uint32  terminal height (characters)
+///     uint32  terminal width  (pixels)
+///     uint32  terminal height (pixels)
+///     string  modes
+///
+/// 字段顺序是**先宽后高**:客户端 `sshpkt_put_u32(ws.ws_col)` 在前
+/// (clientloop.c:2739),服务端 `sshpkt_get_u32(&s->col)` 也在前
+/// (session.c:1872)。写成 row-then-col 的话 pty 照样能开,但窗口尺寸整个
+/// 转置,而「转置后仍然是合法 pty」正是它容易蒙混过关的原因。
+pub fn channel_pty_req_payload(
+  recipient : Int,
+  term : String,
+  cols : Int,
+  rows : Int,
+  pixel_width : Int,
+  pixel_height : Int,
+  modes : FixedArray[Byte],
+) -> FixedArray[Byte] {
+  channel_request_payload(
+    recipient,
+    "pty-req",
+    true,
+    ch_cat_all([
+      @sshwire.write_ssh_string(ch_ascii(term)),
+      u32be(cols),
+      u32be(rows),
+      u32be(pixel_width),
+      u32be(pixel_height),
+      @sshwire.write_ssh_string(modes),
+    ]),
+  )
+}
+
+///|
+/// CHANNEL_REQUEST "shell"(RFC 4254 §6.5)
+///
+/// 除了公共前缀之外没有别的字段——交互式 shell 不带命令,命令由之后
+/// CHANNEL_DATA(stdin)送上去。
+pub fn channel_shell_payload(recipient : Int) -> FixedArray[Byte] {
+  channel_request_payload(recipient, "shell", true, empty_wire())
+}
+
+///|
+/// CHANNEL_REQUEST "window-change"(RFC 4254 §6.7 / session.c:1847-1851)
+///
+///     uint32  recipient channel
+///     string  "window-change"
+///     boolean FALSE
+///     uint32  columns
+///     uint32  rows
+///     uint32  pixel width
+///     uint32  pixel height
+///
+/// `want_reply` 是 FALSE:服务端 `session_window_change_req` 直接
+/// `return 1` 不回任何东西,我们若等一个 CHANNEL_SUCCESS 就会一直等下去。
+///
+/// 这里也没有 modes 串——服务端读完这四个 u32 紧跟一个
+/// `sshpkt_get_end`(:1851),多写字节会被当成协议错误。
+pub fn channel_window_change_payload(
+  recipient : Int,
+  cols : Int,
+  rows : Int,
+  pixel_width : Int,
+  pixel_height : Int,
+) -> FixedArray[Byte] {
+  channel_request_payload(
+    recipient,
+    "window-change",
+    false,
+    ch_cat_all([
+      u32be(cols),
+      u32be(rows),
+      u32be(pixel_width),
+      u32be(pixel_height),
+    ]),
+  )
+}
+
+///|
+/// CHANNEL_REQUEST "exit-signal"(RFC 4254 §6.10)——**收方向**的解析
+///
+///     string  signal name       ("TERM" / "KILL" / ...)
+///     boolean core dumped
+///     string  language tag
+///     string  error message
+///
+/// 远端命令被信号杀死时,服务端发的是这个而不是 `exit-status`。只认
+/// `exit-status` 的客户端会等不到退出码,最后以「连接关闭、没有状态」收场——
+/// 看起来就像命令没产生任何输出。
+pub fn parse_exit_signal(
+  payload : FixedArray[Byte],
+  off : Int,
+) -> ((String, Bool, String)?) {
+  match read_string_at(payload, off) {
+    None => None
+    Some((name, o1)) =>
+      if o1 >= payload.length() {
+        None
+      } else {
+        let core = payload[o1] == b'\x01'
+        match read_string_at(payload, o1 + 1) {
+          None => None
+          // 语言标记按 RFC 4254 §6.10 是「发送方建议的 RFC 1766 语言」,实践中恒为空。
+          // 我们不翻译,所以直接丢掉。
+          Some((_lang, o2)) =>
+            match read_string_at(payload, o2) {
+              None => None
+              Some((msg, o3)) =>
+                if o3 != payload.length() {
+                  None
+                } else {
+                  Some((
+                    bytes_to_ascii_str(name),
+                    core,
+                    bytes_to_ascii_str(msg),
+                  ))
+                }
+            }
+        }
+      }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Inbound parsers
 // ---------------------------------------------------------------------------
 

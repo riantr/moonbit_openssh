@@ -113,6 +113,247 @@ def exit_status_request(recipient, status):
 
 
 # --------------------------------------------------------------------------
+# Interactive session: pty-req / shell / window-change
+#
+# Layout is taken from the *client* side, because that is where it is written:
+#   clientloop.c:2735-2748  channel_request_start(..., "pty-req", 1) then
+#                           term, ws_col, ws_row, ws_xpixel, ws_ypixel,
+#                           ssh_tty_make_modes()
+#   clientloop.c:2763+      "shell", want_reply = 1
+#   session.c:1847-1851     window-change: col, row, xpixel, ypixel, get_end
+#   ttymodes.c:329-333      modes = put_u8(TTY_OP_END) then put_stringb(buf)
+#                           -- the string wrapper is easy to forget, and without
+#                           it the server reads the 4 length bytes as an opcode.
+TTY_OP_END = 0
+TTY_OP_ISPEED = 128
+TTY_OP_OSPEED = 129
+
+DEFAULT_TERM = "xterm-256color"
+DEFAULT_COLS = 80
+DEFAULT_ROWS = 24
+DEFAULT_BAUD = 38400
+
+
+def tty_modes(baud=DEFAULT_BAUD, end=True):
+    """The modes string, exactly as ssh_tty_make_modes writes it."""
+    out = bytearray([TTY_OP_ISPEED]) + struct.pack(">I", baud)
+    out += bytearray([TTY_OP_OSPEED]) + struct.pack(">I", baud)
+    if end:
+        out.append(TTY_OP_END)
+    return bytes(out)
+
+
+def chan_pty_req(recipient, term=DEFAULT_TERM, cols=DEFAULT_COLS,
+                 rows=DEFAULT_ROWS, width_px=0, height_px=0,
+                 modes=None):
+    """CHANNEL_REQUEST "pty-req" (RFC 4254 6.2 / clientloop.c:2735-2748)
+
+    Columns come before rows on the wire.  Writing them the other way round
+    still opens a perfectly valid pty with the dimensions transposed, which is
+    exactly why the mistake survives review.
+    """
+    if modes is None:
+        modes = tty_modes()
+    return chan_request(
+        recipient,
+        "pty-req",
+        True,
+        ssh_string(term) + u32(cols) + u32(rows) + u32(width_px)
+        + u32(height_px) + ssh_string(modes),
+    )
+
+
+def chan_shell(recipient):
+    """CHANNEL_REQUEST "shell" (RFC 4254 6.5) -- no fields past the prefix."""
+    return chan_request(recipient, "shell", True, b"")
+
+
+def chan_window_change(recipient, cols=DEFAULT_COLS, rows=DEFAULT_ROWS,
+                       width_px=0, height_px=0):
+    """CHANNEL_REQUEST "window-change" (RFC 4254 6.7 / session.c:1847-1851)
+
+    want_reply is FALSE and there is no modes string: the server does
+    sshpkt_get_end right after the fourth u32 (:1851), so trailing bytes are a
+    protocol error rather than something merely ignored.
+    """
+    return chan_request(
+        recipient,
+        "window-change",
+        False,
+        u32(cols) + u32(rows) + u32(width_px) + u32(height_px),
+    )
+
+
+def capture_paramiko_shell(port, user, key_hex, command="echo loop36\r\n",
+                           term=DEFAULT_TERM, cols=DEFAULT_COLS,
+                           rows=DEFAULT_ROWS, resize_to=(132, 43)):
+    """Run a real pty + shell session through paramiko and record every packet.
+
+    Returns a list of (msg_type, payload_hex) in send order, or None.
+    """
+    try:
+        import io as _io
+        import time as _time
+
+        import paramiko
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except Exception as exc:  # noqa: BLE001
+        print("paramiko unavailable: %s" % exc, file=sys.stderr)
+        return None
+
+    sk = ec.derive_private_key(int(key_hex, 16), ec.SECP256R1())
+    pem = sk.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    key = paramiko.ECDSAKey.from_private_key(_io.StringIO(pem.decode("ascii")))
+
+    sent = []
+    orig = paramiko.transport.Transport._send_user_message
+
+    def patched(self, data):
+        raw = data.asbytes() if hasattr(data, "asbytes") else bytes(data)
+        if raw:
+            sent.append((raw[0], binascii.hexlify(raw[1:]).decode()))
+        return orig(self, data)
+
+    paramiko.transport.Transport._send_user_message = patched
+    server_took_pty = None
+    try:
+        t = paramiko.Transport(("127.0.0.1", port))
+        t.start_client(timeout=15)
+        t.auth_publickey(user, key)
+        chan = t.open_session(timeout=15)
+        chan.settimeout(20)
+        chan.get_pty(term=term, width=cols, height=rows)
+        server_took_pty = True
+        chan.invoke_shell()
+        _time.sleep(0.5)
+        chan.resize_pty(width=resize_to[0], height=resize_to[1])
+        chan.send(command.encode("ascii"))
+        _time.sleep(1.0)
+        while chan.recv_ready():
+            chan.recv(4096)
+        chan.send(b"exit\r\n")
+        deadline = _time.time() + 10
+        while _time.time() < deadline and not chan.exit_status_ready():
+            if chan.recv_ready():
+                chan.recv(4096)
+            if chan.closed:
+                break
+        t.close()
+    except Exception as exc:  # noqa: BLE001
+        print("paramiko pty session failed: %s" % exc, file=sys.stderr)
+        return None
+    finally:
+        paramiko.transport.Transport._send_user_message = orig
+    return sent, server_took_pty
+
+
+def compare_with_paramiko_shell(captured, term=DEFAULT_TERM,
+                                cols=DEFAULT_COLS, rows=DEFAULT_ROWS):
+    """Check the pty / shell / resize bytes against our own construction.
+
+    pty-req is compared field by field, not blob for blob: paramiko sends an
+    *empty* modes string where OpenSSH sends ISPEED/OSPEED/END, and both are
+    legal (ttymodes.c:354 returns early on len == 0).  Comparing whole packets
+    would have forced us to adopt paramiko's shape for no reason.
+    """
+    problems = []
+    saw_open = saw_pty = saw_shell = saw_resize = False
+    for msg_type, payload_hex in captured:
+        payload = binascii.unhexlify(payload_hex)
+        if msg_type == MSG_CHANNEL_OPEN:
+            saw_open = True
+        elif msg_type == MSG_CHANNEL_REQUEST:
+            recipient = struct.unpack(">I", payload[0:4])[0]
+            n = struct.unpack(">I", payload[4:8])[0]
+            rtype = payload[8:8 + n]
+            off = 8 + n
+            want_reply = payload[off]
+            off += 1
+            if rtype == b"pty-req":
+                ln = struct.unpack(">I", payload[off:off + 4])[0]
+                got_term = payload[off + 4:off + 4 + ln]
+                off += 4 + ln
+                got_cols, got_rows, got_wpx, got_hpx = struct.unpack(
+                    ">IIII", payload[off:off + 16])
+                off += 16
+                mlen = struct.unpack(">I", payload[off:off + 4])[0]
+                modes = payload[off + 4:off + 4 + mlen]
+                off += 4 + mlen
+                if got_term != term.encode("ascii"):
+                    problems.append("pty-req term %r != %r" % (got_term, term))
+                elif (got_cols, got_rows, got_wpx, got_hpx) != (
+                        cols, rows, 0, 0):
+                    problems.append(
+                        "pty-req size %r != %r" % (
+                            (got_cols, got_rows, got_wpx, got_hpx),
+                            (cols, rows, 0, 0)))
+                elif want_reply != 1:
+                    problems.append("pty-req want_reply is not TRUE")
+                elif off != len(payload):
+                    problems.append("pty-req has %d trailing bytes"
+                                    % (len(payload) - off))
+                elif modes not in (b"", tty_modes()):
+                    problems.append("pty-req modes are neither empty nor "
+                                    "OpenSSH's ISPEED/OSPEED/END")
+                else:
+                    saw_pty = True
+            elif rtype == b"shell":
+                if payload != chan_shell(recipient):
+                    problems.append("shell request differs from our builder")
+                else:
+                    saw_shell = True
+            elif rtype == b"window-change":
+                c2, r2 = (cols, rows)
+                if resize_to := (132, 43):
+                    c2, r2 = resize_to
+                if payload != chan_window_change(recipient, c2, r2, 0, 0):
+                    problems.append("window-change differs from our builder")
+                else:
+                    saw_resize = True
+            elif rtype == b"exec":
+                problems.append("unexpected exec request in a shell session")
+            else:
+                problems.append("unexpected CHANNEL_REQUEST %r" % rtype)
+        elif msg_type == MSG_CHANNEL_DATA:
+            # stdin. Only echoed back to us, nothing to compare.
+            pass
+    if not saw_open:
+        problems.append("no CHANNEL_OPEN captured from paramiko")
+    if not saw_pty:
+        problems.append("no pty-req captured from paramiko")
+    if not saw_shell:
+        problems.append("no shell request captured from paramiko")
+    if not saw_resize:
+        problems.append("no window-change captured from paramiko")
+    return problems
+
+
+def exit_signal_request(recipient, name, core_dumped, message,
+                        language_tag=""):
+    """What the *server* sends when the command died from a signal.
+
+    RFC 4254 6.10: string signal name || boolean core dumped ||
+    string language tag || string error message.  Four fields and no more --
+    an extra blob here used to slip through because the client ignored
+    exit-signal entirely, and the vector was never parsed by anything.
+    """
+    return chan_request(
+        recipient,
+        "exit-signal",
+        False,
+        ssh_string(name)
+        + (SSH_BOOL_TRUE if core_dumped else SSH_BOOL_FALSE)
+        + ssh_string(language_tag)
+        + ssh_string(message),
+    )
+
+
+# --------------------------------------------------------------------------
 # Local window, re-derived from channels.c
 # --------------------------------------------------------------------------
 class LocalWindow(object):
@@ -373,6 +614,66 @@ def payload_vectors():
     return out
 
 
+# A transcript with 48 x 32 KiB of DATA is 3 MiB of hex per copy, and the file
+# was landing at 10 MB -- slow to parse on every backend and useless as a diff.
+# A run of one repeated byte is described instead of spelled out, which keeps the
+# exact length under test while storing ~20 bytes.
+FILL_LIMIT = 4096
+
+
+def summarize(data):
+    """Describe a byte run: inline hex when small, else "len copies of byte"."""
+    if len(data) <= FILL_LIMIT:
+        return OrderedDict([("hex", binascii.hexlify(data).decode()),
+                            ("byte", -1), ("len", len(data))])
+    if len(set(data)) == 1:
+        return OrderedDict([("hex", ""), ("byte", data[0]),
+                            ("len", len(data))])
+    return OrderedDict([("hex", binascii.hexlify(data).decode()),
+                        ("byte", -1), ("len", len(data))])
+
+
+def spec_packet(mtype, payload):
+    return OrderedDict([("type", mtype),
+                        ("payload_hex", binascii.hexlify(payload).decode()),
+                        ("fill_byte", -1), ("fill_len", 0), ("fill_code", -1),
+                        ("payload_len", len(payload))])
+
+
+def fill_packet(mtype, local, code, byte, count):
+    if mtype == MSG_CHANNEL_DATA:
+        payload_len = 4 + 4 + count
+    else:
+        payload_len = 4 + 4 + 4 + count
+    return OrderedDict([("type", mtype), ("payload_hex", ""),
+                        ("fill_byte", byte), ("fill_len", count),
+                        ("fill_code", code), ("payload_len", payload_len)])
+
+
+def expand_fills(items):
+    """Turn ("FILL", type, who, code, byte, n) entries into real packets.
+
+    Returns (expanded, specs): the bytes the state machine runs on, and the
+    compact descriptions that go into the vector file.
+    """
+    expanded = []
+    specs = []
+    for item in items:
+        if item[0] == "FILL":
+            _, mtype, who, code, byte, count = item
+            data = bytes(bytearray([byte]) * count)
+            if mtype == MSG_CHANNEL_DATA:
+                payload = chan_data(who, data)
+            else:
+                payload = chan_extended_data(who, code, data)
+            expanded.append((mtype, payload))
+            specs.append(fill_packet(mtype, who, code, byte, count))
+        else:
+            expanded.append(item)
+            specs.append(spec_packet(item[0], item[1]))
+    return expanded, specs
+
+
 def session_vectors():
     """Full server -> client transcripts, with the expected client replies.
 
@@ -390,37 +691,9 @@ def session_vectors():
         return u32(local) + ssh_string(rtype) + (
             SSH_BOOL_TRUE if want_reply else SSH_BOOL_FALSE) + extra
 
-    # A transcript with 48 x 32 KiB of DATA is 3 MiB of hex per copy, and the
-    # file was landing at 10 MB -- slow to parse on every backend and useless
-    # as a diff.  A run of one repeated byte is described instead of spelled out,
-    # which keeps the exact length under test while storing ~20 bytes.
-    FILL_LIMIT = 4096
-
-    def summarize(data):
-        if len(data) <= FILL_LIMIT:
-            return OrderedDict([("hex", binascii.hexlify(data).decode()),
-                                ("byte", -1), ("len", len(data))])
-        if len(set(data)) == 1:
-            return OrderedDict([("hex", ""), ("byte", data[0]),
-                                ("len", len(data))])
-        return OrderedDict([("hex", binascii.hexlify(data).decode()),
-                            ("byte", -1), ("len", len(data))])
-
-    def spec_packet(mtype, payload):
-        return OrderedDict([("type", mtype),
-                            ("payload_hex", binascii.hexlify(payload).decode()),
-                            ("fill_byte", -1), ("fill_len", 0), ("fill_code", -1),
-                            ("payload_len", len(payload))])
-
-    def fill_packet(mtype, local, code, byte, count):
-        if mtype == MSG_CHANNEL_DATA:
-            payload_len = 4 + 4 + count
-        else:
-            payload_len = 4 + 4 + 4 + count
-        return OrderedDict([("type", mtype), ("payload_hex", ""),
-                            ("fill_byte", byte), ("fill_len", count),
-                            ("fill_code", code), ("payload_len", payload_len)])
-
+    # The compact-description helpers live at module level (summarize,
+    # spec_packet, fill_packet, expand_fills) because shell_session_vectors()
+    # needs them too.
     def run(name, local, remote, packets, expect_error=None):
         win = LocalWindow()
         replies = []
@@ -434,21 +707,7 @@ def session_vectors():
         # and expanded here, so the rest of the logic only ever sees bytes.
         # `specs` keeps the compact description for the output while `expanded`
         # holds the real bytes for the state machine.
-        expanded = []
-        specs = []
-        for item in packets:
-            if item[0] == "FILL":
-                _, mtype, who, code, byte, count = item
-                data = bytes(bytearray([byte]) * count)
-                if mtype == MSG_CHANNEL_DATA:
-                    payload = chan_data(who, data)
-                else:
-                    payload = chan_extended_data(who, code, data)
-                expanded.append((mtype, payload))
-                specs.append(fill_packet(mtype, who, code, byte, count))
-            else:
-                expanded.append(item)
-                specs.append(spec_packet(item[0], item[1]))
+        expanded, specs = expand_fills(packets)
 
         for mtype, payload in expanded:
             if mtype == MSG_CHANNEL_DATA:
@@ -555,9 +814,9 @@ def session_vectors():
             (MSG_CHANNEL_DATA, chan_data(0, b"out\n")),
             (MSG_CHANNEL_REQUEST, request(0, "exit-signal", False,
                                           ssh_string("TERM")
-                                          + SSH_BOOL_TRUE + ssh_string("bye")
-                                          + b"\x00\x00\x00\x00\x00\x00\x00\x00"
-                                          + ssh_string(""))),
+                                          + SSH_BOOL_TRUE
+                                          + ssh_string("")     # language tag
+                                          + ssh_string("bye"))),  # error message
             (MSG_CHANNEL_EOF, u32(0)),
             (MSG_CHANNEL_CLOSE, u32(0)),
         ]),
@@ -570,6 +829,291 @@ def session_vectors():
         ]),
     ]
     return cases
+
+
+def shell_session_vectors():
+    """Interactive-session transcripts, with the client's sends timed.
+
+    Loop #35's model only recorded what the *state machine* produced.  An
+    interactive session is mostly the opposite: the driver decides when to send
+    pty-req, when (after the reply) to send shell, when to type at stdin.  So
+    each client send carries the number of server packets it follows, and the
+    test replays the script in order instead of only diffing the tail.
+    """
+    def run_shell(name, local, remote, script, exit_default=255):
+        win = LocalWindow()
+        replies = []
+        client_sends = []
+        stdout = []
+        stderr = []
+        exit_status = -1
+        exit_signal = None
+        successes = 0
+        failures = 0
+        adjusts = 0
+        close_sent = False
+        seen_server = 0
+        packets = []
+
+        # Client sends are timed by "how many server packets have I seen by the
+        # time this goes out", so the driver under test replays the same order
+        # rather than only diffing its tail.
+        server_items = []
+        for it in script:
+            if it[0] == "send":
+                continue
+            server_items.append(it[1:] if it[0] == "srv" else it)
+        expanded, specs = expand_fills(server_items)
+
+        idx = 0
+        for item in script:
+            if item[0] == "send":
+                replies.append((item[1], item[2]))
+                client_sends.append(
+                    OrderedDict([("after", seen_server),
+                                 ("type", item[1]),
+                                 ("payload_hex",
+                                  binascii.hexlify(item[2]).decode())])
+                )
+                continue
+            mtype, payload = expanded[idx]
+            spec = specs[idx]
+            idx += 1
+            seen_server += 1
+            packets.append(spec)
+            if mtype == MSG_CHANNEL_DATA:
+                who = struct.unpack(">I", payload[0:4])[0]
+                assert who == local, "server addressed channel %d" % who
+                n = struct.unpack(">I", payload[4:8])[0]
+                stdout.append(payload[8:8 + n])
+                win.consume(n)
+                amt = win.take_adjust()
+                if amt is not None:
+                    replies.append((MSG_CHANNEL_WINDOW_ADJUST,
+                                    chan_window_adjust(remote, amt)))
+                    adjusts += 1
+            elif mtype == MSG_CHANNEL_EXTENDED_DATA:
+                code = struct.unpack(">I", payload[4:8])[0]
+                n = struct.unpack(">I", payload[8:12])[0]
+                if code == SSH2_EXTENDED_DATA_STDERR:
+                    stderr.append(payload[12:12 + n])
+                    win.consume(n)
+                    amt = win.take_adjust()
+                    if amt is not None:
+                        replies.append((MSG_CHANNEL_WINDOW_ADJUST,
+                                        chan_window_adjust(remote, amt)))
+                        adjusts += 1
+            elif mtype == MSG_CHANNEL_REQUEST:
+                n = struct.unpack(">I", payload[4:8])[0]
+                rtype = payload[8:8 + n]
+                if rtype == b"exit-status":
+                    off = 8 + n + 1
+                    exit_status = struct.unpack(">I", payload[off:off + 4])[0]
+                elif rtype == b"exit-signal":
+                    # string signal name || boolean core || string lang ||
+                    # string msg.  The name is ASCII ("TERM"), not a u32 --
+                    # reading the length prefix as a number happened here and
+                    # produced a signal "4" for a request that said "TERM".
+                    # want_reply sits between the type and the fields, so the
+                    # name's length starts one byte later than it looks.
+                    off = 8 + n + 1
+                    ln = struct.unpack(">I", payload[off:off + 4])[0]
+                    exit_signal = payload[
+                        off + 4:off + 4 + ln].decode("ascii", "replace")
+            elif mtype == MSG_CHANNEL_SUCCESS:
+                successes += 1
+            elif mtype == MSG_CHANNEL_FAILURE:
+                failures += 1
+            elif mtype == MSG_CHANNEL_CLOSE:
+                if not close_sent:
+                    replies.append((MSG_CHANNEL_CLOSE, chan_bare(remote)))
+                    close_sent = True
+
+        return OrderedDict(
+            [
+                ("name", name),
+                ("local_channel", local),
+                ("remote_channel", remote),
+                ("packets", packets),
+                ("client_sends", client_sends),
+                ("replies", [spec_packet(t, p) for t, p in replies]),
+                ("stdout", summarize(b"".join(stdout))),
+                ("stderr", summarize(b"".join(stderr))),
+                ("exit_status", exit_status if exit_status >= 0
+                 else exit_default),
+                ("exit_signal", exit_signal),
+                # shell_no_pty 只拿到 1 个 SUCCESS(pty 被拒)。把这个数交给
+                # 向量,而不是让 KAT 写死 2 —— 写死的那个一开始就是错的。
+                ("success_count", successes),
+                ("failure_count", failures),
+                ("adjusts_sent", adjusts),
+                ("final_cur", win.cur),
+            ]
+        )
+
+    def srv(mtype, payload):
+        return ("srv", mtype, payload)
+
+    def snd(mtype, payload):
+        return ("send", mtype, payload)
+
+    confirm = lambda l, r: srv(MSG_CHANNEL_OPEN_CONFIRMATION,
+                               u32(l) + u32(r) + u32(2097152) + u32(32768))
+    success = lambda l: srv(MSG_CHANNEL_SUCCESS, u32(l))
+    failure = lambda l: srv(MSG_CHANNEL_FAILURE, u32(l))
+    data = lambda l, b: srv(MSG_CHANNEL_DATA, chan_data(l, b))
+    exit_status = lambda l, c: srv(
+        MSG_CHANNEL_REQUEST, chan_request(l, "exit-status", False, u32(c)))
+    exit_signal = lambda l, n, core, msg: srv(
+        MSG_CHANNEL_REQUEST, exit_signal_request(l, n, core, msg))
+    eof = lambda l: srv(MSG_CHANNEL_EOF, u32(l))
+    close = lambda l: srv(MSG_CHANNEL_CLOSE, u32(l))
+
+    def pty_send(l, term=DEFAULT_TERM, cols=DEFAULT_COLS, rows=DEFAULT_ROWS):
+        return snd(MSG_CHANNEL_REQUEST,
+                   chan_pty_req(l, term, cols, rows))
+
+    def shell_send(l):
+        return snd(MSG_CHANNEL_REQUEST, chan_shell(l))
+
+    def stdin_send(l, b):
+        return snd(MSG_CHANNEL_DATA, chan_data(l, b))
+
+    def resize_send(l, c, r):
+        return snd(MSG_CHANNEL_REQUEST, chan_window_change(l, c, r))
+
+    cases = [
+        # The canonical sequence: open, pty-req, wait for its SUCCESS, shell,
+        # wait for its SUCCESS, type, read, exit.
+        run_shell("shell_pty_ok", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, 2097152, 32768)),
+            confirm(0, 0),
+            pty_send(0),
+            success(0),
+            shell_send(0),
+            success(0),
+            stdin_send(0, b"echo loop36\r\n"),
+            data(0, b"loop36\r\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ]),
+        # The server refuses the pty (no PTY in sshd_config, or -T). The client
+        # must still get a shell: OpenSSH clears client_tty and carries on
+        # (clientloop.c:2750 sets c->client_tty = 0 after the failed confirm).
+        run_shell("shell_no_pty", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, 2097152, 32768)),
+            confirm(0, 0),
+            pty_send(0),
+            failure(0),
+            shell_send(0),
+            success(0),
+            stdin_send(0, b"echo nopty\r\n"),
+            data(0, b"nopty\r\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ]),
+        # window-change gets no reply at all (session.c:1843 returns 1 without
+        # writing anything). If the driver waited for a CHANNEL_SUCCESS here it
+        # would hang forever, so the transcript simply continues.
+        run_shell("shell_resize", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, 2097152, 32768)),
+            confirm(0, 0),
+            pty_send(0),
+            success(0),
+            shell_send(0),
+            success(0),
+            resize_send(0, 132, 43),
+            stdin_send(0, b"echo resized\r\n"),
+            data(0, b"resized\r\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ]),
+        # Killed rather than exited: exit-signal, no exit-status. A client that
+        # only knows exit-status reports this as 255 with no explanation.
+        run_shell("shell_exit_signal", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, 2097152, 32768)),
+            confirm(0, 0),
+            pty_send(0),
+            success(0),
+            shell_send(0),
+            success(0),
+            stdin_send(0, b"kill -TERM $$\r\n"),
+            data(0, b"Terminated\r\n"),
+            exit_signal(0, "TERM", False, "terminated"),
+            eof(0),
+            close(0),
+        ]),
+        # local != remote, same reason as exec_nonzero_ids in Loop #35.
+        run_shell("shell_nonzero_ids", 3, 7, [
+            snd(MSG_CHANNEL_OPEN, chan_open(3, 2097152, 32768)),
+            confirm(3, 7),
+            pty_send(3, "xterm", 100, 40),
+            success(3),
+            shell_send(3),
+            success(3),
+            stdin_send(3, b"x\r\n"),
+            data(3, b"x\r\n"),
+            exit_status(3, 0),
+            eof(3),
+            close(3),
+        ]),
+        # A pty banner is large and full of escapes, which is what drives the
+        # window on an interactive channel.
+        run_shell("shell_bulk_banner", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, 2097152, 32768)),
+            confirm(0, 0),
+            pty_send(0),
+            success(0),
+            shell_send(0),
+            success(0),
+            ("FILL", MSG_CHANNEL_DATA, 0, -1, 0x1b,
+             CHAN_SES_WINDOW_DEFAULT // 2 + 8),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ]),
+    ]
+    return cases
+
+
+def shell_payload_vectors():
+    """One entry per interactive message, for two channel-number sets."""
+    out = []
+    for recipient in (0, 7):
+        out.append(
+            OrderedDict(
+                [
+                    ("name", "pty_s%d" % recipient),
+                    ("recipient", recipient),
+                    ("term", DEFAULT_TERM),
+                    ("cols", DEFAULT_COLS),
+                    ("rows", DEFAULT_ROWS),
+                    ("width_px", 0),
+                    ("height_px", 0),
+                    ("modes_hex", binascii.hexlify(tty_modes()).decode()),
+                    ("pty_req_hex", binascii.hexlify(
+                        chan_pty_req(recipient)).decode()),
+                    ("shell_hex", binascii.hexlify(
+                        chan_shell(recipient)).decode()),
+                    ("resize_cols", 132),
+                    ("resize_rows", 43),
+                    ("window_change_hex", binascii.hexlify(
+                        chan_window_change(recipient, 132, 43)).decode()),
+                    ("stdin_hex", binascii.hexlify(
+                        chan_data(recipient, b"x\r\n")).decode()),
+                    ("exit_signal_name", "TERM"),
+                    ("exit_signal_core", False),
+                    ("exit_signal_message", "terminated"),
+                    ("exit_signal_hex", binascii.hexlify(
+                        exit_signal_request(recipient, "TERM", False,
+                                            "terminated")).decode()),
+                ]
+            )
+        )
+    return out
 
 
 def build_document():
@@ -589,6 +1133,8 @@ def build_document():
             ("payloads", payload_vectors()),
             ("windows", window_vectors()),
             ("sessions", session_vectors()),
+            ("shell_payloads", shell_payload_vectors()),
+            ("shell_sessions", shell_session_vectors()),
         ]
     )
 
@@ -627,6 +1173,26 @@ def main():
             return 1
         print("paramiko channel bytes agree: %d packets captured%s"
               % (len(captured), "" if saw_eof else " (no EOF this run)"))
+
+        pty = capture_paramiko_shell(args.port, args.user, key_hex)
+        if pty is None:
+            print("ORACLE: could not capture a paramiko pty session",
+                  file=sys.stderr)
+            return 2
+        pty_sent, server_took_pty = pty
+        if not server_took_pty:
+            print("ORACLE: this sshd refused pty-req; the interactive "
+                  "cross-check cannot run here", file=sys.stderr)
+            return 2
+        shell_problems = compare_with_paramiko_shell(pty_sent)
+        if shell_problems:
+            print("ORACLE DISAGREEMENT with paramiko on the pty/shell bytes",
+                  file=sys.stderr)
+            for p in shell_problems:
+                print("  " + p, file=sys.stderr)
+            return 1
+        print("paramiko pty/shell bytes agree: %d packets captured"
+              % len(pty_sent))
 
     doc = build_document()
 

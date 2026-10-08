@@ -300,6 +300,250 @@ fn chk_parsers_reject(c : PayloadCase) -> Bool {
 }
 
 // ---------------------------------------------------------------------------
+// Interactive: pty-req / shell / window-change / exit-signal
+// ---------------------------------------------------------------------------
+
+///|
+/// 逐条重建交互消息。
+///
+/// `modes` 的 string 包装是最容易漏的一层(`ttymodes.c:329-333`:先
+/// `put_u8(TTY_OP_END)` 再 `put_stringb`),漏掉它服务端会把 4 字节的长度前缀
+/// 当成 opcode——而那样**仍然是合法 pty**,只是终端模式全乱。
+fn chk_shell_payloads(c : ShellPayloadCase) -> Bool {
+  let modes = hex_to_bytes(c.modes_hex)
+  if !bytes_equal(
+    @channel.channel_pty_req_payload(
+      c.recipient,
+      c.term,
+      c.cols,
+      c.rows,
+      c.width_px,
+      c.height_px,
+      modes,
+    ),
+    hex_to_bytes(c.pty_req_hex),
+  ) {
+    return false
+  }
+  if !bytes_equal(
+    @channel.tty_modes_bytes(38400),
+    modes,
+  ) {
+    return false
+  }
+  if !bytes_equal(
+    @channel.channel_shell_payload(c.recipient),
+    hex_to_bytes(c.shell_hex),
+  ) {
+    return false
+  }
+  if !bytes_equal(
+    @channel.channel_window_change_payload(
+      c.recipient,
+      c.resize_cols,
+      c.resize_rows,
+      0,
+      0,
+    ),
+    hex_to_bytes(c.window_change_hex),
+  ) {
+    return false
+  }
+  if !bytes_equal(
+    @channel.channel_data_payload(c.recipient, ascii("x\r\n")),
+    hex_to_bytes(c.stdin_hex),
+  ) {
+    return false
+  }
+  let raw = hex_to_bytes(c.exit_signal_hex)
+  if !bytes_equal(
+    @channel.channel_request_payload(
+      c.recipient,
+      "exit-signal",
+      false,
+      @channel.ch_cat_all([
+        @sshwire.write_ssh_string(ascii(c.exit_signal_name)),
+        FixedArray::from_array([
+          if c.exit_signal_core { b'\x01' } else { b'\x00' },
+        ]),
+        @sshwire.write_ssh_string(empty_bytes()),
+        @sshwire.write_ssh_string(ascii(c.exit_signal_message)),
+      ]),
+    ),
+    raw,
+  ) {
+    return false
+  }
+  // exit-signal 的解析:头部 + 四个字段必须原样回来。
+  let parsed = match @channel.parse_request_header(raw) {
+    None => None
+    Some((who, rtype, want, off)) =>
+      if who != c.recipient || rtype != "exit-signal" || want {
+        None
+      } else {
+        @channel.parse_exit_signal(raw, off)
+      }
+  }
+  match parsed {
+    None => false
+    Some((name, core, msg)) =>
+      name == c.exit_signal_name && core == c.exit_signal_core &&
+      msg == c.exit_signal_message
+  }
+}
+
+///| exit-signal 负例:字段被截断 / 尾部有残余都必须判 None
+fn chk_exit_signal_rejects(c : ShellPayloadCase) -> Bool {
+  let raw = hex_to_bytes(c.exit_signal_hex)
+  let short = FixedArray::make(raw.length() - 1, b'\x00')
+  for i = 0; i < short.length(); i = i + 1 {
+    short[i] = raw[i]
+  }
+  let off = match @channel.parse_request_header(raw) {
+    None => return false
+    Some((_, _, _, o)) => o
+  }
+  // 合法的那个必须**解得出来**,只有被截断 / 尾部有残余的两个必须判 None。
+  // 写成三个 `is None` 的与会把正例也否掉,而断言方向错了的检查和没有检查
+  // 一样有害。
+  @channel.parse_exit_signal(raw, off) is Some(_) &&
+  @channel.parse_exit_signal(short, off) is None &&
+  @channel.parse_exit_signal(
+    @channel.ch_cat(raw, FixedArray::from_array([b'\x01'])),
+    off,
+  ) is None
+}
+
+///|
+/// 按 `after` 时序回放一段交互式会话。
+///
+/// 顺序是这里唯一值得测的东西:收到第 N 个服务端包之后,驱动依次发
+/// pty-req / shell / resize / stdin,状态机自己吐出的 WINDOW_ADJUST 和 CLOSE
+/// 插在中间。逐字节比对整个 client→server 序列,顺序错一步就会露出来。
+///
+/// 诚实说明覆盖面:`client_sends` 里的字节是从向量读的,不是在 KAT 里重新
+/// 组装的——组包器本身由 `chk_shell_payloads` 按参数重建验证,这里验证的是
+/// **时序**。两端都验才不重复;只验一头会漏掉「顺序对但字节错」。
+fn replay_shell_timed(
+  c : ShellCase,
+) -> (Array[@channel.ChanAction], @channel.ShellReport, String) {
+  let replies : Array[@channel.ChanAction] = []
+  let mut st = @channel.ChanState::new_interactive(c.local_channel)
+  let mut err = ""
+  let mut send_idx = 0
+  for i = 0; i < c.packets.length(); i = i + 1 {
+    let p = c.packets[i]
+    let payload = packet_payload(p, c.local_channel)
+    let (st1, actions, e) = @channel.chan_step(
+      st,
+      p.msg_type.to_byte(),
+      payload,
+    )
+    st = st1
+    if err == "" {
+      match e {
+        None => ()
+        Some(chan_err) => err = describe(chan_err)
+      }
+    }
+    for j = 0; j < actions.length(); j = j + 1 {
+      replies.push(actions[j])
+    }
+    // 处理完第 i 个包之后 seen = i + 1
+    let seen = i + 1
+    let mut k = send_idx
+    while k < c.client_sends.length() &&
+          c.client_sends[k].after <= seen {
+      replies.push(
+        Send(
+          c.client_sends[k].msg_type.to_byte(),
+          hex_to_bytes(c.client_sends[k].payload_hex),
+        ),
+      )
+      k = k + 1
+    }
+    send_idx = k
+  }
+  (replies, st.shell_report(), err)
+}
+
+///| 交互式会话的检查:时序、字节、最终报告三项都要对上
+fn check_shell(c : ShellCase, fails : Array[String]) -> @channel.ShellReport {
+  let (replies, report, err) = replay_shell_timed(c)
+  if err != "" {
+    fails.push(c.name + ": " + err)
+    return report
+  }
+  if replies.length() != c.replies.length() {
+    fails.push(
+      c.name + ": " + replies.length().to_string() + " client packets, vector says " +
+      c.replies.length().to_string(),
+    )
+  } else {
+    for i = 0; i < replies.length(); i = i + 1 {
+      let (t, p) = action_bytes(replies[i])
+      let want = c.replies[i]
+      if t != want.msg_type || !bytes_equal(p, hex_to_bytes(want.payload_hex)) {
+        fails.push(
+          c.name + ": client packet " + i.to_string() + " is type " +
+          t.to_string() + " " + short_hex(p) + ", expected type " +
+          want.msg_type.to_string() + " " + want.payload_hex,
+        )
+      }
+    }
+  }
+  let so = stream_bytes(c.stdout)
+  if !bytes_equal(report.stdout, so) {
+    fails.push(
+      c.name + ": stdout " + report.stdout.length().to_string() +
+      " bytes, expected " + so.length().to_string(),
+    )
+  }
+  if report.exit_status != c.exit_status {
+    fails.push(
+      c.name + ": exit " + report.exit_status.to_string() + ", expected " +
+      c.exit_status.to_string(),
+    )
+  }
+  let got_sig = match report.exit_signal {
+    None => ""
+    Some((n, _core)) => n
+  }
+  if got_sig != c.exit_signal {
+    fails.push(
+      c.name + ": exit signal " + got_sig + ", expected " + c.exit_signal,
+    )
+  }
+  if report.adjusts_sent != c.adjusts_sent {
+    fails.push(
+      c.name + ": " + report.adjusts_sent.to_string() + " adjusts, expected " +
+      c.adjusts_sent.to_string(),
+    )
+  }
+  if report.success_count != c.success_count {
+    fails.push(
+      c.name + ": " + report.success_count.to_string() + " successes, expected " +
+      c.success_count.to_string(),
+    )
+  }
+  report
+}
+
+fn all_shell_payloads(
+  f : (ShellPayloadCase) -> Bool,
+  label : String,
+  fails : Array[String],
+) -> Bool {
+  for i = 0; i < kat_shell_payload_cases.length(); i = i + 1 {
+    if !f(kat_shell_payload_cases[i]) {
+      fails.push(label + ": " + kat_shell_payload_cases[i].name)
+      return false
+    }
+  }
+  true
+}
+
+// ---------------------------------------------------------------------------
 // window replay
 // ---------------------------------------------------------------------------
 
@@ -568,4 +812,35 @@ fn main {
 
   let first = if fails.length() == 0 { "none" } else { fails[0] }
   println("chan_first_failure: " + first)
+
+  // ---- 6. 交互式:pty-req / shell / window-change / exit-signal ----
+  println(
+    "chan_pty_payloads: " +
+    pf(all_shell_payloads(chk_shell_payloads, "shell_payloads", fails)),
+  )
+  println(
+    "chan_exit_signal_parser: " +
+    pf(all_shell_payloads(chk_exit_signal_rejects, "exit_signal", fails)),
+  )
+  let shell_fails : Array[String] = []
+  for i = 0; i < kat_shell_cases.length(); i = i + 1 {
+    let _r = check_shell(kat_shell_cases[i], shell_fails)
+  }
+  println("chan_shell_sessions: " + pf(shell_fails.length() == 0))
+  for i = 0; i < shell_fails.length(); i = i + 1 {
+    println("  chan_shell_fail: " + shell_fails[i])
+  }
+  // 防退化:没有「pty 被拒」的用例,就测不出驱动会不会正确降级;
+  // 没有 resize 的用例,就测不出「window-change 不等回复」这件事。
+  let has_no_pty = kat_shell_cases.any(c => c.name == "shell_no_pty")
+  let has_resize = kat_shell_cases.any(c => c.name == "shell_resize")
+  let has_signal = kat_shell_cases.any(c => c.name == "shell_exit_signal")
+  println("chan_shell_cases: " + kat_shell_cases.length().to_string())
+  println(
+    "chan_shell_coverage: " +
+    pf(
+      has_no_pty && has_resize && has_signal &&
+      kat_shell_cases.length() >= 6,
+    ),
+  )
 }

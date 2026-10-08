@@ -574,3 +574,63 @@ lines with CRLF. A hand-written `"hello\n"` reference is the wrong expectation a
 sends you hunting a bug that is correct behaviour -- it did, once. The harness
 reproduces every command locally instead of hard-coding expected bytes.
 
+### Loop #36: interactive session (pty-req / shell / window-change)
+
+Loop #35 ran commands over `exec`, the one-shot form of the connection layer.
+An interactive shell is where the rest of RFC 4254 lives, and each piece has a
+field that is wrong in a way the server tolerates:
+
+- **`pty-req` puts columns before rows on the wire.** The client writes
+  `sshpkt_put_u32(ws.ws_col)` first (`clientloop.c:2739`) and the server reads
+  `sshpkt_get_u32(&s->col)` first (`session.c:1872`). Write them the other way
+  round and you still get a perfectly valid pty with the dimensions transposed.
+- **The terminal modes are wrapped in a `string`.** `ssh_tty_make_modes` does
+  `sshbuf_put_u8(buf, TTY_OP_END)` then `sshpkt_put_stringb(ssh, buf)`
+  (`ttymodes.c:331-332`), and `ssh_tty_parse_modes` opens with
+  `sshpkt_get_string_direct` (`:352`). Leave the wrapper off and the server reads
+  the four length bytes as an opcode -- and the pty still opens.
+- **`TTY_OP_END` is 0** (`ttymodes.c:60`); `TTY_OP_ISPEED`/`TTY_OP_OSPEED` are
+  128/129. paramiko sends an empty modes string, which is also legal
+  (`ttymodes.c:354` returns early on `len == 0`) -- which is why the paramiko
+  cross-check compares pty-req field by field rather than blob for blob.
+- **`window-change` has `want_reply = FALSE` and no modes string.** The server
+  reads four u32s and then `sshpkt_get_end` (`session.c:1847-1851`). Wait for a
+  CHANNEL_SUCCESS there and you wait forever.
+- **`exit-signal` is not `exit-status`.** When the process is killed the server
+  sends `string name || boolean core || string language || string message`
+  (RFC 4254 section 6.10). A client that only knows `exit-status` reports 255 with
+  no explanation.
+
+**A refused pty is not fatal.** OpenSSH clears `client_tty` and carries on
+(`clientloop.c:2750`). `chan_step` therefore carries an `interactive` flag: in
+that mode CHANNEL_FAILURE only increments a counter, while the `exec` path still
+reports `ExecRejected`. The state machine does not track which request a reply
+answers, so it cannot decide this -- and guessing wrong makes `ssh -T host`
+unusable.
+
+**Two bugs this loop's own tooling had, both from the same cause -- writing a
+parser by copying a structurally different one:**
+
+- The oracle's `exit-signal` transcript had a stray 8-byte blob between the
+  language tag and the message. It had never been parsed by anything, because
+  until now the client ignored `exit-signal` outright.
+- The oracle read the signal name as a `u32`; it is a string, and reading the
+  length prefix that way reported the signal as `"4"` for a request that said
+  `"TERM"`. It also missed the `want_reply` byte, putting the length one byte
+  late.
+
+**One driver bug worth naming.** The first wait for CHANNEL_OPEN_CONFIRMATION
+was written by reusing the helper that waits for CHANNEL_SUCCESS. The symptom is
+not an error -- the server has already sent its confirmation and has nothing
+more to say, and the read is blocking, so the client waits forever. Wrong wait
+conditions in blocking code look like hangs, not like mistakes.
+
+**Not claimed.** A pty banner from a Windows server carries the OS build number,
+ANSI state and a prompt, so it is not reproducible byte for byte. G2/G3 check the
+deterministic part -- the echoed command, the exit status, the byte counts, and
+native-vs-browser equality -- while the bytes we *send* stay byte-exact against
+the oracle and a live paramiko pty session. `host/channel_mutations.py` now
+covers ten defects across both loops; every one of them turns the KAT red.
+
+Run the gate with `node host/verify_loop36.mjs`.
+
