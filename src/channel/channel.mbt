@@ -152,6 +152,45 @@ pub fn channel_exec_payload(
   )
 }
 
+///|
+/// CHANNEL_REQUEST "env"(RFC 4254 §6.4 / clientloop.c:2700-2711)
+///
+///     uint32  recipient channel
+///     string  "env"
+///     boolean FALSE
+///     string  name
+///     string  value
+///
+/// **只有 name 和 value 两个 string**,后面紧跟服务端的 `sshpkt_get_end`
+/// (session.c:2042-2044)。多写一个字段会被判成协议错误——而服务端的反应是
+/// `sshpkt_fatal`,直接断链,不是忽略。
+///
+/// `want_reply` 是 **FALSE**,两个权威一致:RFC 4254 §6.4 原文 "No response is
+/// returned by the server";客户端 `client_send_env` 也是
+/// `channel_request_start(ssh, id, "env", 0)`(clientloop.c:2706)。
+/// 写 TRUE 也能通(服务端的 want_reply 是通用的,会回 CHANNEL_FAILURE),
+/// 但那样「服务端没配 AcceptEnv」就变成每次连接一条额外来回——而 OpenSSH
+/// 行为上就是完全静默。
+///
+/// 顺带一个只有读 C 才看得到的约束:`env` 只在会话还是 **LARVAL** 状态时才被
+/// 处理(session.c:2175-2192),也就是必须在 exec / shell 之前发;发晚了
+/// `session_input_channel_req` 直接不进那个 if,请求被无声丢弃。
+pub fn channel_env_payload(
+  recipient : Int,
+  name : String,
+  value : String,
+) -> FixedArray[Byte] {
+  channel_request_payload(
+    recipient,
+    "env",
+    false,
+    ch_cat_all([
+      @sshwire.write_ssh_string(ch_ascii(name)),
+      @sshwire.write_ssh_string(ch_ascii(value)),
+    ]),
+  )
+}
+
 ///| CHANNEL_WINDOW_ADJUST 的 payload(uint32 recipient, uint32 bytes)
 pub fn channel_window_adjust_payload(
   recipient : Int,

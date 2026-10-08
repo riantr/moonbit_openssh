@@ -112,6 +112,14 @@ writeFileSync(conf, [
   `AuthorizedKeysFile ${authKeys}`,
   'PermitRootLogin yes',
   'MaxStartups 10:30:60',
+
+  // Loop #37. `AcceptEnv` is empty by default, so a `env` request is silently
+  // dropped and there is no wire-level evidence either way (RFC 4254 6.4: no
+  // response).  Naming one variable gives the test the only honest oracle:
+  // the remote command can look at its own environment and report whether the
+  // request arrived.  Two variables is deliberate -- the second name is *not*
+  // here, so the same run also covers the refusal branch.
+  'AcceptEnv LOOP37_TEST LOOP37_SECOND',
   '',
 ].join('\n'));
 

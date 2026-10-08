@@ -1113,6 +1113,23 @@ pub(all) enum ExecError {
   Closed
   /// 收包次数超过上限还没结束
   TooManyPackets
+  ///|
+  /// 还有待发的 stdin,但对端的发送窗口是 0。
+  ///
+  /// 在**收包循环之外**的一次性投递里这是死结:要等 WINDOW_ADJUST 才能继续,
+  /// 而 WINDOW_ADJUST 只会在收包时到达。所以只有「一口气把 stdin 发完」那种
+  /// 用法(交互式敲一行命令)会撞上它——那时没有后续收包,窗口不会自己回来。
+  StdinStalled
+}
+
+///|
+/// 一条要交给远端会话的环境变量
+///
+/// 放在 `sshclient` 而不是 `channel`:两条传输层(原生 TCP / 浏览器 WebSocket)
+/// 要的是同一个类型,在这里定义就只有一份。
+pub(all) struct EnvVar {
+  name : String
+  value : String
 }
 
 ///|
@@ -1125,6 +1142,14 @@ pub(all) struct ExecResult {
   remote_id : Int
   /// 我们一共补了几次窗口
   adjusts_sent : Int
+  ///| 作为 stdin 发出的字节数
+  stdin_sent : Int
+  ///| 发出的 CHANNEL_DATA 包数——窗口夹取的直接证据
+  stdin_packets : Int
+  ///| CHANNEL_EOF 有没有发出去(等价于 `ssh -n` 的那个 -n)
+  eof_sent : Bool
+  ///| 发出的 env 请求条数
+  env_sent : Int
   /// 认证 + 通道总共发出的字节数
   sent_bytes : Int
   recv_bytes : Int
@@ -1149,6 +1174,37 @@ pub fn live_exec(
   d : @bigint.BigNat,
   command : String,
 ) -> ExecOutcome {
+  live_exec_io(conn, x, user, d, command, empty_stdin(), [])
+}
+
+///|
+/// 带 stdin 和环境变量的 `exec`——`ssh host cmd < input` 和 `SendEnv` 的那一条路。
+///
+/// 时序(每一处都有 C 上的依据):
+///
+///   1. CHANNEL_OPEN "session"                      (我们发)
+///   2. <- CHANNEL_OPEN_CONFIRMATION
+///   3. CHANNEL_REQUEST "env" xN  want_reply=FALSE  (我们发,**必须在 4 之前**)
+///   4. CHANNEL_REQUEST "exec" want_reply=TRUE      (我们发)
+///   5. CHANNEL_DATA ...  按远端窗口夹取,反复       (我们发)
+///   6. CHANNEL_EOF                                (我们发,缓冲排空之后)
+///   7. <- DATA / EXTENDED_DATA / exit-status / EOF / CLOSE
+///
+/// 第 3 步的位置不是随意的:服务端只在会话还处于 LARVAL 状态时处理 env
+/// (session.c:2175-2192),exec 之后就再也不看了,而 want_reply=FALSE 意味着
+/// 发晚了**没有任何**报错——环境变量就是没设上,连日志都不会有。
+///
+/// `stdin_data` 可以是空的:那样发出去的只有一个 CHANNEL_EOF,等价于
+/// `ssh -n host cmd`。EOF 一定要发,否则 `cmd` 读到的是永不结束的 stdin。
+pub fn live_exec_io(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  command : String,
+  stdin_data : FixedArray[Byte],
+  envs : Array[EnvVar],
+) -> ExecOutcome {
   let (auth, state_opt) = live_auth_with_state(conn, x, user, d)
   match auth {
     Authenticated(_) => ()
@@ -1158,7 +1214,7 @@ pub fn live_exec(
     None => return ExecOutcome::ChannelFailed(ExecError::NoSessionState)
     Some(v) => v
   }
-  let (chan0, failure) = exec_drive(conn, st, command)
+  let (chan0, failure) = exec_drive(conn, st, command, stdin_data, envs)
   match failure {
     Some(e) => ExecOutcome::ChannelFailed(e)
     None => {
@@ -1169,11 +1225,42 @@ pub fn live_exec(
         exit_status: rep.exit_status,
         remote_id: rep.remote_id,
         adjusts_sent: rep.adjusts_sent,
+        stdin_sent: rep.stdin_sent,
+        stdin_packets: rep.stdin_packets,
+        eof_sent: rep.eof_sent,
+        env_sent: envs.length(),
         sent_bytes: st.counters.sent,
         recv_bytes: st.counters.recv,
       })
     }
   }
+}
+
+fn empty_stdin() -> FixedArray[Byte] {
+  FixedArray::make(0, b'\x00')
+}
+
+///|
+/// 造一段确定性的 stdin,给流控测试用。
+///
+/// **不使用随机数。** 理由不是「随机数不好」,而是两条互相独立的检查都要求这段
+/// 字节在四条 target 上完全相同:一是 KAT 要断言我们**发出去的分包边界**和向量
+/// 一致,二是验证脚本要比「原生与 Worker 发出的字节数与摘要」相等。任何依赖平台
+/// 数值语义(浮点运算、整数宽度、`Int` 的溢出行为)的伪随机,都会让这两条断言变成
+/// 在测平台而不是在测协议。取模一个固定 ASCII 串只用到长度和对正数取模,在任何
+/// target 上是同一个意思。
+///
+/// 同时它是**位置敏感**的:字节由下标唯一决定,截断、乱序、错位都会让远端算出的
+/// 字节数或 sha256 变掉——一个全 0x41 的缓冲做不到这一点。
+///
+/// 放在 `src/sshclient` 是因为原生 CLI 和浏览器 Worker 都要用同一份。
+pub fn ssh_stdin_pattern(n : Int) -> FixedArray[Byte] {
+  let src = sh_ascii("loop37-stdin-block-")
+  let out = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    out[i] = src[i % src.length()]
+  }
+  out
 }
 
 ///|
@@ -1185,10 +1272,16 @@ pub fn live_exec(
 /// 三个出口都显式写出来:对端发了 CLOSE 且我们也回了 CLOSE(`finished`)、
 /// 连接关闭、或者包数超限。超限那条不是摆设——任何一处「回包发不出去」如果
 /// 没检查,就会变成一边等 CHANNEL_CLOSE 一边永远收不到的死等。
+///
+/// 循环体是「先把窗口允许的 stdin 发完 → 缓冲空了才发 EOF → 再收一个包」。
+/// 顺序不能换:先发 EOF 再补数据等于告诉对端输入流到此为止,后面那些数据它
+/// 不会读,而远端命令**不会报错**,只是安静地拿到一份截断的输入——比断链更难查。
 fn exec_drive(
   conn : @tcp.TcpConn,
   st0 : SessionState,
   command : String,
+  stdin_data : FixedArray[Byte],
+  envs : Array[EnvVar],
 ) -> (@channel.ChanState, ExecError?) {
   let mut st = st0
   let open = @channel.ChanState::new(@channel.LOCAL_CHANNEL).open_action()
@@ -1225,6 +1318,17 @@ fn exec_drive(
   if !chan.open_done {
     return (chan, Some(ExecError::Malformed("no_open_confirmation")))
   }
+  // env 必须赶在 exec 之前(见 live_exec_io 的时序说明)。
+  for i = 0; i < envs.length(); i = i + 1 {
+    let a = match chan.env_action(envs[i].name, envs[i].value) {
+      None => return (chan, Some(ExecError::Malformed("env_before_open")))
+      Some(x) => x
+    }
+    match send_action(conn, st, a) {
+      None => return (chan, Some(ExecError::SendFailed))
+      Some(s) => st = s
+    }
+  }
   // exec 必须在 OPEN_CONFIRMATION 之后发:recipient 用的是对端给的 id。
   let exec_action = match chan.exec_action(command) {
     None => return (chan, Some(ExecError::Malformed("exec_before_open")))
@@ -1234,12 +1338,48 @@ fn exec_drive(
     None => return (chan, Some(ExecError::SendFailed))
     Some(s) => st = s
   }
+  let mut pending = stdin_data
+  let mut eof_pending = true
   let mut packets = 0
   let cap = 65536
   while !chan.finished() {
     if packets >= cap {
       return (chan, Some(ExecError::TooManyPackets))
     }
+    // 1) 按远端窗口发 stdin。每发一包至少消费 1 字节,所以这一段必然收敛;
+    //    夹到 0 时 `stdin_take` 返回 None,退出内层循环去收包——窗口只会由
+    //    CHANNEL_WINDOW_ADJUST 补回来,那是收包路径的事。
+    while pending.length() > 0 {
+      let (c1, action, rest) = chan.stdin_take(pending)
+      chan = c1
+      match action {
+        None => break
+        Some(a) => {
+          match send_action(conn, st, a) {
+            None => return (chan, Some(ExecError::SendFailed))
+            Some(s) => st = s
+          }
+          pending = rest
+        }
+      }
+    }
+    // 2) 缓冲排空才发 EOF。eof_pending 这个标志是多余的(`eof_action` 自己
+    //    记得),留着是为了把「本轮没排空」和「已经发过了」分开看清楚。
+    if eof_pending && pending.length() == 0 {
+      let (c1, a) = chan.eof_action()
+      chan = c1
+      match a {
+        None => ()
+        Some(x) => {
+          match send_action(conn, st, x) {
+            None => return (chan, Some(ExecError::SendFailed))
+            Some(s) => st = s
+          }
+        }
+      }
+      eof_pending = false
+    }
+    // 3) 收一个包。
     match recv_packet(conn, st.counters, st.recv) {
       Closed => return (chan, Some(ExecError::Closed))
       BadPacket(why) => return (chan, Some(ExecError::BadPacket(why)))
@@ -1656,9 +1796,14 @@ fn shell_drive(
   // 5) 命令本身。CRLF 是因为远端是 Windows shell;LF 在 conhost 上不提交。
   let mut line = sh_ascii(command)
   line = @channel.ch_cat(line, FixedArray::from_array([b'\r', b'\n']))
-  match send_action(conn, st, chan.stdin_action(line)) {
-    None => return (chan, Some(ExecError::SendFailed), pty_granted, resize_sent)
-    Some(x) => st = x
+  {
+    let (c1, s1, e1) = send_stdin_all(conn, st, chan, line)
+    st = s1
+    chan = c1
+    match e1 {
+      Some(e) => return (chan, Some(e), pty_granted, resize_sent)
+      None => ()
+    }
   }
   // 6) 读到命令回显出现
   let marker = sh_ascii(command)
@@ -1678,9 +1823,14 @@ fn shell_drive(
   }
   // 7) exit,收到 CLOSE 为止
   let quit = FixedArray::from_array([b'e', b'x', b'i', b't', b'\r', b'\n'])
-  match send_action(conn, st, chan.stdin_action(quit)) {
-    None => return (chan, Some(ExecError::SendFailed), pty_granted, resize_sent)
-    Some(x) => st = x
+  {
+    let (c1, s1, e1) = send_stdin_all(conn, st, chan, quit)
+    st = s1
+    chan = c1
+    match e1 {
+      Some(e) => return (chan, Some(e), pty_granted, resize_sent)
+      None => ()
+    }
   }
   let mut n = 0
   while !chan.finished() {
@@ -1711,6 +1861,43 @@ fn shell_drive(
     }
   }
   (chan, None, pty_granted, resize_sent)
+}
+
+///|
+/// 把一整段待发数据按远端窗口夹取成若干个 CHANNEL_DATA,一次发完。
+///
+/// 用于**没有后续收包循环**的场景(交互式敲一行命令)。窗口耗尽时报
+/// `StdinStalled` 而不是等:这里等不到东西——WINDOW_ADJUST 只在收包时到达,
+/// 而这个函数在收包循环之外。
+///
+/// 和 exec 路径的差别是有意为之:exec 的 stdin 要流式喂(可以边收包边续发),
+/// shell 的一行命令必须整段到达才能被 conhost 提交,半截的行根本不回车。
+fn send_stdin_all(
+  conn : @tcp.TcpConn,
+  st : SessionState,
+  chan : @channel.ChanState,
+  data : FixedArray[Byte],
+) -> (@channel.ChanState, SessionState, ExecError?) {
+  let mut c = chan
+  let mut s = st
+  let mut pending = data
+  while pending.length() > 0 {
+    let (c1, action, rest) = c.stdin_take(pending)
+    c = c1
+    match action {
+      None => return (c, s, Some(ExecError::StdinStalled))
+      Some(a) => {
+        match send_action(conn, s, a) {
+          None => return (c, s, Some(ExecError::SendFailed))
+          Some(x) => {
+            s = x
+            pending = rest
+          }
+        }
+      }
+    }
+  }
+  (c, s, None)
 }
 
 ///|

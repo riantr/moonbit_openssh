@@ -200,13 +200,21 @@ fn find_user(argv : Array[String]) -> String {
 /// 同样不能假设 argv[1] 是用户参数:native 的 argv[0] 是 exe 路径,js 的
 /// `process.argv` 前两个是 `[node, main.js]`。所以先扫描出 `--exec` 的位置,
 /// 再把**后面全部**拼起来。
+///
+/// 遇到下一个 `--` 开头的参数就停。`--shell` 那边已经因为同样的理由踩过一次:
+/// 不停的话 `--exec ... --env FOO=bar` 会把 `--env FOO=bar` 一起敲给远端命令,
+/// 而远端照样跑成功、照样有输出——**只有远端命令本身解析参数时才看得出不对**,
+/// 验证脚本会以为一切正常。
 fn exec_command(argv : Array[String]) -> String? {
   let mut i = 1
   while i < argv.length() {
     if argv[i] == "--exec" && i + 1 < argv.length() {
       let sb = StringBuilder()
       for j = i + 1; j < argv.length(); j = j + 1 {
-        if j > i + 1 {
+        if is_switch(argv[j]) {
+          break
+        }
+        if sb.to_string().length() > 0 {
           sb.write_char(' ')
         }
         sb.write_string(argv[j])
@@ -224,24 +232,35 @@ fn exec_command(argv : Array[String]) -> String? {
 /// stdout / stderr 原样打出来(不做任何解码或转义),但同时给出长度和
 /// SHA-256 摘要。验证脚本要比的是字节数与摘要,不是人眼读一遍——后者在输出
 /// 里混进 ANSI 序列或非 ASCII 时会骗人。
-fn run_exec(port : Int, command : String) -> Unit {
+fn run_exec(
+  port : Int,
+  command : String,
+  stdin_data : FixedArray[Byte],
+  envs : Array[@sshclient.EnvVar],
+) -> Unit {
   let user = find_user(@env.args())
   println("=== Loop #35 exec vs real sshd ===")
   println("port: " + port.to_string())
   println("user: " + user)
   println("command: " + command)
+  println("stdin_bytes: " + stdin_data.length().to_string())
+  for i = 0; i < envs.length(); i = i + 1 {
+    println("env: " + envs[i].name + "=" + envs[i].value)
+  }
   match @tcp.TcpConn::connect("127.0.0.1", port) {
     None => {
       println("result: CONNECT_FAILED")
       return
     }
     Some(conn) => {
-      let outcome = @sshclient.live_exec(
+      let outcome = @sshclient.live_exec_io(
         conn,
         fixed_x(),
         user,
         test_auth_key(),
         command,
+        stdin_data,
+        envs,
       )
       conn.close()
       match outcome {
@@ -259,6 +278,13 @@ fn run_exec(port : Int, command : String) -> Unit {
           println("exit_status: " + r.exit_status.to_string())
           println("remote_id: " + r.remote_id.to_string())
           println("adjusts_sent: " + r.adjusts_sent.to_string())
+          // 流控的三个数:发出去多少字节、拆成几包、EOF 有没有跟上。
+          // 字节数对但包数不对,说明夹取用的是错误的上限;EOF 没发,远端读到的是
+          // 一个永远不结束的 stdin。
+          println("stdin_sent: " + r.stdin_sent.to_string())
+          println("stdin_packets: " + r.stdin_packets.to_string())
+          println("eof_sent: " + yn(r.eof_sent))
+          println("env_sent: " + r.env_sent.to_string())
           println("total_sent_bytes: " + r.sent_bytes.to_string())
           println("total_recv_bytes: " + r.recv_bytes.to_string())
           print_bytes(r.stdout)
@@ -280,13 +306,15 @@ fn run_exec(port : Int, command : String) -> Unit {
 
 ///| 原始字节打进标记块,方便人看;验证脚本只读上面那几行数字。
 ///|
-///| 超过 128 字节就截断并标出真实长度:1.5 MB 的输出打出来既没有信息量,又会
-///| 把后面真正要核对的行挤出管道缓冲。
+///| 截断上限 512 而不是 128:`Loop #37 的远端 fixture 会把 stdin 的字节数、摘要、
+///| 首尾各 16 字节**和**环境变量一起打出来,一共将近 200 字节。128 会把最后
+///| 几行静默吃掉,而截断块里没有任何提示说「后面还有内容被丢了」——验证脚本
+///| 于是只能报一句「首尾不一致」,而真实原因是它根本没看到首尾。
 fn print_bytes(b : FixedArray[Byte]) -> Unit {
   if b.length() == 0 {
     return
   }
-  let n = if b.length() > 128 { 128 } else { b.length() }
+  let n = if b.length() > 512 { 512 } else { b.length() }
   let sb = StringBuilder()
   for i = 0; i < n; i = i + 1 {
     sb.write_char(Int::unsafe_to_char(b[i].to_int()))
@@ -294,14 +322,14 @@ fn print_bytes(b : FixedArray[Byte]) -> Unit {
   println("--- raw ---")
   println(sb.to_string())
   if n < b.length() {
-    println("--- raw truncated at 128 of " + b.length().to_string() + " ---")
+    println("--- raw truncated at 512 of " + b.length().to_string() + " ---")
   }
   println("--- end raw ---")
 }
 
-///| 十六进制前缀,超过 128 字节同样截断并标注
+///| 十六进制前缀,超过 512 字节同样截断并标注
 fn dump_prefix(b : FixedArray[Byte]) -> String {
-  let n = if b.length() > 128 { 128 } else { b.length() }
+  let n = if b.length() > 512 { 512 } else { b.length() }
   let head = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     head[i] = b[i]
@@ -332,7 +360,90 @@ fn exec_error_name(e : @sshclient.ExecError) -> String {
     BadPacket(w) => "BadPacket(" + w + ")"
     Closed => "Closed"
     TooManyPackets => "TooManyPackets"
+    StdinStalled => "StdinStalled"
   }
+}
+
+///|
+/// Loop #37:构造要送进远端 stdin 的字节。
+///
+/// 两个来源:`--stdin-bytes N` 造一段确定性数据,`--stdin-text <str>` 直接给字面量。
+/// 没有「读文件」这条路——MoonBit 的 core 里没有 fs 包,硬塞一个 `@fs` 依赖只会
+/// 让四条 target 的构建面变宽,而验证脚本要的是一段**能逐字节复现**的输入。
+///
+/// 模式串本体在 `@sshclient.ssh_stdin_pattern`:原生和 Worker 必须用同一份,
+/// 否则「两条路径字节一致」这条断言就只是在比两段各自不同的数据。
+fn stdin_pattern(n : Int) -> FixedArray[Byte] {
+  @sshclient.ssh_stdin_pattern(n)
+}
+
+///| `--stdin-text <str>`;没给就返回空
+fn text_flag(argv : Array[String]) -> FixedArray[Byte] {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--stdin-text" && i + 1 < argv.length() {
+      return @sshclient.sh_ascii(argv[i + 1])
+    }
+    i = i + 1
+  }
+  FixedArray::make(0, b'\x00')
+}
+
+///| 组装 stdin:`--stdin-bytes` 优先,其次 `--stdin-text`,都没有就是空(等于 `ssh -n`)
+fn stdin_bytes(argv : Array[String]) -> FixedArray[Byte] {
+  let n = int_flag(argv, "--stdin-bytes", 0)
+  if n > 0 {
+    return stdin_pattern(n)
+  }
+  text_flag(argv)
+}
+
+///| 第一个 `=` 的下标;没有就返回 -1
+fn index_of_eq(s : String) -> Int {
+  for i = 0; i < s.length(); i = i + 1 {
+    if s[i].to_int() == 61 {
+      return i
+    }
+  }
+  -1
+}
+
+///| 取 `s[from, to)`
+fn slice_str(s : String, from : Int, to : Int) -> String {
+  let sb = StringBuilder()
+  let mut i = from
+  while i < to {
+    sb.write_char(Int::unsafe_to_char(s[i].to_int()))
+    i = i + 1
+  }
+  sb.to_string()
+}
+
+///|
+/// 收下所有 `--env NAME=VALUE`。
+///
+/// 重复的 `--env` 全部保留,不是「找到第一个就停」——`SendEnv` 本来就是一条一个,
+/// 只认第一个会让多变量场景悄悄退化成单变量,而 KAT 里正好有一个两条 env 的用例。
+///
+/// 名字为空(`=VALUE`)直接丢掉:服务端的 `session_env_req` 对空名字只是走
+/// `match_pattern` 失败然后静默忽略,发出去除了多一个包没有任何意义。
+fn env_flags(argv : Array[String]) -> Array[@sshclient.EnvVar] {
+  let out : Array[@sshclient.EnvVar] = []
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--env" && i + 1 < argv.length() {
+      let spec = argv[i + 1]
+      let at = index_of_eq(spec)
+      if at > 0 {
+        out.push({
+          name: slice_str(spec, 0, at),
+          value: slice_str(spec, at + 1, spec.length()),
+        })
+      }
+    }
+    i = i + 1
+  }
+  out
 }
 
 ///|
@@ -540,7 +651,7 @@ fn main {
   }
   match exec_command(argv) {
     Some(cmd) => {
-      run_exec(port, cmd)
+      run_exec(port, cmd, stdin_bytes(argv), env_flags(argv))
       return
     }
     None => ()

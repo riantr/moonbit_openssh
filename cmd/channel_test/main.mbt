@@ -142,6 +142,24 @@ fn packet_payload(p : Packet, ours : Int) -> FixedArray[Byte] {
   }
 }
 
+///|
+/// 把向量里的一个**回复方向**包还原成真正的字节。
+///
+/// 与 `packet_payload` 的唯一区别是 channel 号:收包方向的 recipient 是我们
+/// 自己的号,发包方向的是对端给的号。这个区别就是 Loop #35 抓到过的一个 bug
+/// ——首通道两边都是 0,所以它当时完全看不出来。
+fn reply_payload(p : Packet, remote : Int) -> FixedArray[Byte] {
+  if p.payload_hex != "" {
+    return hex_to_bytes(p.payload_hex)
+  }
+  let fill = fill_bytes(p.fill_byte, p.fill_len)
+  if p.msg_type == 95 {
+    @channel.channel_extended_data_payload(remote, p.fill_code, fill)
+  } else {
+    @channel.channel_data_payload(remote, fill)
+  }
+}
+
 fn stream_bytes(s : Stream) -> FixedArray[Byte] {
   if s.hex != "" {
     hex_to_bytes(s.hex)
@@ -544,6 +562,383 @@ fn all_shell_payloads(
 }
 
 // ---------------------------------------------------------------------------
+// Loop #37: env request / stdin flow control
+// ---------------------------------------------------------------------------
+
+///|
+/// 重建 `env` 请求,以及收尾的 CHANNEL_EOF。
+///
+/// 三件事分别验,因为它们各自的失败方式都是**静默**的:
+///
+///   1. 字节本身。两个 string,顺序是 name 在前(session.c:2042-2043),
+///      后面不能再有字段(`sshpkt_get_end` 就在那里)。
+///   2. **不得**等于 `want_reply = TRUE` 的那一份。RFC 4254 §6.4 明写
+///      "No response is returned by the server",OpenSSH 客户端也发的是 0
+///      (clientloop.c:2706)。写成 TRUE 不会断链,只会让服务端在名字不在
+///      `AcceptEnv` 里(默认就是空的)回一条 CHANNEL_FAILURE,于是每个 env
+///      都变成一次多余的往返。断言「不等于」比在注释里说明它更有用。
+///   3. EOF 的 payload 就是对端给的通道号(nchan.c:192-193),而且同一个通道
+///      只能发一次。
+fn chk_env_payloads(c : EnvPayloadCase) -> Bool {
+  let raw = hex_to_bytes(c.env_hex)
+  if !bytes_equal(
+    @channel.channel_env_payload(c.recipient, c.var_name, c.var_value),
+    raw,
+  ) {
+    return false
+  }
+  if bytes_equal(raw, hex_to_bytes(c.env_want_reply_hex)) {
+    return false
+  }
+  if !bytes_equal(
+    @channel.channel_env_payload(c.recipient, "LANG", ""),
+    hex_to_bytes(c.empty_value_env_hex),
+  ) {
+    return false
+  }
+  if !bytes_equal(@channel.channel_bare_payload(c.recipient), hex_to_bytes(c.eof_hex)) {
+    return false
+  }
+  // 结构:recipient || "env" || want_reply=FALSE || name || value,正好到底。
+  // 「正好到底」是 `sshpkt_get_end` 的要求;多一个字节服务端是 sshpkt_fatal。
+  let off = match @channel.parse_request_header(raw) {
+    None => return false
+    Some((who, rtype, want, o)) => {
+      if who != c.recipient || rtype != "env" || want {
+        return false
+      }
+      o
+    }
+  }
+  match @channel.read_string_at(raw, off) {
+    None => false
+    Some((name, o1)) =>
+      match @channel.read_string_at(raw, o1) {
+        None => false
+        Some((value, o2)) =>
+          o2 == raw.length() &&
+          @channel.bytes_to_ascii_str(name) == c.var_name &&
+          @channel.bytes_to_ascii_str(value) == c.var_value
+      }
+  }
+}
+
+///| 开着通道、拿到 remote_id 之后的状态,专供动作类断言用
+fn io_ready_state(recipient : Int) -> @channel.ChanState {
+  {
+    ..@channel.ChanState::new(0),
+    remote_id: recipient,
+    open_done: true,
+  }
+}
+
+///|
+/// EOF 动作:发一次,之后不再发。
+///
+/// 第二次必须返回 None。发两次不会报错,只是让对端看到一个已经结束的输入方向
+/// 又来了个结束标记——这类「不会断链」的错误正是它当初能一路跑到真服务器
+/// 才暴露的原因。
+fn chk_eof_action(c : EnvPayloadCase) -> Bool {
+  let st = io_ready_state(c.recipient)
+  let (st1, a) = st.eof_action()
+  match a {
+    None => false
+    Some(act) => {
+      let (t, payload) = action_bytes(act)
+      if t != 0x60 {
+        return false
+      }
+      if !bytes_equal(payload, hex_to_bytes(c.eof_hex)) {
+        return false
+      }
+      if !st1.eof_sent {
+        return false
+      }
+      let (_st2, again) = st1.eof_action()
+      again is None
+    }
+  }
+}
+
+///|
+/// 回放一条夹取计划(channels.c:3085-3100)。
+///
+/// 返回 `(每个 CHANNEL_DATA 的字节数, 累计字节, 停顿次数, 用掉的 adjust 数,
+/// 停顿时缓冲是否原样退回)`。
+///
+/// 停顿的语义和 oracle 一致:窗口空了、又没 adjust 可用,就是「这轮没轮到发」,
+/// 不是错误。把它当成错误会让连接挂死;把它当成成功会让剩下的字节被悄悄丢掉。
+///
+/// 最后那个布尔是 `stdin_take` 的契约本身:返回 `None` 时**第三个返回值必须是
+/// 原封不动的缓冲**。少这一条的话,一个「停顿时就声称剩下的字节都发出去了」
+/// 的实现能通过全部用例——因为重放只看 `Some` 分支里 `rest` 的变化。
+fn replay_stdin_plan(
+  c : StdinCase,
+) -> (Array[Int], Int, Int, Int, Bool) {
+  let mut st = {
+    ..@channel.ChanState::new(0),
+    remote_window: c.window,
+    remote_max_packet: c.max_packet,
+  }
+  let mut rest = fill_bytes(c.byte, c.size)
+  let sizes : Array[Int] = []
+  let mut sent = 0
+  let mut stalls = 0
+  let mut used_adjusts = 0
+  let mut preserved = true
+  let mut steps = 0
+  while rest.length() > 0 {
+    steps = steps + 1
+    if steps > 1000000 {
+      break
+    }
+    let (st1, action, left) = st.stdin_take(rest)
+    st = st1
+    match action {
+      None => {
+        if !bytes_equal(left, rest) {
+          preserved = false
+        }
+        if used_adjusts < c.adjusts.length() {
+          // 对端的 WINDOW_ADJUST 走的是收包路径,和 stdin 走同一条 chan_step 分支。
+          let (st2, _acts, _e) = @channel.chan_step(
+            st,
+            0x5d,
+            @channel.channel_window_adjust_payload(0, c.adjusts[used_adjusts]),
+          )
+          st = st2
+          used_adjusts = used_adjusts + 1
+        } else {
+          stalls = stalls + 1
+          break
+        }
+      }
+      Some(a) => {
+        let (_t, payload) = action_bytes(a)
+        match @channel.parse_data(payload) {
+          None => break
+          Some((_who, d)) => {
+            sizes.push(d.length())
+            sent = sent + d.length()
+          }
+        }
+        rest = left
+      }
+    }
+  }
+  (sizes, sent, stalls, used_adjusts, preserved)
+}
+
+///| 夹取计划:包长序列、累计字节、停顿次数、缓冲契约都要对上
+fn chk_stdin_plan(c : StdinCase) -> Bool {
+  let (sizes, sent, stalls, used, preserved) = replay_stdin_plan(c)
+  if !preserved {
+    return false
+  }
+  if sizes.length() != c.packets.length() {
+    return false
+  }
+  for i = 0; i < sizes.length(); i = i + 1 {
+    if sizes[i] != c.packets[i] {
+      return false
+    }
+  }
+  if sent != c.sent || stalls != c.stalls || used != c.consumed_adjusts {
+    return false
+  }
+  // 排空与否决定会不会发 EOF——先发 EOF 再补数据,对端只会安静地少读。
+  (c.size - sent == 0) == c.eof
+}
+
+///|
+/// 回放一条 env + stdin transcript。
+///
+/// 顺序就是 oracle 记录的顺序,每一步都会影响最终字节流:
+/// 状态机吐出的动作 → 到期的驱动发送 → 按窗口夹取的 stdin → 排空后才发的 EOF。
+///
+/// 返回 `replies` 给调用方逐字节比,状态留给报告字段。
+fn replay_io(c : IoCase) -> (Array[@channel.ChanAction], @channel.ChanState, String, Bool) {
+  let replies : Array[@channel.ChanAction] = []
+  let mut st = @channel.ChanState::new(c.local_channel)
+  let mut err = ""
+  let mut send_idx = 0
+  let mut preserved = true
+  let mut pending = fill_bytes(c.stdin_byte, c.stdin_size)
+  for i = 0; i < c.packets.length(); i = i + 1 {
+    let p = c.packets[i]
+    let payload = packet_payload(p, c.local_channel)
+    let (st1, actions, e) = @channel.chan_step(
+      st,
+      p.msg_type.to_byte(),
+      payload,
+    )
+    st = st1
+    if err == "" {
+      match e {
+        None => ()
+        Some(chan_err) => err = describe(chan_err)
+      }
+    }
+    for j = 0; j < actions.length(); j = j + 1 {
+      replies.push(actions[j])
+    }
+    let seen = i + 1
+    while send_idx < c.client_sends.length() &&
+          c.client_sends[send_idx].after <= seen {
+      replies.push(
+        Send(
+          c.client_sends[send_idx].msg_type.to_byte(),
+          hex_to_bytes(c.client_sends[send_idx].payload_hex),
+        ),
+      )
+      send_idx = send_idx + 1
+    }
+    // stdin,按窗口夹取。夹到 0 就停在这里等下一个 WINDOW_ADJUST,
+    // 而且此时缓冲必须原样退回——见 replay_stdin_plan 的说明。
+    while pending.length() > 0 {
+      let (c1, action, rest) = st.stdin_take(pending)
+      st = c1
+      match action {
+        None => {
+          if !bytes_equal(rest, pending) {
+            preserved = false
+          }
+          break
+        }
+        Some(a) => {
+          replies.push(a)
+          pending = rest
+        }
+      }
+    }
+    // 缓冲排空才发 EOF。
+    if pending.length() == 0 {
+      let (c1, a) = st.eof_action()
+      st = c1
+      match a {
+        None => ()
+        Some(x) => replies.push(x)
+      }
+    }
+  }
+  (replies, st, err, preserved)
+}
+
+///|
+/// env + stdin transcript 的完整比对。
+///
+/// `replies` 里含 stdin DATA 与 EOF,它们是**重建**出来的而不是照抄向量——否则
+/// 一个把夹取写错的实现只要把向量的字节原样吐回去就能通过。
+fn check_io(c : IoCase, fails : Array[String]) -> Unit {
+  let (replies, st, err, preserved) = replay_io(c)
+  if err != "" {
+    fails.push(c.name + ": " + err)
+    return
+  }
+  if !preserved {
+    fails.push(c.name + ": stdin buffer was not returned intact on a stall")
+    return
+  }
+  if replies.length() != c.replies.length() {
+    fails.push(
+      c.name + ": " + replies.length().to_string() + " client packets, vector says " +
+      c.replies.length().to_string(),
+    )
+  } else {
+    for i = 0; i < replies.length(); i = i + 1 {
+      let (t, p) = action_bytes(replies[i])
+      let want = c.replies[i]
+      // 回复方向用的是**对端**给的通道号,和收包方向(我们自己的号)相反。
+      let expect = reply_payload(want, c.remote_channel)
+      if t != want.msg_type || !bytes_equal(p, expect) {
+        fails.push(
+          c.name + ": client packet " + i.to_string() + " is type " +
+          t.to_string() + " " + short_hex(p) + ", expected type " +
+          want.msg_type.to_string() + " " + want.payload_hex,
+        )
+        return
+      }
+    }
+  }
+  let report = st.report()
+  if report.stdin_sent != c.stdin_sent ||
+      report.stdin_packets != c.stdin_packets ||
+      report.eof_sent != c.eof_sent {
+    fails.push(
+      c.name + ": stdin " + report.stdin_sent.to_string() + "B in " +
+      report.stdin_packets.to_string() + " packets, eof=" +
+      report.eof_sent.to_string() + "; vector says " + c.stdin_sent.to_string() +
+      "B in " + c.stdin_packets.to_string() + ", eof=" + c.eof_sent.to_string(),
+    )
+  }
+  let remaining = c.stdin_size - c.stdin_sent
+  if remaining != c.stdin_remaining {
+    fails.push(c.name + ": " + remaining.to_string() + " bytes left, vector says " + c.stdin_remaining.to_string())
+  }
+  if st.success_count != c.success_count {
+    fails.push(
+      c.name + ": " + st.success_count.to_string() + " successes, expected " +
+      c.success_count.to_string(),
+    )
+  }
+  if report.adjusts_sent != c.adjusts_sent {
+    fails.push(
+      c.name + ": " + report.adjusts_sent.to_string() + " adjusts, expected " +
+      c.adjusts_sent.to_string(),
+    )
+  }
+  if !bytes_equal(report.stdout, stream_bytes(c.stdout)) {
+    fails.push(c.name + ": stdout mismatch")
+  }
+  if !bytes_equal(report.stderr, stream_bytes(c.stderr)) {
+    fails.push(c.name + ": stderr mismatch")
+  }
+  if report.exit_status != c.exit_status {
+    fails.push(
+      c.name + ": exit " + report.exit_status.to_string() + ", expected " +
+      c.exit_status.to_string(),
+    )
+  }
+  if st.window.cur != c.final_cur {
+    fails.push(c.name + ": local window " + st.window.cur.to_string() + ", expected " + c.final_cur.to_string())
+  }
+  if st.remote_window != c.final_remote_window {
+    fails.push(
+      c.name + ": remote window " + st.remote_window.to_string() + ", expected " +
+      c.final_remote_window.to_string(),
+    )
+  }
+}
+
+fn all_env_payloads(
+  f : (EnvPayloadCase) -> Bool,
+  label : String,
+  fails : Array[String],
+) -> Bool {
+  for i = 0; i < kat_env_payload_cases.length(); i = i + 1 {
+    if !f(kat_env_payload_cases[i]) {
+      fails.push(label + ": " + kat_env_payload_cases[i].name)
+      return false
+    }
+  }
+  true
+}
+
+fn all_stdin_cases(
+  f : (StdinCase) -> Bool,
+  label : String,
+  fails : Array[String],
+) -> Bool {
+  for i = 0; i < kat_stdin_cases.length(); i = i + 1 {
+    if !f(kat_stdin_cases[i]) {
+      fails.push(label + ": " + kat_stdin_cases[i].name)
+      return false
+    }
+  }
+  true
+}
+
+// ---------------------------------------------------------------------------
 // window replay
 // ---------------------------------------------------------------------------
 
@@ -841,6 +1236,57 @@ fn main {
     pf(
       has_no_pty && has_resize && has_signal &&
       kat_shell_cases.length() >= 6,
+    ),
+  )
+
+  // ---- 7. env 请求 + stdin 流控(channels.c:3085-3100)----
+  println(
+    "chan_env_payloads: " +
+    pf(all_env_payloads(chk_env_payloads, "env_payloads", fails)),
+  )
+  println(
+    "chan_eof_action: " +
+    pf(all_env_payloads(chk_eof_action, "eof_action", fails)),
+  )
+  println(
+    "chan_stdin_clamp: " +
+    pf(all_stdin_cases(chk_stdin_plan, "stdin_clamp", fails)),
+  )
+  // 防退化:一个「有夹取」的用例和一个「夹到 0 也正常停」的用例都必须有。
+  // 只有前者的实现会把窗口用光后当成错误,只有后者的实现会以为永远发得完。
+  let clamp_stalls = kat_stdin_cases.filter(c => c.stalls > 0).length()
+  let clamp_resumes = kat_stdin_cases.filter(c => c.consumed_adjusts > 0).length()
+  let clamp_by_window = kat_stdin_cases.filter(c =>
+    c.window < c.max_packet && c.size > c.window && c.consumed_adjusts > 0
+  ).length()
+  println("chan_stdin_cases: " + kat_stdin_cases.length().to_string())
+  println("chan_stdin_stall_cases: " + clamp_stalls.to_string())
+  println("chan_stdin_resume_cases: " + clamp_resumes.to_string())
+  println(
+    "chan_stdin_window_tighter_than_packet: " + clamp_by_window.to_string(),
+  )
+  let io_fails : Array[String] = []
+  for i = 0; i < kat_io_cases.length(); i = i + 1 {
+    check_io(kat_io_cases[i], io_fails)
+  }
+  println("chan_io_sessions: " + pf(io_fails.length() == 0))
+  for i = 0; i < io_fails.length(); i = i + 1 {
+    println("  chan_io_fail: " + io_fails[i])
+  }
+  // env 必须排在 exec 之前,而 env 不带回包(§6.4),所以一条 env + 一条 exec
+  // 只应得到 **1** 个 CHANNEL_SUCCESS。有 env 用例但没有「成功数只有 1」的
+  // 断言,就测不出驱动是不是在等一个永远不会来的 env 确认。
+  let env_cases = kat_io_cases.filter(c => c.name == "io_env_no_stdin")
+  let one_success = env_cases.all(c => c.success_count == 1)
+  let has_env = env_cases.length() > 0
+  let has_stdin = kat_io_cases.any(c => c.stdin_packets > 0)
+  let has_stalled = kat_io_cases.any(c => !c.eof_sent)
+  let has_ids_split = kat_io_cases.any(c => c.local_channel != c.remote_channel)
+  println("chan_io_cases: " + kat_io_cases.length().to_string())
+  println(
+    "chan_io_coverage: " +
+    pf(
+      has_env && one_success && has_stdin && has_stalled && has_ids_split,
     ),
   )
 }

@@ -135,7 +135,7 @@ fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   if b.length() == 0 {
     return
   }
-  let n = if b.length() > 128 { 128 } else { b.length() }
+  let n = if b.length() > 512 { 512 } else { b.length() }
   let sb = StringBuilder()
   for i = 0; i < n; i = i + 1 {
     sb.write_char(Int::unsafe_to_char(b[i].to_int()))
@@ -143,7 +143,7 @@ fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   println("--- raw ---")
   println(sb.to_string())
   if n < b.length() {
-    println("--- raw truncated at 128 of " + b.length().to_string() + " ---")
+    println("--- raw truncated at 512 of " + b.length().to_string() + " ---")
   }
   println("--- end raw ---")
 }
@@ -218,6 +218,77 @@ fn cfg_resize() -> (Int, Int)? {
   }
 }
 
+///|
+/// Loop #37:`cfg("stdin_bytes")` 给一个长度,`cfg("stdin_text")` 给一段字面量。
+///
+/// 模式串本体走 `@sshclient.ssh_stdin_pattern`——原生 CLI 用的是同一个函数,
+/// 这样「两条路径发出的字节完全相同」才是一条关于协议的断言,而不是在比两段
+/// 碰巧长得一样的数据。
+fn cfg_stdin_bytes() -> FixedArray[Byte] {
+  let text = cfg("stdin_text")
+  if text != "" {
+    return @sshclient.sh_ascii(text)
+  }
+  let n = cfg_int("stdin_bytes", 0)
+  if n > 0 {
+    return @sshclient.ssh_stdin_pattern(n)
+  }
+  FixedArray::make(0, b'\x00')
+}
+
+///|
+/// `cfg("env")` 形如 `"NAME=VALUE;OTHER=thing"`。
+///
+/// 用分号而不是逗号分隔:`NAME=VALUE` 里出现逗号比出现分号常见得多(值里带分号是
+/// 病态情况),而解析器不转义——它按第一个 `=` 切开名字和值、其余原样。
+fn cfg_envs() -> Array[@sshclient.EnvVar] {
+  let out : Array[@sshclient.EnvVar] = []
+  let spec = cfg("env")
+  if spec == "" {
+    return out
+  }
+  let mut start = 0
+  let mut i = 0
+  while i <= spec.length() {
+    if i == spec.length() || spec[i].to_int() == 59 {
+      if i > start {
+        let one = cfg_slice(spec, start, i)
+        let at = cfg_index_of_eq(one)
+        if at > 0 {
+          out.push({
+            name: cfg_slice(one, 0, at),
+            value: cfg_slice(one, at + 1, one.length()),
+          })
+        }
+      }
+      start = i + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+///| 取 `s[from, to)`
+fn cfg_slice(s : String, from : Int, to : Int) -> String {
+  let sb = StringBuilder()
+  let mut i = from
+  while i < to {
+    sb.write_char(Int::unsafe_to_char(s[i].to_int()))
+    i = i + 1
+  }
+  sb.to_string()
+}
+
+///| 第一个 `=` 的下标;没有就返回 -1
+fn cfg_index_of_eq(s : String) -> Int {
+  for i = 0; i < s.length(); i = i + 1 {
+    if s[i].to_int() == 61 {
+      return i
+    }
+  }
+  -1
+}
+
 fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
   match e {
     NoSessionState => "NoSessionState"
@@ -228,6 +299,7 @@ fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
     BadPacket(w) => "BadPacket(" + w + ")"
     Closed => "Closed"
     TooManyPackets => "TooManyPackets"
+    StdinStalled => "StdinStalled"
   }
 }
 
@@ -328,6 +400,12 @@ async fn main {
     println("transport_url: " + url)
     println("user: " + uname)
     println("command: " + exec_cmd)
+    let stdin_data = cfg_stdin_bytes()
+    println("stdin_bytes: " + stdin_data.length().to_string())
+    let envs = cfg_envs()
+    for i = 0; i < envs.length(); i = i + 1 {
+      println("env: " + envs[i].name + "=" + envs[i].value)
+    }
     let econn = @wt.WtConn::connect(url) catch {
       _ => {
         println("result: FAILED")
@@ -337,12 +415,14 @@ async fn main {
       }
     }
     println("transport: connected")
-    let outcome = @wtlive.wt_live_exec(
+    let outcome = @wtlive.wt_live_exec_io(
       econn,
       fixed_x(),
       uname,
       test_auth_key(),
       exec_cmd,
+      stdin_data,
+      envs,
     )
     match outcome {
       @wtlive.Done(r) => {
@@ -354,6 +434,10 @@ async fn main {
         println("exit_status: " + r.exit_status.to_string())
         println("remote_id: " + r.remote_id.to_string())
         println("adjusts_sent: " + r.adjusts_sent.to_string())
+        println("stdin_sent: " + r.stdin_sent.to_string())
+        println("stdin_packets: " + r.stdin_packets.to_string())
+        println("eof_sent: " + wt_yn(r.eof_sent))
+        println("env_sent: " + r.env_sent.to_string())
         println("total_sent_bytes: " + r.sent_bytes.to_string())
         println("total_recv_bytes: " + r.recv_bytes.to_string())
         wt_print_bytes(r.stdout)

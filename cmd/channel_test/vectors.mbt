@@ -3,9 +3,10 @@
 ///|
 ///| Source: host/channel_oracle.py.  That file re-derives every value from
 ///| OpenSSH's C (`channels.h:231-232`, `channels.c:2444-2462`,
-///| `channels.c:3505-3523`, `channels.c:3126-3135`, `session.c:2344-2347`) and
-///| cross-checks its own CHANNEL_OPEN / exec / EOF bytes against a live
-///| paramiko session before any of this is written out.  So these are not
+///| `channels.c:3505-3523`, `channels.c:3126-3135`, `session.c:2344-2347`,
+///| `channels.c:3085-3100` and `session.c:2042-2070`) and cross-checks its own
+///| CHANNEL_OPEN / exec / EOF / env bytes against a live paramiko session
+///| before any of this is written out.  So these are not
 ///| "what MoonBit happens to produce" -- they are what a server would have to
 ///| agree with.
 ///
@@ -318,6 +319,177 @@ pub fn SessionCase::new(
     exit_status,
     adjusts_sent,
     final_cur,
+  }
+}
+
+///|
+///| One `env` request plus the CHANNEL_EOF that closes the stdin direction.
+///
+/// `env_want_reply_hex` is the **negative control**: the identical request with
+/// `want_reply = TRUE`.  RFC 4254 section 6.4 says the server sends no
+/// response, and OpenSSH's client sends `channel_request_start(..., "env", 0)`
+/// (clientloop.c:2706).  Keeping the wrong variant in the vector means the KAT
+/// can assert our bytes are not it, instead of leaving the choice to a comment.
+pub(all) struct EnvPayloadCase {
+  name : String
+  recipient : Int
+  var_name : String
+  var_value : String
+  env_hex : String
+  env_want_reply_hex : String
+  empty_value_env_hex : String
+  eof_hex : String
+}
+
+///|
+///| A send-side window clamp plan (channels.c:3085-3099).
+///|
+///| `packets` is the size of every CHANNEL_DATA we should emit, in order.
+///| `stalls` is how many times the clamp bottomed out with bytes still
+///| buffered and no WINDOW_ADJUST to consume -- that is a normal state, not an
+///| error, and a case where it never happens cannot tell "clamped" from
+///| "sent everything at once".
+pub(all) struct StdinCase {
+  name : String
+  window : Int
+  max_packet : Int
+  size : Int
+  byte : Int
+  adjusts : Array[Int]
+  packets : Array[Int]
+  sent : Int
+  stalls : Int
+  consumed_adjusts : Int
+  leftover_adjusts : Array[Int]
+  eof : Bool
+  final_window : Int
+}
+
+///|
+///| An `env` + stdin transcript.
+///|
+///| `client_sends` holds **only** the packets the driver chooses to send on its
+///| own (CHANNEL_OPEN, `env`, `exec`), timed by how many server packets came
+///| before them.  The stdin CHANNEL_DATA and the CHANNEL_EOF are *not* in there
+///| -- they are rebuilt from the clamp during the replay, so a broken
+///| implementation cannot pass by echoing the vector's own bytes back.
+pub(all) struct IoCase {
+  name : String
+  local_channel : Int
+  remote_channel : Int
+  packets : Array[Packet]
+  client_sends : Array[ClientSend]
+  replies : Array[Packet]
+  stdin_size : Int
+  stdin_byte : Int
+  stdin_packets : Int
+  stdin_sent : Int
+  stdin_remaining : Int
+  eof_sent : Bool
+  stdout : Stream
+  stderr : Stream
+  exit_status : Int
+  success_count : Int
+  adjusts_sent : Int
+  final_cur : Int
+  final_remote_window : Int
+}
+
+pub fn EnvPayloadCase::new(
+  name : String,
+  recipient : Int,
+  var_name : String,
+  var_value : String,
+  env_hex : String,
+  env_want_reply_hex : String,
+  empty_value_env_hex : String,
+  eof_hex : String,
+) -> EnvPayloadCase {
+  {
+    name,
+    recipient,
+    var_name,
+    var_value,
+    env_hex,
+    env_want_reply_hex,
+    empty_value_env_hex,
+    eof_hex,
+  }
+}
+
+pub fn StdinCase::new(
+  name : String,
+  window : Int,
+  max_packet : Int,
+  size : Int,
+  byte : Int,
+  adjusts : Array[Int],
+  packets : Array[Int],
+  sent : Int,
+  stalls : Int,
+  consumed_adjusts : Int,
+  leftover_adjusts : Array[Int],
+  eof : Bool,
+  final_window : Int,
+) -> StdinCase {
+  {
+    name,
+    window,
+    max_packet,
+    size,
+    byte,
+    adjusts,
+    packets,
+    sent,
+    stalls,
+    consumed_adjusts,
+    leftover_adjusts,
+    eof,
+    final_window,
+  }
+}
+
+pub fn IoCase::new(
+  name : String,
+  local_channel : Int,
+  remote_channel : Int,
+  packets : Array[Packet],
+  client_sends : Array[ClientSend],
+  replies : Array[Packet],
+  stdin_size : Int,
+  stdin_byte : Int,
+  stdin_packets : Int,
+  stdin_sent : Int,
+  stdin_remaining : Int,
+  eof_sent : Bool,
+  stdout : Stream,
+  stderr : Stream,
+  exit_status : Int,
+  success_count : Int,
+  adjusts_sent : Int,
+  final_cur : Int,
+  final_remote_window : Int,
+) -> IoCase {
+  {
+    name,
+    local_channel,
+    remote_channel,
+    packets,
+    client_sends,
+    replies,
+    stdin_size,
+    stdin_byte,
+    stdin_packets,
+    stdin_sent,
+    stdin_remaining,
+    eof_sent,
+    stdout,
+    stderr,
+    exit_status,
+    success_count,
+    adjusts_sent,
+    final_cur,
+    final_remote_window,
   }
 }
 
@@ -939,5 +1111,505 @@ pub let kat_shell_cases : Array[ShellCase] = [
     0,
     1,
     2097152,
+  ),
+]
+
+///| One entry per `env` request shape, for two channel ids.
+///|
+///| `env_want_reply_hex` is a negative control: the same request
+///| with `want_reply = TRUE`.  RFC 4254 6.4 says the server sends
+///| no response at all, so we must not be the ones asking.
+pub let kat_env_payload_cases : Array[EnvPayloadCase] = [
+  EnvPayloadCase::new(
+    "env_s0",
+    0,
+    "LOOP37_TEST",
+    "hello-loop37",
+    "0000000000000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337",
+    "0000000000000003656e76010000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337",
+    "0000000000000003656e7600000000044c414e4700000000",
+    "00000000",
+  ),
+  EnvPayloadCase::new(
+    "env_s7",
+    7,
+    "LOOP37_TEST",
+    "hello-loop37",
+    "0000000700000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337",
+    "0000000700000003656e76010000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337",
+    "0000000700000003656e7600000000044c414e4700000000",
+    "00000007",
+  ),
+]
+
+///| Window-clamp plans.  `packets` is the size of each
+///| CHANNEL_DATA we should emit; `stalls` counts the times the
+///| clamp bottomed out with bytes still buffered and nothing to
+///| resume from, which is a normal state rather than an error.
+pub let kat_stdin_cases : Array[StdinCase] = [
+  StdinCase::new(
+    "stdin_empty",
+    2097152,
+    32768,
+    0,
+    65,
+    [],
+    [],
+    0,
+    0,
+    0,
+    [],
+    true,
+    2097152,
+  ),
+  StdinCase::new(
+    "stdin_fits_one_packet",
+    2097152,
+    32768,
+    1000,
+    65,
+    [],
+    [1000],
+    1000,
+    0,
+    0,
+    [],
+    true,
+    2096152,
+  ),
+  StdinCase::new(
+    "stdin_exact_packet",
+    2097152,
+    32768,
+    32768,
+    65,
+    [],
+    [32768],
+    32768,
+    0,
+    0,
+    [],
+    true,
+    2064384,
+  ),
+  StdinCase::new(
+    "stdin_clamped_by_maxpacket",
+    2097152,
+    32768,
+    100000,
+    66,
+    [],
+    [32768, 32768, 32768, 1696],
+    100000,
+    0,
+    0,
+    [],
+    true,
+    1997152,
+  ),
+  StdinCase::new(
+    "stdin_clamped_by_window",
+    1000,
+    32768,
+    5000,
+    67,
+    [],
+    [1000],
+    1000,
+    1,
+    0,
+    [],
+    false,
+    0,
+  ),
+  StdinCase::new(
+    "stdin_window_exhausted",
+    65536,
+    32768,
+    200000,
+    68,
+    [131072],
+    [32768, 32768, 32768, 32768, 32768, 32768],
+    196608,
+    1,
+    1,
+    [],
+    false,
+    0,
+  ),
+  StdinCase::new(
+    "stdin_no_adjust_stalls",
+    32768,
+    32768,
+    65536,
+    69,
+    [],
+    [32768],
+    32768,
+    1,
+    0,
+    [],
+    false,
+    0,
+  ),
+  StdinCase::new(
+    "stdin_zero_window",
+    0,
+    32768,
+    100,
+    70,
+    [65536],
+    [100],
+    100,
+    0,
+    1,
+    [],
+    true,
+    65436,
+  ),
+  StdinCase::new(
+    "stdin_two_adjusts",
+    65536,
+    4096,
+    30000,
+    71,
+    [8192, 8192],
+    [4096, 4096, 4096, 4096, 4096, 4096, 4096, 1328],
+    30000,
+    0,
+    0,
+    [8192, 8192],
+    true,
+    35536,
+  ),
+  StdinCase::new(
+    "stdin_two_mib",
+    2097152,
+    32768,
+    3145728,
+    72,
+    [2097152],
+    [32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768],
+    3145728,
+    0,
+    1,
+    [],
+    true,
+    1048576,
+  ),
+]
+
+///| `env` + stdin transcripts.
+///|
+///| `client_sends` carries only the driver's own decisions
+///| (CHANNEL_OPEN, env, exec).  The stdin CHANNEL_DATA and the
+///| CHANNEL_EOF are rebuilt from the clamp during the replay, so
+///| a broken implementation cannot pass by echoing the vector
+///| back at itself.
+pub let kat_io_cases : Array[IoCase] = [
+  IoCase::new(
+    "io_env_no_stdin",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000020000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337", -1, 0, -1, 43),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    0,
+    65,
+    0,
+    0,
+    0,
+    true,
+    Stream::new("", -1, 0),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097152,
+    2097152,
+  ),
+  IoCase::new(
+    "io_env_two_vars",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000020000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337"),
+      ClientSend::new(1, 98, "0000000000000003656e7600000000044c414e4700000000"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337", -1, 0, -1, 43),
+      Packet::new(98, "0000000000000003656e7600000000044c414e4700000000", -1, 0, -1, 24),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    0,
+    65,
+    0,
+    0,
+    0,
+    true,
+    Stream::new("", -1, 0),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097152,
+    2097152,
+  ),
+  IoCase::new(
+    "io_env_nonzero_ids",
+    3,
+    7,
+    [
+      Packet::new(91, "00000003000000070020000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000003", -1, 0, -1, 4),
+      Packet::new(98, "000000030000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000003", -1, 0, -1, 4),
+      Packet::new(97, "00000003", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000030020000000008000"),
+      ClientSend::new(1, 98, "0000000700000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337"),
+      ClientSend::new(1, 98, "0000000700000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000030020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000700000003656e76000000000b4c4f4f5033375f544553540000000c68656c6c6f2d6c6f6f703337", -1, 0, -1, 43),
+      Packet::new(98, "0000000700000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(96, "00000007", -1, 0, -1, 4),
+      Packet::new(97, "00000007", -1, 0, -1, 4),
+    ],
+    0,
+    65,
+    0,
+    0,
+    0,
+    true,
+    Stream::new("", -1, 0),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097152,
+    2097152,
+  ),
+  IoCase::new(
+    "io_stdin_small",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000020000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(94, "000000000000000d68656c6c6f2d6c6f6f7033370a", -1, 0, -1, 21),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(94, "", 65, 11, -1, 19),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    11,
+    65,
+    1,
+    11,
+    0,
+    true,
+    Stream::new("68656c6c6f2d6c6f6f7033370a", -1, 13),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097139,
+    2097141,
+  ),
+  IoCase::new(
+    "io_stdin_window_resume",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000001000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(93, "0000000000010000", -1, 0, -1, 8),
+      Packet::new(94, "00000000000000046f6e650a", -1, 0, -1, 12),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(94, "", 66, 32768, -1, 32776),
+      Packet::new(94, "", 66, 32768, -1, 32776),
+      Packet::new(94, "", 66, 32768, -1, 32776),
+      Packet::new(94, "", 66, 1696, -1, 1704),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    100000,
+    66,
+    4,
+    100000,
+    0,
+    true,
+    Stream::new("6f6e650a", -1, 4),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097148,
+    31072,
+  ),
+  IoCase::new(
+    "io_stdin_zero_window",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000000000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(93, "0000000000001000", -1, 0, -1, 8),
+      Packet::new(94, "00000000000000057a65726f0a", -1, 0, -1, 13),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(94, "", 67, 1000, -1, 1008),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    1000,
+    67,
+    1,
+    1000,
+    0,
+    true,
+    Stream::new("7a65726f0a", -1, 5),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097147,
+    3096,
+  ),
+  IoCase::new(
+    "io_stdin_stalls",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000000040000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(94, "00000000000000087061727469616c0a", -1, 0, -1, 16),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(94, "", 68, 1024, -1, 1032),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    5000,
+    68,
+    1,
+    1024,
+    3976,
+    false,
+    Stream::new("7061727469616c0a", -1, 8),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    0,
+    2097144,
+    0,
+  ),
+  IoCase::new(
+    "io_stdin_and_bulk_output",
+    0,
+    0,
+    [
+      Packet::new(91, "00000000000000000020000000008000", -1, 0, -1, 16),
+      Packet::new(99, "00000000", -1, 0, -1, 4),
+      Packet::new(94, "", 27, 1048584, -1, 1048592),
+      Packet::new(93, "0000000000200000", -1, 0, -1, 8),
+      Packet::new(94, "", 27, 64, -1, 72),
+      Packet::new(98, "000000000000000b657869742d7374617475730000000000", -1, 0, -1, 24),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    [
+      ClientSend::new(1, 90, "0000000773657373696f6e000000000020000000008000"),
+      ClientSend::new(1, 98, "0000000000000004657865630100000003636174"),
+    ],
+    [
+      Packet::new(90, "0000000773657373696f6e000000000020000000008000", -1, 0, -1, 23),
+      Packet::new(98, "0000000000000004657865630100000003636174", -1, 0, -1, 20),
+      Packet::new(94, "", 69, 4096, -1, 4104),
+      Packet::new(96, "00000000", -1, 0, -1, 4),
+      Packet::new(93, "0000000000100008", -1, 0, -1, 8),
+      Packet::new(97, "00000000", -1, 0, -1, 4),
+    ],
+    4096,
+    69,
+    1,
+    4096,
+    0,
+    true,
+    Stream::new("", 27, 1048648),
+    Stream::new("", -1, 0),
+    0,
+    1,
+    1,
+    2097088,
+    4190208,
   ),
 ]

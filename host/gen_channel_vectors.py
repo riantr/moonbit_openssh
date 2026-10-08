@@ -24,9 +24,10 @@ HEADER = '''///| GENERATED FILE -- do not edit by hand.
 ///|
 ///| Source: host/channel_oracle.py.  That file re-derives every value from
 ///| OpenSSH's C (`channels.h:231-232`, `channels.c:2444-2462`,
-///| `channels.c:3505-3523`, `channels.c:3126-3135`, `session.c:2344-2347`) and
-///| cross-checks its own CHANNEL_OPEN / exec / EOF bytes against a live
-///| paramiko session before any of this is written out.  So these are not
+///| `channels.c:3505-3523`, `channels.c:3126-3135`, `session.c:2344-2347`,
+///| `channels.c:3085-3100` and `session.c:2042-2070`) and cross-checks its own
+///| CHANNEL_OPEN / exec / EOF / env bytes against a live paramiko session
+///| before any of this is written out.  So these are not
 ///| "what MoonBit happens to produce" -- they are what a server would have to
 ///| agree with.
 ///
@@ -341,6 +342,177 @@ pub fn SessionCase::new(
     final_cur,
   }
 }
+
+///|
+///| One `env` request plus the CHANNEL_EOF that closes the stdin direction.
+///
+/// `env_want_reply_hex` is the **negative control**: the identical request with
+/// `want_reply = TRUE`.  RFC 4254 section 6.4 says the server sends no
+/// response, and OpenSSH's client sends `channel_request_start(..., "env", 0)`
+/// (clientloop.c:2706).  Keeping the wrong variant in the vector means the KAT
+/// can assert our bytes are not it, instead of leaving the choice to a comment.
+pub(all) struct EnvPayloadCase {
+  name : String
+  recipient : Int
+  var_name : String
+  var_value : String
+  env_hex : String
+  env_want_reply_hex : String
+  empty_value_env_hex : String
+  eof_hex : String
+}
+
+///|
+///| A send-side window clamp plan (channels.c:3085-3099).
+///|
+///| `packets` is the size of every CHANNEL_DATA we should emit, in order.
+///| `stalls` is how many times the clamp bottomed out with bytes still
+///| buffered and no WINDOW_ADJUST to consume -- that is a normal state, not an
+///| error, and a case where it never happens cannot tell "clamped" from
+///| "sent everything at once".
+pub(all) struct StdinCase {
+  name : String
+  window : Int
+  max_packet : Int
+  size : Int
+  byte : Int
+  adjusts : Array[Int]
+  packets : Array[Int]
+  sent : Int
+  stalls : Int
+  consumed_adjusts : Int
+  leftover_adjusts : Array[Int]
+  eof : Bool
+  final_window : Int
+}
+
+///|
+///| An `env` + stdin transcript.
+///|
+///| `client_sends` holds **only** the packets the driver chooses to send on its
+///| own (CHANNEL_OPEN, `env`, `exec`), timed by how many server packets came
+///| before them.  The stdin CHANNEL_DATA and the CHANNEL_EOF are *not* in there
+///| -- they are rebuilt from the clamp during the replay, so a broken
+///| implementation cannot pass by echoing the vector's own bytes back.
+pub(all) struct IoCase {
+  name : String
+  local_channel : Int
+  remote_channel : Int
+  packets : Array[Packet]
+  client_sends : Array[ClientSend]
+  replies : Array[Packet]
+  stdin_size : Int
+  stdin_byte : Int
+  stdin_packets : Int
+  stdin_sent : Int
+  stdin_remaining : Int
+  eof_sent : Bool
+  stdout : Stream
+  stderr : Stream
+  exit_status : Int
+  success_count : Int
+  adjusts_sent : Int
+  final_cur : Int
+  final_remote_window : Int
+}
+
+pub fn EnvPayloadCase::new(
+  name : String,
+  recipient : Int,
+  var_name : String,
+  var_value : String,
+  env_hex : String,
+  env_want_reply_hex : String,
+  empty_value_env_hex : String,
+  eof_hex : String,
+) -> EnvPayloadCase {
+  {
+    name,
+    recipient,
+    var_name,
+    var_value,
+    env_hex,
+    env_want_reply_hex,
+    empty_value_env_hex,
+    eof_hex,
+  }
+}
+
+pub fn StdinCase::new(
+  name : String,
+  window : Int,
+  max_packet : Int,
+  size : Int,
+  byte : Int,
+  adjusts : Array[Int],
+  packets : Array[Int],
+  sent : Int,
+  stalls : Int,
+  consumed_adjusts : Int,
+  leftover_adjusts : Array[Int],
+  eof : Bool,
+  final_window : Int,
+) -> StdinCase {
+  {
+    name,
+    window,
+    max_packet,
+    size,
+    byte,
+    adjusts,
+    packets,
+    sent,
+    stalls,
+    consumed_adjusts,
+    leftover_adjusts,
+    eof,
+    final_window,
+  }
+}
+
+pub fn IoCase::new(
+  name : String,
+  local_channel : Int,
+  remote_channel : Int,
+  packets : Array[Packet],
+  client_sends : Array[ClientSend],
+  replies : Array[Packet],
+  stdin_size : Int,
+  stdin_byte : Int,
+  stdin_packets : Int,
+  stdin_sent : Int,
+  stdin_remaining : Int,
+  eof_sent : Bool,
+  stdout : Stream,
+  stderr : Stream,
+  exit_status : Int,
+  success_count : Int,
+  adjusts_sent : Int,
+  final_cur : Int,
+  final_remote_window : Int,
+) -> IoCase {
+  {
+    name,
+    local_channel,
+    remote_channel,
+    packets,
+    client_sends,
+    replies,
+    stdin_size,
+    stdin_byte,
+    stdin_packets,
+    stdin_sent,
+    stdin_remaining,
+    eof_sent,
+    stdout,
+    stderr,
+    exit_status,
+    success_count,
+    adjusts_sent,
+    final_cur,
+    final_remote_window,
+  }
+}
 '''
 
 
@@ -516,9 +688,92 @@ def render_shell(doc):
     return "\n".join(parts) + "\n"
 
 
+def render_io(doc):
+    parts = []
+
+    # ---- env payloads ------------------------------------------------------
+    parts.append("\n///| One entry per `env` request shape, for two channel ids.\n"
+                 "///|\n"
+                 "///| `env_want_reply_hex` is a negative control: the same request\n"
+                 "///| with `want_reply = TRUE`.  RFC 4254 6.4 says the server sends\n"
+                 "///| no response at all, so we must not be the ones asking.\n"
+                 "pub let kat_env_payload_cases : Array[EnvPayloadCase] = [")
+    for p in doc["env_payloads"]:
+        parts.append("  EnvPayloadCase::new(")
+        parts.append("    %s," % lit(p["name"]))
+        parts.append("    %d," % p["recipient"])
+        parts.append("    %s," % lit(p["var_name"]))
+        parts.append("    %s," % lit(p["var_value"]))
+        parts.append("    %s," % lit(p["env_hex"]))
+        parts.append("    %s," % lit(p["env_want_reply_hex"]))
+        parts.append("    %s," % lit(p["empty_value_env_hex"]))
+        parts.append("    %s," % lit(p["eof_hex"]))
+        parts.append("  ),")
+    parts.append("]")
+
+    # ---- send-side window clamps ------------------------------------------
+    parts.append("\n///| Window-clamp plans.  `packets` is the size of each\n"
+                 "///| CHANNEL_DATA we should emit; `stalls` counts the times the\n"
+                 "///| clamp bottomed out with bytes still buffered and nothing to\n"
+                 "///| resume from, which is a normal state rather than an error.\n"
+                 "pub let kat_stdin_cases : Array[StdinCase] = [")
+    for w in doc["stdin_plans"]:
+        parts.append("  StdinCase::new(")
+        parts.append("    %s," % lit(w["name"]))
+        parts.append("    %d," % w["window"])
+        parts.append("    %d," % w["max_packet"])
+        parts.append("    %d," % w["size"])
+        parts.append("    %d," % w["byte"])
+        parts.append("    %s," % ints(w["adjusts"]))
+        parts.append("    %s," % ints(w["packets"]))
+        parts.append("    %d," % w["sent"])
+        parts.append("    %d," % w["stalls"])
+        parts.append("    %d," % w["consumed_adjusts"])
+        parts.append("    %s," % ints(w["leftover_adjusts"]))
+        parts.append("    %s," % ("true" if w["eof"] else "false"))
+        parts.append("    %d," % w["final_window"])
+        parts.append("  ),")
+    parts.append("]")
+
+    # ---- env + stdin transcripts ------------------------------------------
+    parts.append("\n///| `env` + stdin transcripts.\n"
+                 "///|\n"
+                 "///| `client_sends` carries only the driver's own decisions\n"
+                 "///| (CHANNEL_OPEN, env, exec).  The stdin CHANNEL_DATA and the\n"
+                 "///| CHANNEL_EOF are rebuilt from the clamp during the replay, so\n"
+                 "///| a broken implementation cannot pass by echoing the vector\n"
+                 "///| back at itself.\n"
+                 "pub let kat_io_cases : Array[IoCase] = [")
+    for s in doc["io_sessions"]:
+        parts.append("  IoCase::new(")
+        parts.append("    %s," % lit(s["name"]))
+        parts.append("    %d," % s["local_channel"])
+        parts.append("    %d," % s["remote_channel"])
+        parts.append("    %s," % packets(s["packets"], 4))
+        parts.append("    %s," % client_sends(s["client_sends"], 4))
+        parts.append("    %s," % packets(s["replies"], 4))
+        parts.append("    %d," % s["stdin_size"])
+        parts.append("    %d," % s["stdin_byte"])
+        parts.append("    %d," % s["stdin_packets"])
+        parts.append("    %d," % s["stdin_sent"])
+        parts.append("    %d," % s["stdin_remaining"])
+        parts.append("    %s," % ("true" if s["eof_sent"] else "false"))
+        parts.append("    %s," % stream(s["stdout"]))
+        parts.append("    %s," % stream(s["stderr"]))
+        parts.append("    %d," % s["exit_status"])
+        parts.append("    %d," % s["success_count"])
+        parts.append("    %d," % s["adjusts_sent"])
+        parts.append("    %d," % s["final_cur"])
+        parts.append("    %d," % s["final_remote_window"])
+        parts.append("  ),")
+    parts.append("]")
+
+    return "\n".join(parts) + "\n"
+
+
 def main():
     doc = O.build_document()
-    text = render(doc) + render_shell(doc)
+    text = render(doc) + render_shell(doc) + render_io(doc)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)

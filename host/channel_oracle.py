@@ -333,6 +333,135 @@ def compare_with_paramiko_shell(captured, term=DEFAULT_TERM,
     return problems
 
 
+def capture_paramiko_env(port, user, key_hex,
+                         envs=(("LOOP37_TEST", "hello-loop37"),
+                               ("LANG", "")),
+                         stdin_payload=b"", command="echo loop37"):
+    """Run a real `env` + stdin + shutdown_write session through paramiko.
+
+    paramiko is the second implementation of these three packets:
+
+      * `Channel.set_environment_variable` puts `MSG_CHANNEL_REQUEST`,
+        remote_chanid, "env", **False**, name, value -- the same layout, from
+        a codebase that never read our RFC notes.
+      * `Channel.shutdown_write` sends `SSH_MSG_CHANNEL_EOF` with just the
+        channel id.
+
+    Returns a list of (msg_type, payload_hex) in send order, or None.
+    """
+    try:
+        import io as _io
+        import time as _time
+
+        import paramiko
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except Exception as exc:  # noqa: BLE001
+        print("paramiko unavailable: %s" % exc, file=sys.stderr)
+        return None
+
+    sk = ec.derive_private_key(int(key_hex, 16), ec.SECP256R1())
+    pem = sk.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    key = paramiko.ECDSAKey.from_private_key(_io.StringIO(pem.decode("ascii")))
+
+    sent = []
+    orig = paramiko.transport.Transport._send_user_message
+
+    def patched(self, data):
+        raw = data.asbytes() if hasattr(data, "asbytes") else bytes(data)
+        if raw:
+            sent.append((raw[0], binascii.hexlify(raw[1:]).decode()))
+        return orig(self, data)
+
+    paramiko.transport.Transport._send_user_message = patched
+    try:
+        t = paramiko.Transport(("127.0.0.1", port))
+        t.start_client(timeout=15)
+        t.auth_publickey(user, key)
+        chan = t.open_session(timeout=15)
+        chan.settimeout(20)
+        chan.update_environment(dict(envs))
+        chan.exec_command(command)
+        if stdin_payload:
+            chan.sendall(stdin_payload)
+        chan.shutdown_write()
+        deadline = _time.time() + 15
+        while _time.time() < deadline:
+            if chan.recv_ready():
+                chan.recv(65536)
+            if chan.recv_stderr_ready():
+                chan.recv_stderr(65536)
+            if chan.exit_status_ready() or chan.closed:
+                break
+            _time.sleep(0.05)
+        t.close()
+    except Exception as exc:  # noqa: BLE001
+        print("paramiko env session failed: %s" % exc, file=sys.stderr)
+        return None
+    finally:
+        paramiko.transport.Transport._send_user_message = orig
+    return sent
+
+
+def compare_with_paramiko_env(captured, envs=(("LOOP37_TEST", "hello-loop37"),
+                                             ("LANG", ""))):
+    """Check env / stdin-data / EOF against our own construction.
+
+    The env request is compared whole, unlike pty-req: there is exactly one
+    legal shape for it, so any difference is a difference.  `want_reply` is
+    the field that decides whether the server ever answers, and paramiko's own
+    docstring calls the rejection "silent ... common client practice" -- a
+    third independent source agreeing with RFC 4254 6.4.
+    """
+    problems = []
+    want_envs = [chan_env(0, n, v) for n, v in envs]
+    saw_envs = []
+    saw_data = saw_eof = saw_exec = False
+    for msg_type, payload_hex in captured:
+        payload = binascii.unhexlify(payload_hex)
+        if msg_type == MSG_CHANNEL_REQUEST:
+            recipient = struct.unpack(">I", payload[0:4])[0]
+            n = struct.unpack(">I", payload[4:8])[0]
+            rtype = payload[8:8 + n]
+            off = 8 + n + 1
+            if rtype == b"env":
+                ln = struct.unpack(">I", payload[off:off + 4])[0]
+                name = payload[off + 4:off + 4 + ln]
+                voff = off + 4 + ln
+                vln = struct.unpack(">I", payload[voff:voff + 4])[0]
+                value = payload[voff + 4:voff + 4 + vln]
+                tail = voff + 4 + vln
+                if tail != len(payload):
+                    problems.append("env request has %d trailing bytes"
+                                    % (len(payload) - tail))
+                elif payload[8 + n] != SSH_BOOL_FALSE[0]:
+                    problems.append("paramiko asked for a reply to env")
+                else:
+                    saw_envs.append((name.decode("utf-8", "replace"),
+                                     value.decode("utf-8", "replace"), recipient))
+            elif rtype == b"exec":
+                saw_exec = True
+        elif msg_type == MSG_CHANNEL_DATA:
+            saw_data = True
+        elif msg_type == MSG_CHANNEL_EOF:
+            if payload != u32(struct.unpack(">I", payload[0:4])[0]):
+                problems.append("channel EOF payload is not just a channel id")
+            saw_eof = True
+    got = [(n, v) for n, v, _r in saw_envs]
+    if got != [tuple(e) for e in envs]:
+        problems.append("paramiko sent env %r, we expected %r"
+                        % (got, [tuple(e) for e in envs]))
+    if not saw_exec:
+        problems.append("no exec request captured from paramiko")
+    if not saw_eof:
+        problems.append("no CHANNEL_EOF captured from paramiko")
+    return problems
+
+
 def exit_signal_request(recipient, name, core_dumped, message,
                         language_tag=""):
     """What the *server* sends when the command died from a signal.
@@ -351,6 +480,165 @@ def exit_signal_request(recipient, name, core_dumped, message,
         + ssh_string(language_tag)
         + ssh_string(message),
     )
+
+
+def chan_env(recipient, name, value):
+    """CHANNEL_REQUEST "env" (RFC 4254 6.4 / clientloop.c:2700-2711)
+
+    Three things have to be right, and all three fail *silently*:
+
+      * `want_reply` is FALSE.  RFC 4254 section 6.4 says "No response is
+        returned by the server", and the OpenSSH client sends
+        `channel_request_start(ssh, id, "env", 0)` (clientloop.c:2706).  Set it
+        to TRUE and the server answers CHANNEL_FAILURE whenever the name is not
+        in `AcceptEnv` -- which is the default -- so every connection would
+        carry one extra packet for no benefit.
+      * The payload is exactly two strings.  `session_env_req` reads name, then
+        value, then `sshpkt_get_end` (session.c:2042-2044).  A trailing field is
+        a *fatal* parse error there, not something ignored.
+      * It has to go out before exec/shell.  `session_input_channel_req` only
+        dispatches "env" while `c->type == SSH_CHANNEL_LARVAL` (session.c:2175);
+        afterwards the request is dropped without a word.
+    """
+    return chan_request(recipient, "env", False,
+                        ssh_string(name) + ssh_string(value))
+
+
+# --------------------------------------------------------------------------
+# Send-side window clamping (channels.c:3085-3100)
+#
+#     if (len > c->remote_window)     len = c->remote_window;
+#     if (len > c->remote_maxpacket)  len = c->remote_maxpacket;
+#     if (len == 0)                    return 0;
+#     ... send len bytes ...
+#     sshbuf_consume(c->input, len);
+#     c->remote_window -= len;
+#
+# Clamp, not error.  A length of zero is not a failure either -- it means "the
+# peer has not made room yet", and the bytes stay in the buffer until a
+# CHANNEL_WINDOW_ADJUST arrives.
+# --------------------------------------------------------------------------
+def run_stdin_plan(name, window, maxp, size, byte, adjusts):
+    """Feed `size` bytes through the clamp, resuming on queued WINDOW_ADJUSTs.
+
+    `adjusts` is the list of increments the peer hands back, in order.  They sit
+    in a queue and are only consumed once the window runs dry -- which is what
+    the real event loop does, since WINDOW_ADJUST arrives on the read path and
+    the write path can do nothing but wait.
+
+    Returns the packet sizes we emit plus what we ended up holding.
+    """
+    remote_window = window
+    queue = list(adjusts)
+    packets = []
+    sent = 0
+    stalls = 0
+    consumed_adjusts = 0
+    guard = 0
+    while sent < size:
+        n = min(size - sent, remote_window, maxp)
+        if n <= 0:
+            if queue:
+                remote_window += queue.pop(0)
+                consumed_adjusts += 1
+                continue
+            stalls += 1
+            break
+        packets.append(n)
+        remote_window -= n
+        sent += n
+        guard += 1
+        if guard > 1 << 20:
+            raise AssertionError("stdin plan did not converge")
+    return OrderedDict([
+        ("name", name),
+        ("window", window),
+        ("max_packet", maxp),
+        ("size", size),
+        ("byte", byte),
+        ("adjusts", list(adjusts)),
+        ("packets", packets),
+        ("sent", sent),
+        ("stalls", stalls),
+        ("consumed_adjusts", consumed_adjusts),
+        ("leftover_adjusts", queue),
+        ("eof", sent == size),
+        ("final_window", remote_window),
+    ])
+
+
+def stdin_vectors():
+    """Window-clamp plans, covering each branch of the clamp.
+
+    The cases that matter:
+
+      * `stdin_fits_one_packet` -- nothing is clamped.  A driver that *always*
+        split at max_packet would produce one packet here too, so this case on
+        its own cannot tell the two apart; `stdin_clamped_by_maxpacket` can.
+      * `stdin_clamped_by_window` -- the window, not the packet limit, is what
+        bites.  A client that only clamps to max_packet sends 32 KiB into a
+        1000-byte window and gets disconnected by RFC 4254 5.2.
+      * `stdin_window_exhausted` -- the resume path; without the WINDOW_ADJUST
+        handling this never sends byte 65537.
+      * `stdin_no_adjust_stalls` -- the zero-length branch.  It must report a
+        stall rather than error out or, worse, "successfully" drop the rest.
+      * `stdin_two_mib` -- the shape the real sshd test uses.
+    """
+    big = CHAN_SES_WINDOW_DEFAULT
+    return [
+        run_stdin_plan("stdin_empty", big, CHAN_SES_PACKET_DEFAULT, 0, 0x41, []),
+        run_stdin_plan("stdin_fits_one_packet", big, CHAN_SES_PACKET_DEFAULT,
+                       1000, 0x41, []),
+        run_stdin_plan("stdin_exact_packet", big, CHAN_SES_PACKET_DEFAULT,
+                       CHAN_SES_PACKET_DEFAULT, 0x41, []),
+        run_stdin_plan("stdin_clamped_by_maxpacket", big,
+                       CHAN_SES_PACKET_DEFAULT, 100000, 0x42, []),
+        run_stdin_plan("stdin_clamped_by_window", 1000,
+                       CHAN_SES_PACKET_DEFAULT, 5000, 0x43, []),
+        run_stdin_plan("stdin_window_exhausted", 65536,
+                       CHAN_SES_PACKET_DEFAULT, 200000, 0x44, [131072]),
+        run_stdin_plan("stdin_no_adjust_stalls", 32768,
+                       CHAN_SES_PACKET_DEFAULT, 65536, 0x45, []),
+        run_stdin_plan("stdin_zero_window", 0, CHAN_SES_PACKET_DEFAULT,
+                       100, 0x46, [65536]),
+        run_stdin_plan("stdin_two_adjusts", 65536, 4096, 30000, 0x47,
+                       [8192, 8192]),
+        run_stdin_plan("stdin_two_mib", big, CHAN_SES_PACKET_DEFAULT,
+                       3 * 1024 * 1024, 0x48, [2 * 1024 * 1024]),
+    ]
+
+
+def env_payload_vectors():
+    """One entry per env request shape, for two channel-number sets.
+
+    `env_want_reply_hex` is the negative control: the same request with
+    `want_reply = TRUE`.  The KAT asserts our bytes are *not* that one, so the
+    RFC section 6.4 "no response" decision is tested rather than merely asserted
+    in a comment.
+    """
+    out = []
+    for recipient in (0, 7):
+        out.append(
+            OrderedDict(
+                [
+                    ("name", "env_s%d" % recipient),
+                    ("recipient", recipient),
+                    ("var_name", "LOOP37_TEST"),
+                    ("var_value", "hello-loop37"),
+                    ("env_hex", binascii.hexlify(
+                        chan_env(recipient, "LOOP37_TEST",
+                                 "hello-loop37")).decode()),
+                    ("env_want_reply_hex", binascii.hexlify(
+                        chan_request(recipient, "env", True,
+                                     ssh_string("LOOP37_TEST")
+                                     + ssh_string("hello-loop37"))).decode()),
+                    ("empty_value_env_hex", binascii.hexlify(
+                        chan_env(recipient, "LANG", "")).decode()),
+                    ("eof_hex", binascii.hexlify(u32(recipient)).decode()),
+                ]
+            )
+        )
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1079,6 +1367,335 @@ def shell_session_vectors():
     return cases
 
 
+def io_session_vectors():
+    """env + stdin transcripts, with the client's sends timed.
+
+    This is the model the KAT replays, so the order in here *is* the order the
+    MoonBit driver must produce:
+
+      1. actions the state machine emitted for the server packet just handled
+         (a WINDOW_ADJUST of ours, or a CHANNEL_CLOSE),
+      2. driver sends whose `after` has come due (CHANNEL_OPEN, env, exec),
+      3. stdin, clamped by the remote window, repeated until it stalls,
+      4. CHANNEL_EOF once stdin is drained.
+
+    Step 3 after step 2 and both after step 1 is not a style choice: the
+    transcripts differ only in the byte stream when the order changes, and a
+    client that opened with EOF-before-data produces a stream the peer accepts
+    and silently truncates.
+    """
+    def run_io(name, local, remote, script, stdin_size, stdin_byte,
+               exit_default=255):
+        win = LocalWindow()
+        replies = []
+        client_sends = []
+        stdout = []
+        stderr = []
+        exit_status = -1
+        adjusts = 0
+        close_sent = False
+        seen_server = 0
+        packets = []
+        successes = 0
+        remote_window = 0
+        remote_max_packet = 0
+        remaining = stdin_size
+        stdin_packets = 0
+        stdin_sent = 0
+        eof_sent = False
+
+        server_items = []
+        for it in script:
+            if it[0] == "send":
+                continue
+            server_items.append(it[1:] if it[0] == "srv" else it)
+        expanded, specs = expand_fills(server_items)
+
+        # The client's own sends, each timed by how many server packets came
+        # before it.  They are *not* emitted where they appear in the script:
+        # the script interleaves them for readability ("open, confirm, env,
+        # exec"), while on the wire every send due after packet N goes out in
+        # one batch before stdin is fed.  Getting this wrong puts EOF between
+        # CHANNEL_OPEN and the env request, which a peer accepts and then
+        # quietly stops reading.
+        scripted_items = []
+        before = 0
+        for it in script:
+            if it[0] == "send":
+                scripted_items.append((before, it[1], it[2]))
+            else:
+                before += 1
+
+        def reply(mtype, payload):
+            """Anything the client puts on the wire, in order.
+
+            This is the list the KAT diffs against; it includes both the
+            packets the state machine produced and the ones the driver decided
+            to send, because the *interleaving* is what is under test.
+            """
+            replies.append(spec_packet(mtype, payload))
+
+        def stdin_reply(who, byte, n):
+            """A stdin CHANNEL_DATA, stored as `n` copies of one byte.
+
+            Same trick the server-side fills use, and for the same reason: the
+            window-resume case alone would otherwise put ~130 KB of hex per
+            packet into a file that all four backends parse on every run.  What
+            stays exact is the packet count, the byte count and the recipient
+            channel -- and `payload_len` still pins the full rebuilt length, so
+            the case is not quietly weakened.
+            """
+            replies.append(fill_packet(MSG_CHANNEL_DATA, who, -1, byte, n))
+
+        idx = 0
+        sidx = 0
+        for item in server_items:
+            mtype, payload = expanded[idx]
+            spec = specs[idx]
+            idx += 1
+            seen_server += 1
+            packets.append(spec)
+
+            if mtype == MSG_CHANNEL_OPEN_CONFIRMATION:
+                remote_window = struct.unpack(">I", payload[8:12])[0]
+                remote_max_packet = struct.unpack(">I", payload[12:16])[0]
+            elif mtype == MSG_CHANNEL_WINDOW_ADJUST:
+                # This is the *peer's* window for our stdin, not our local
+                # window.  Getting the two mixed up is the classic way to end
+                # up with a client that can neither send nor receive.
+                remote_window += struct.unpack(">I", payload[4:8])[0]
+            elif mtype == MSG_CHANNEL_DATA:
+                who = struct.unpack(">I", payload[0:4])[0]
+                assert who == local, "server addressed channel %d" % who
+                n = struct.unpack(">I", payload[4:8])[0]
+                stdout.append(payload[8:8 + n])
+                win.consume(n)
+                amt = win.take_adjust()
+                if amt is not None:
+                    reply(MSG_CHANNEL_WINDOW_ADJUST,
+                          chan_window_adjust(remote, amt))
+                    adjusts += 1
+            elif mtype == MSG_CHANNEL_EXTENDED_DATA:
+                code = struct.unpack(">I", payload[4:8])[0]
+                n = struct.unpack(">I", payload[8:12])[0]
+                if code == SSH2_EXTENDED_DATA_STDERR:
+                    stderr.append(payload[12:12 + n])
+                    win.consume(n)
+                    amt = win.take_adjust()
+                    if amt is not None:
+                        reply(MSG_CHANNEL_WINDOW_ADJUST,
+                              chan_window_adjust(remote, amt))
+                        adjusts += 1
+            elif mtype == MSG_CHANNEL_REQUEST:
+                n = struct.unpack(">I", payload[4:8])[0]
+                rtype = payload[8:8 + n]
+                if rtype == b"exit-status":
+                    off = 8 + n + 1
+                    exit_status = struct.unpack(">I", payload[off:off + 4])[0]
+            elif mtype == MSG_CHANNEL_SUCCESS:
+                successes += 1
+            elif mtype == MSG_CHANNEL_CLOSE:
+                if not close_sent:
+                    reply(MSG_CHANNEL_CLOSE, chan_bare(remote))
+                    close_sent = True
+
+            # Step 2: every driver send that came due after this packet, in
+            # the order it was scripted.
+            while sidx < len(scripted_items) and scripted_items[sidx][0] <= seen_server:
+                _after, stype, spayload = scripted_items[sidx]
+                reply(stype, spayload)
+                client_sends.append(
+                    OrderedDict([("after", seen_server), ("type", stype),
+                                 ("payload_hex",
+                                  binascii.hexlify(spayload).decode())]))
+                sidx += 1
+
+            # Step 3: feed stdin, clamped.  A zero-length clamp just stops the
+            # loop -- the bytes stay put until a later WINDOW_ADJUST.
+            while remaining > 0:
+                n = min(remaining, remote_window, remote_max_packet)
+                if n <= 0:
+                    break
+                stdin_reply(remote, stdin_byte, n)
+                remote_window -= n
+                remaining -= n
+                stdin_packets += 1
+                stdin_sent += n
+            # Step 4: EOF only once nothing is left buffered.
+            if remaining == 0 and not eof_sent:
+                reply(MSG_CHANNEL_EOF, u32(remote))
+                eof_sent = True
+
+        return OrderedDict(
+            [
+                ("name", name),
+                ("local_channel", local),
+                ("remote_channel", remote),
+                ("packets", packets),
+                ("client_sends", client_sends),
+                ("replies", replies),
+                ("stdin_size", stdin_size),
+                ("stdin_byte", stdin_byte),
+                ("stdin_packets", stdin_packets),
+                ("stdin_sent", stdin_sent),
+                ("stdin_remaining", remaining),
+                ("eof_sent", eof_sent),
+                ("stdout", summarize(b"".join(stdout))),
+                ("stderr", summarize(b"".join(stderr))),
+                ("exit_status", exit_status if exit_status >= 0
+                 else exit_default),
+                ("success_count", successes),
+                ("adjusts_sent", adjusts),
+                ("final_cur", win.cur),
+                ("final_remote_window", remote_window),
+            ]
+        )
+
+    def srv(mtype, payload):
+        return ("srv", mtype, payload)
+
+    def snd(mtype, payload):
+        return ("send", mtype, payload)
+
+    def confirm(l, r, win, maxp):
+        return srv(MSG_CHANNEL_OPEN_CONFIRMATION,
+                   u32(l) + u32(r) + u32(win) + u32(maxp))
+
+    def success(l):
+        return srv(MSG_CHANNEL_SUCCESS, u32(l))
+
+    def adjust(l, n):
+        return srv(MSG_CHANNEL_WINDOW_ADJUST, chan_window_adjust(l, n))
+
+    def data(l, b):
+        return srv(MSG_CHANNEL_DATA, chan_data(l, b))
+
+    def exit_status(l, c):
+        return srv(MSG_CHANNEL_REQUEST,
+                   chan_request(l, "exit-status", False, u32(c)))
+
+    def eof(l):
+        return srv(MSG_CHANNEL_EOF, u32(l))
+
+    def close(l):
+        return srv(MSG_CHANNEL_CLOSE, u32(l))
+
+    def env_send(l, name, value):
+        return snd(MSG_CHANNEL_REQUEST, chan_env(l, name, value))
+
+    big = CHAN_SES_WINDOW_DEFAULT
+    maxp = CHAN_SES_PACKET_DEFAULT
+
+    cases = [
+        # The plain path: one env, no stdin, EOF straight away.  success_count
+        # is 1, not 2: env carries want_reply=FALSE so the peer never answers
+        # it.  A driver that waited for an env confirmation would hang here.
+        run_io("io_env_no_stdin", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, big, maxp),
+            env_send(0, "LOOP37_TEST", "hello-loop37"),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 0, 0x41),
+        # Two envs, in order, both before exec.  Catches a driver that sends
+        # them after the exec request (the server drops those silently).
+        run_io("io_env_two_vars", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, big, maxp),
+            env_send(0, "LOOP37_TEST", "hello-loop37"),
+            env_send(0, "LANG", ""),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 0, 0x41),
+        # local != remote, so every outbound recipient field is 7.
+        run_io("io_env_nonzero_ids", 3, 7, [
+            snd(MSG_CHANNEL_OPEN, chan_open(3, big, maxp)),
+            confirm(3, 7, big, maxp),
+            env_send(7, "LOOP37_TEST", "hello-loop37"),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(7, "cat")),
+            success(3),
+            exit_status(3, 0),
+            eof(3),
+            close(3),
+        ], 0, 0x41),
+        # Stdin that fits in the window: one packet, then EOF, then the output.
+        run_io("io_stdin_small", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, big, maxp),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            data(0, b"hello-loop37\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 11, 0x41),
+        # Window runs dry mid-stream.  The peer only tops it up after its first
+        # WINDOW_ADJUST, so this is the case a client that sends one packet and
+        # gives up on gets wrong.
+        run_io("io_stdin_window_resume", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, 65536, maxp),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            adjust(0, 65536),
+            data(0, b"one\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 100000, 0x42),
+        # The peer advertises a zero window and only opens it after its first
+        # packet.  The very first stdin_take must return nothing at all.
+        run_io("io_stdin_zero_window", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, 0, maxp),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            adjust(0, 4096),
+            data(0, b"zero\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 1000, 0x43),
+        # The peer never tops the window up: stdin stalls with bytes still
+        # buffered.  The session must still finish cleanly -- and the report
+        # must show the shortfall rather than pretend everything went out.
+        run_io("io_stdin_stalls", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, 1024, maxp),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            data(0, b"partial\n"),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 5000, 0x44),
+        # Full duplex in the other direction: the server fills *our* window with
+        # more than one WINDOW_ADJUST's worth while our stdin is also flowing.
+        # The trailing server chunk is the same byte as the fill on purpose --
+        # a differently-shaped tail makes `summarize` fall back to inlining a
+        # megabyte of hex, and the case is about the window, not the payload.
+        run_io("io_stdin_and_bulk_output", 0, 0, [
+            snd(MSG_CHANNEL_OPEN, chan_open(0, big, maxp)),
+            confirm(0, 0, big, maxp),
+            snd(MSG_CHANNEL_REQUEST, chan_exec(0, "cat")),
+            success(0),
+            ("FILL", MSG_CHANNEL_DATA, 0, -1, 0x1b, big // 2 + 8),
+            adjust(0, big),
+            ("FILL", MSG_CHANNEL_DATA, 0, -1, 0x1b, 64),
+            exit_status(0, 0),
+            eof(0),
+            close(0),
+        ], 4096, 0x45),
+    ]
+    return cases
+
+
 def shell_payload_vectors():
     """One entry per interactive message, for two channel-number sets."""
     out = []
@@ -1135,6 +1752,9 @@ def build_document():
             ("sessions", session_vectors()),
             ("shell_payloads", shell_payload_vectors()),
             ("shell_sessions", shell_session_vectors()),
+            ("env_payloads", env_payload_vectors()),
+            ("stdin_plans", stdin_vectors()),
+            ("io_sessions", io_session_vectors()),
         ]
     )
 
@@ -1193,6 +1813,21 @@ def main():
             return 1
         print("paramiko pty/shell bytes agree: %d packets captured"
               % len(pty_sent))
+
+        envcap = capture_paramiko_env(args.port, args.user, key_hex)
+        if envcap is None:
+            print("ORACLE: could not capture a paramiko env session",
+                  file=sys.stderr)
+            return 2
+        env_problems = compare_with_paramiko_env(envcap)
+        if env_problems:
+            print("ORACLE DISAGREEMENT with paramiko on the env/stdin bytes",
+                  file=sys.stderr)
+            for p in env_problems:
+                print("  " + p, file=sys.stderr)
+            return 1
+        print("paramiko env/stdin bytes agree: %d packets captured"
+              % len(envcap))
 
     doc = build_document()
 

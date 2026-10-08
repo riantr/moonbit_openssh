@@ -111,6 +111,45 @@ MUTATIONS = [
         "      if false {",
         "chan_shell_sessions",
     ),
+    # ---- Loop #37 --------------------------------------------------------
+    (
+        "ask for a reply to env, which RFC 4254 6.4 says never comes",
+        '    "env",\n    false,',
+        '    "env",\n    true,',
+        "chan_env_payloads",
+    ),
+    (
+        "swap the env variable name and value",
+        "      @sshwire.write_ssh_string(ch_ascii(name)),\n"
+        "      @sshwire.write_ssh_string(ch_ascii(value)),",
+        "      @sshwire.write_ssh_string(ch_ascii(value)),\n"
+        "      @sshwire.write_ssh_string(ch_ascii(name)),",
+        "chan_env_payloads",
+    ),
+    (
+        "clamp stdin to max_packet but ignore the peer's window",
+        "  if n > self.remote_window {\n    n = self.remote_window\n  }\n",
+        "",
+        "chan_stdin_clamp",
+    ),
+    (
+        "clamp stdin to the window but ignore max_packet",
+        "  if n > self.remote_max_packet {\n    n = self.remote_max_packet\n  }\n",
+        "",
+        "chan_stdin_clamp",
+    ),
+    (
+        "pretend a stalled stdin went out in full",
+        "  if n <= 0 {\n    return (self, None, pending)\n  }",
+        "  if n <= 0 {\n    return (self, None, FixedArray::make(0, b'\\x00'))\n  }",
+        "chan_stdin_clamp",
+    ),
+    (
+        "address CHANNEL_EOF to our own channel instead of the peer's",
+        "    Some(Send(0x60, channel_bare_payload(self.remote_id))),",
+        "    Some(Send(0x60, channel_bare_payload(self.local_channel))),",
+        "chan_eof_action",
+    ),
 ]
 
 

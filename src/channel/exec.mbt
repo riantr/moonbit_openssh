@@ -52,6 +52,12 @@ pub(all) struct ExecReport {
   remote_max_packet : Int
   /// 我们一共发出的 WINDOW_ADJUST 次数
   adjusts_sent : Int
+  /// 作为 stdin 发出的字节数
+  stdin_sent : Int
+  /// 发出的 CHANNEL_DATA 包数——窗口夹取的直接证据
+  stdin_packets : Int
+  /// CHANNEL_EOF 有没有在缓冲排空后发出去
+  eof_sent : Bool
 }
 
 ///|
@@ -95,6 +101,20 @@ pub(all) struct ChanState {
   exit_signal : (String, Bool)?
   ///| exit-signal 里的 error message(没有 signal 时是空串)
   exit_signal_message : String
+  ///|
+  /// 我们作为 stdin 发出去的字节数,以及为此发了多少个 CHANNEL_DATA。
+  ///
+  /// 两个数分开:字节数对得上只说明内容没丢,包数对得上才说明**夹取**是对的
+  /// ——同一堆字节按 32 KiB 发和按 64 KiB 发,远端都照收不误。
+  stdin_sent : Int
+  stdin_packets : Int
+  ///|
+  /// CHANNEL_EOF 发出去没有。
+  ///
+  /// 单独记一个布尔而不是从 `eof_sent` 反推:EOF 必须在**缓冲排空之后**才发
+  /// (nchan.c:127-146 的 `chan_ibuf_empty` 先看 `sshbuf_len(c->input) != 0`
+  /// 就直接 return),否则对端以为没有更多 stdin,远端命令读到的是截断的流。
+  eof_sent : Bool
 }
 
 ///|
@@ -121,6 +141,9 @@ pub fn ChanState::new(local_channel : Int) -> ChanState {
     interactive: false,
     exit_signal: None,
     exit_signal_message: "",
+    stdin_sent: 0,
+    stdin_packets: 0,
+    eof_sent: false,
   }
 }
 
@@ -233,16 +256,104 @@ pub fn ChanState::window_change_action(
 }
 
 ///|
-/// 往通道里写数据(CHANNEL_DATA,当作远端的 stdin)。
+/// CHANNEL_REQUEST "env":把一个环境变量交给远端会话。
 ///
-/// 受**远端**窗口约束:我们的发送量不能超过 `remote_window`。调用方负责在
-/// 收到对端 CHANNEL_WINDOW_ADJUST 后再继续——状态机只能看到 inbound 包,
-/// 而「写多少」是发送侧的事。超发会让服务端按 RFC 4254 §5.2 直接断链。
-pub fn ChanState::stdin_action(
+/// 必须在 **exec / shell 之前**发:服务端只在会话还是 LARVAL 时才处理 env
+/// (session.c:2175-2192),之后到达的 env 请求会被无声丢掉。见
+/// `channel_env_payload` 的完整依据。
+///
+/// want_reply 是 FALSE,所以正常情况下**没有**任何回包——服务端默认
+/// `AcceptEnv` 为空,哪怕名字根本不在白名单里也一样静默(session.c:2064)。
+/// 因此驱动层不能靠等 CHANNEL_FAILURE 来确认「被拒了」,那会永远等下去。
+pub fn ChanState::env_action(
   self : ChanState,
-  data : FixedArray[Byte],
-) -> ChanAction {
-  Send(0x5e, channel_data_payload(self.remote_id, data))
+  name : String,
+  value : String,
+) -> ChanAction? {
+  if !self.open_done {
+    return None
+  }
+  Some(Send(0x62, channel_env_payload(self.remote_id, name, value)))
+}
+
+///|
+/// 从待发送缓冲里取出**一个**受窗口约束的 CHANNEL_DATA。
+///
+/// 逐字对应 `channel_output_poll_input_open`(channels.c:3085-3100):
+///
+///     if (len > c->remote_window)     len = c->remote_window;
+///     if (len > c->remote_maxpacket)  len = c->remote_maxpacket;
+///     if (len == 0)                    return 0;
+///     ... 发送 len 字节 ...
+///     sshbuf_consume(c->input, len);
+///     c->remote_window -= len;
+///
+/// 三件事因此是硬的:
+///
+///   * **夹取,不是报错**。窗口不够就把这一包截短,而不是丢数据或断链。
+///   * **先窗口后包长**。两个上限都要看,顺序不影响结果但影响你怎么读这段
+///     代码——写成 `min(len, maxpacket)` 再判窗口,超发一次就是一个
+///     RFC 4254 §5.2 的断链。
+///   * **夹到 0 也不发包、不算错**。对端没腾出空间时这就是「还没轮到发」,
+///     剩下的留在缓冲里等 CHANNEL_ADJUST。此时返回 `(原状态, None, 原缓冲)`。
+///
+/// 返回 `(新状态, 要发的包?, 还没发出去的剩余字节)`。一次调用最多发一个包——
+/// 循环的推进完全由窗口决定,驱动层在每收到一个 CHANNEL_WINDOW_ADJUST 之后再调一次。
+pub fn ChanState::stdin_take(
+  self : ChanState,
+  pending : FixedArray[Byte],
+) -> (ChanState, ChanAction?, FixedArray[Byte]) {
+  let mut n = pending.length()
+  if n > self.remote_window {
+    n = self.remote_window
+  }
+  if n > self.remote_max_packet {
+    n = self.remote_max_packet
+  }
+  // 窗口空了就是「这轮没轮到发」,不是错误——对端还没给自己发 WINDOW_ADJUST。
+  if n <= 0 {
+    return (self, None, pending)
+  }
+  let out = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    out[i] = pending[i]
+  }
+  let rest = FixedArray::make(pending.length() - n, b'\x00')
+  for i = 0; i < rest.length(); i = i + 1 {
+    rest[i] = pending[n + i]
+  }
+  (
+    {
+      ..self,
+      remote_window: self.remote_window - n,
+      stdin_sent: self.stdin_sent + n,
+      stdin_packets: self.stdin_packets + 1,
+    },
+    Some(Send(0x5e, channel_data_payload(self.remote_id, out))),
+    rest,
+  )
+}
+
+///|
+/// CHANNEL_EOF:我们的 stdin 到此为止。
+///
+/// payload 就是对端给的通道号(nchan.c:192-193
+/// `SSH2_MSG_CHANNEL_EOF` + `sshpkt_put_u32(c->remote_id)`)。
+///
+/// **必须等缓冲排空再发**:`chan_ibuf_empty` 在 `sshbuf_len(c->input) != 0`
+/// 时直接 return 不发(nchan.c:130-134),而提前发出去等于告诉对端「没有更多
+/// stdin 了」,远端命令会读到截断的输入流还不报错。待发缓冲是驱动的状态、
+/// 不是通道状态的,所以「现在该不该发」由驱动判断;这里只保证同一个通道不会
+/// 发两次 EOF——发两次不会报错,但会让对端看到一个已经结束的输入方向又来了
+/// 个结束标记。
+pub fn ChanState::eof_action(self : ChanState) -> (ChanState, ChanAction?) {
+  if self.eof_sent {
+    return (self, None)
+  }
+  (
+    { ..self, eof_sent: true },
+    Some(Send(0x60, channel_bare_payload(self.remote_id))),
+  )
 }
 
 ///|
@@ -541,5 +652,8 @@ pub fn ChanState::report(self : ChanState) -> ExecReport {
     exit_status: if self.exit_status < 0 { 255 } else { self.exit_status },
     remote_max_packet: self.remote_max_packet,
     adjusts_sent: self.adjusts_sent,
+    stdin_sent: self.stdin_sent,
+    stdin_packets: self.stdin_packets,
+    eof_sent: self.eof_sent,
   }
 }

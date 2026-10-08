@@ -845,6 +845,8 @@ pub(all) enum WtExecError {
   BadPacket(String)
   Closed
   TooManyPackets
+  ///| 一次性投递时远端窗口为 0(见 `src/sshclient` 的同名错误)
+  StdinStalled
 }
 
 ///|
@@ -854,6 +856,10 @@ pub(all) struct WtExecResult {
   exit_status : Int
   remote_id : Int
   adjusts_sent : Int
+  stdin_sent : Int
+  stdin_packets : Int
+  eof_sent : Bool
+  env_sent : Int
   sent_bytes : Int
   recv_bytes : Int
 }
@@ -871,6 +877,32 @@ pub async fn wt_live_exec(
   user : String,
   d : @bigint.BigNat,
   command : String,
+) -> WtExecOutcome {
+  wt_live_exec_io(
+    conn,
+    x,
+    user,
+    d,
+    command,
+    FixedArray::make(0, b'\x00'),
+    [],
+  )
+}
+
+///|
+/// 浏览器侧的 `live_exec_io`:带 stdin 和 env 的那条路。
+///
+/// 和 `src/sshclient` 的 `live_exec_io` 是同一条控制流、同一份 `chan_step`,
+/// 时序说明见那里的注释。两条路径能字节一致不是靠「两边都写对了」,而是因为
+/// 协议只有 `src/channel` 一份实现。
+pub async fn wt_live_exec_io(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  command : String,
+  stdin_data : FixedArray[Byte],
+  envs : Array[@sshclient.EnvVar],
 ) -> WtExecOutcome {
   let box = { state: None, }
   let res = wt_handshake_into(conn, x, box)
@@ -936,7 +968,7 @@ pub async fn wt_live_exec(
   if !ok {
     return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
   }
-  let (chan0, failure) = wt_exec_drive(conn, st, command)
+  let (chan0, failure) = wt_exec_drive(conn, st, command, stdin_data, envs)
   match failure {
     Some(e) => WtExecOutcome::ChannelFailed(e)
     None => {
@@ -947,6 +979,10 @@ pub async fn wt_live_exec(
         exit_status: rep.exit_status,
         remote_id: rep.remote_id,
         adjusts_sent: rep.adjusts_sent,
+        stdin_sent: rep.stdin_sent,
+        stdin_packets: rep.stdin_packets,
+        eof_sent: rep.eof_sent,
+        env_sent: envs.length(),
         sent_bytes: st.counters.sent,
         recv_bytes: st.counters.recv,
       })
@@ -962,6 +998,8 @@ async fn wt_exec_drive(
   conn : @wt.WtConn,
   st : WtSessionState,
   command : String,
+  stdin_data : FixedArray[Byte],
+  envs : Array[@sshclient.EnvVar],
 ) -> (@channel.ChanState, WtExecError?) {
   let open = @channel.ChanState::new(@channel.LOCAL_CHANNEL).open_action()
   if !wt_send_action(conn, st, open) {
@@ -994,6 +1032,18 @@ async fn wt_exec_drive(
   if !chan.open_done {
     return (chan, Some(WtExecError::Malformed("no_open_confirmation")))
   }
+  // env 赶在 exec 之前——服务端只在会话还是 LARVAL 时处理 env(session.c:2175)
+  let mut ei = 0
+  while ei < envs.length() {
+    let a = match chan.env_action(envs[ei].name, envs[ei].value) {
+      None => return (chan, Some(WtExecError::Malformed("env_before_open")))
+      Some(x) => x
+    }
+    if !wt_send_action(conn, st, a) {
+      return (chan, Some(WtExecError::SendFailed))
+    }
+    ei = ei + 1
+  }
   let exec_action = match chan.exec_action(command) {
     None => return (chan, Some(WtExecError::Malformed("exec_before_open")))
     Some(a) => a
@@ -1001,11 +1051,41 @@ async fn wt_exec_drive(
   if !wt_send_action(conn, st, exec_action) {
     return (chan, Some(WtExecError::SendFailed))
   }
+  let mut pending = stdin_data
+  let mut eof_pending = true
   let mut packets = 0
   let cap = 65536
   while !chan.finished() {
     if packets >= cap {
       return (chan, Some(WtExecError::TooManyPackets))
+    }
+    // 先按窗口把 stdin 发完;夹到 0 就去收包等 WINDOW_ADJUST。
+    while pending.length() > 0 {
+      let (c1, action, rest) = chan.stdin_take(pending)
+      chan = c1
+      match action {
+        None => break
+        Some(a) => {
+          if !wt_send_action(conn, st, a) {
+            return (chan, Some(WtExecError::SendFailed))
+          }
+          pending = rest
+        }
+      }
+    }
+    // 排空之后才发 EOF:提前发等于告诉对端没有更多 stdin,远端会安静地少读。
+    if eof_pending && pending.length() == 0 {
+      let (c1, a) = chan.eof_action()
+      chan = c1
+      match a {
+        None => ()
+        Some(x) => {
+          if !wt_send_action(conn, st, x) {
+            return (chan, Some(WtExecError::SendFailed))
+          }
+        }
+      }
+      eof_pending = false
     }
     match wt_recv_plain_packet(conn, st.counters, st.recv) {
       Closed => return (chan, Some(WtExecError::Closed))
@@ -1045,6 +1125,33 @@ fn wt_chan_error(e : @channel.ChanError) -> WtExecError {
     ExecRejected => WtExecError::ExecRejected
     Malformed(m) => WtExecError::Malformed(m)
   }
+}
+
+///|
+/// 浏览器侧的一次性 stdin 投递。窗口耗尽就报 `StdinStalled`——理由同
+/// `src/sshclient` 的 `send_stdin_all`:这里在收包循环之外,等不到 WINDOW_ADJUST。
+async fn wt_stdin_all(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+  chan : @channel.ChanState,
+  data : FixedArray[Byte],
+) -> (@channel.ChanState, WtExecError?) {
+  let mut c = chan
+  let mut pending = data
+  while pending.length() > 0 {
+    let (c1, action, rest) = c.stdin_take(pending)
+    c = c1
+    match action {
+      None => return (c, Some(WtExecError::StdinStalled))
+      Some(a) => {
+        if !wt_send_action(conn, st, a) {
+          return (c, Some(WtExecError::SendFailed))
+        }
+        pending = rest
+      }
+    }
+  }
+  (c, None)
 }
 
 ///| 浏览器侧的一次交互式 shell 会话
@@ -1341,8 +1448,13 @@ async fn wt_shell_drive(
   let marker = @sshclient.sh_ascii(command)
   let mut line = @sshclient.sh_ascii(command)
   line = @channel.ch_cat(line, FixedArray::from_array([b'\r', b'\n']))
-  if !wt_send_action(conn, st, chan.stdin_action(line)) {
-    return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+  {
+    let (c1, e1) = wt_stdin_all(conn, st, chan, line)
+    chan = c1
+    match e1 {
+      Some(e) => return (chan, Some(e), pty_granted, resize_sent)
+      None => ()
+    }
   }
   let mut n = 0
   let mut have = chan.stdout_len
@@ -1384,8 +1496,13 @@ async fn wt_shell_drive(
     return (chan, Some(WtExecError::TooManyPackets), pty_granted, resize_sent)
   }
   let quit = FixedArray::from_array([b'e', b'x', b'i', b't', b'\r', b'\n'])
-  if !wt_send_action(conn, st, chan.stdin_action(quit)) {
-    return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+  {
+    let (c1, e1) = wt_stdin_all(conn, st, chan, quit)
+    chan = c1
+    match e1 {
+      Some(e) => return (chan, Some(e), pty_granted, resize_sent)
+      None => ()
+    }
   }
   let mut k = 0
   while !chan.finished() {
