@@ -8,10 +8,60 @@
 
 ///|
 /// 消费一次输入
+
+///|
+/// 不改变任何状态地问一句:看完这 4 个包头字节,这个包在**线上**还剩多少字节。
+///
+/// 连接层需要它来做精确读。流式接口 `recv` 只能回答「不够」,可等待期间它
+/// 没法告诉 socket 该再去拿几个;而按固定块长攒会读过头——下一个包的前几个
+/// 字节被一并取走,就得一直阻塞到对方发下一个消息为止。问一次长度再精确读,
+/// 是唯一能同时服务「未加密按长度读」和「加密先解密长度再读」的做法。
+///
+/// 三个模式都只用 4 个密文字节就能判长:
+///   * Unencrypted:长度字段本来就在明文里;
+///   * Aead:长度字段不加密(chacha20-poly1305 同样如此);
+///   * MacEncrypt:CTR 是流密码,用计数器快照解 4 个字节就够,
+///     `peek_len` 不推进计数器,随后 `recv` 从头再解一遍结果一致。
+///
+/// 返回的是**已读走的 4 字节之外**还要再拿的字节数,即
+/// `packlen + authlen + maclen`(整体线上长度是 4 加上它)。
+///
+/// 只能在包首调用;`packlen != 0` 的半包状态下返回 None,因为那时头已经
+/// 被消费掉了,再问一次会拿错长度。
+pub fn RecvCtx::wire_len_from_header(
+  self : RecvCtx,
+  hdr : FixedArray[Byte],
+) -> Int? {
+  if self.packlen != 0U {
+    return None
+  }
+  if hdr.length() < 4 {
+    return None
+  }
+  let plen : UInt = match self.mode {
+    Unencrypted => read_u32be(hdr, 0)
+    Aead(ctx) => ctx.get_length(self.seqnr, hdr)
+    MacEncrypt(ctx) =>
+      match ctx.peek_len(hdr) {
+        None => return None
+        Some(v) => v
+      }
+  }
+  // 与 recv 的长度校验保持一致:越界的长度在这里就被挡住,不要读到一半
+  // 才发现对端发了一个荒谬的 packlen。
+  if plen < MIN_PACKET_LENGTH.reinterpret_as_uint() ||
+    plen > MAX_PACKET_SIZE.reinterpret_as_uint() {
+    return None
+  }
+  Some(plen.reinterpret_as_int() + authlen_of(self.mode) + maclen_of(self.mode))
+}
+
+///|
 pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
   let bs = block_size_of(self.mode)
   let aadlen = aadlen_of(self.mode)
   let authlen = authlen_of(self.mode)
+  let maclen = maclen_of(self.mode)
   // ---- 阶段 1:提取包长(self.packlen == 0 表示等包头)----
   if self.packlen == 0U {
     // AEAD 只需 4 字节(cipher_get_length → chachapoly_get_length);
@@ -24,6 +74,11 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
     let plen : UInt = match self.mode {
       Aead(ctx) => ctx.get_length(self.seqnr, input)
       Unencrypted => read_u32be(input, 0)
+      MacEncrypt(ctx) =>
+        match ctx.peek_len(input) {
+          None => return { consumed: 0, event: NeedMore, }
+          Some(v) => v
+        }
     }
     // packet.c:1660-1669 / 1687-1698:packlen < 1+4 或 > PACKET_MAX_SIZE
     if plen < MIN_PACKET_LENGTH.reinterpret_as_uint() ||
@@ -44,12 +99,16 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
       event: Failed(AlignError(need.reinterpret_as_uint())),
     }
   }
-  let total = aadlen + need + authlen // = 4 + packlen + authlen(两模式通用)
+  let total = aadlen + need + authlen + maclen // = 4 + packlen + authlen + maclen(两模式通用)
   if input.length() < total {
     return { consumed: 0, event: NeedMore, }
   }
   // ---- 阶段 3:解密(packet.c:1736-1754)----
   // EtM 先验 MAC 属范围外;AEAD 的 tag 校验在 crypt 内部先行(先验后解)。
+  //
+  // MacEncrypt 下 need = 4 + packlen(aadlen=0),也就是**整帧**都要过密钥流:
+  // CTR 是流密码,长度字段同样被加密,所以不需要像 C 那样先啃掉一个块——
+  // peek_len 只是拿计数器快照解开头 4 字节取长度,真正的解密仍在这里一次做完。
   let pt : FixedArray[Byte] = match self.mode {
     Unencrypted => copy_bytes(input, 0, total)
     Aead(ctx) =>
@@ -57,6 +116,17 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
         Some(p) => p
         None => return { consumed: 0, event: Failed(AuthFailed), }
       }
+    MacEncrypt(ctx) => ctx.crypt(copy_bytes(input, 0, need))
+  }
+  // ---- 非 EtM:MAC 覆盖**解密后**的整包(packet.c:1749-1754)----
+  // 必须在序号推进与 padlen/type 解析之前:校验没过就说明这串字节的来源不可信,
+  // 拿它去算 packlen 或推进 seqnr 都会把连接带进一个更糟的状态。
+  match self.mode {
+    MacEncrypt(ctx) =>
+      if !ctx.mac_ok(self.seqnr, pt, copy_bytes(input, need, need + maclen)) {
+        return { consumed: 0, event: Failed(MacInvalid), }
+      }
+    _ => ()
   }
   // ---- 序号推进(C 行序:1778-1788 在 padlen/type 解析之前)----
   let seqnr_used = self.seqnr

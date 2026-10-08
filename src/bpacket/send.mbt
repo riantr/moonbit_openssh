@@ -61,7 +61,7 @@ pub fn SendCtx::emit(
     abort("SendCtx::emit: packet exceeds PACKET_MAX_SIZE")
   }
   match self.mode {
-    Aead(_) =>
+    Aead(_) | MacEncrypt(_) =>
       if pad_src.length() < padlen {
         abort("SendCtx::emit: pad_src smaller than padlen")
       }
@@ -77,13 +77,16 @@ pub fn SendCtx::emit(
   }
   // padding 内容(packet.c:1307-1315):加密→随机(pad_src 注入),未加密→全零
   match self.mode {
-    Aead(_) =>
+    Aead(_) | MacEncrypt(_) =>
       for i = 0; i < padlen; i = i + 1 {
         frame[6 + n + i] = pad_src[i]
       }
     Unencrypted => () // make 时已清零
   }
-  // 密封装包(packet.c:1337-1357):none=透传,chachapoly=crypt(encrypt)
+  // 密封装包(packet.c:1337-1357):
+  //   none=透传,chachapoly=crypt(encrypt),
+  //   aes128-ctr=加密整帧 ‖ 32 字节 MAC,且 MAC 覆盖的是**明文**整帧
+  //   (非 EtM;packet.c:1352-1358 喂给 mac_compute 的是未加密的 send_packet)
   let wire : FixedArray[Byte] = match self.mode {
     Unencrypted => copy_bytes(frame, 0, total)
     Aead(ctx) =>
@@ -91,6 +94,23 @@ pub fn SendCtx::emit(
         Some(w) => w
         None => abort("SendCtx::emit: crypt failed on encrypt path")
       }
+    MacEncrypt(ctx) => {
+      // 先算 MAC 再加密:两者读的都是同一份明文 frame,顺序只影响
+      // 计数器何时推进,不影响任何线上字节。
+      let mac = ctx.mac(self.seqnr, frame)
+      let ct = ctx.crypt(frame)
+      let out : FixedArray[Byte] = FixedArray::make(
+        total + HMAC_SHA256_LEN,
+        b'\x00',
+      )
+      for i = 0; i < total; i = i + 1 {
+        out[i] = ct[i]
+      }
+      for i = 0; i < HMAC_SHA256_LEN; i = i + 1 {
+        out[total + i] = mac[i]
+      }
+      out
+    }
   }
   // 序号推进(packet.c:1363-1379):先 ++ 与回绕检查,再 strict-kex NEWKEYS 归零
   match bump_seqnr(self.seqnr, self.initial_kex) {

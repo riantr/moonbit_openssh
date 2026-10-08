@@ -1,0 +1,6 @@
+///| cmd/ctrmac_test -- Loop #33 aes128-ctr + hmac-sha2-256 byte-exact verification
+import {
+  "openssh/openssh_moonbit/src/bpacket",
+}
+
+pkgtype(kind: "executable")

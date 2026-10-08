@@ -9,6 +9,7 @@ import {
   "openssh/openssh_moonbit/src/tcp",
   "openssh/openssh_moonbit/src/bigint",
   "openssh/openssh_moonbit/src/kexdh",
+  "openssh/openssh_moonbit/src/kexc25519",
   "openssh/openssh_moonbit/src/hostkey",
 }
 

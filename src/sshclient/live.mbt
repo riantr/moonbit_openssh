@@ -1,4 +1,6 @@
-///| Loop #31: real SSH handshake against a live server.
+///| Loop #31/#33: real SSH handshake against a live server, through NEWKEYS
+
+///| into the encrypted session.
 ///
 ///   Everything above this layer is transport agnostic, so this is where the
 ///   Loop #26..#30 work actually meets a real OpenSSH process:
@@ -12,11 +14,31 @@
 ///     6. exchange hash H over V_C || V_S || I_C || I_S || K_S || e || f || K
 ///     7. host key signature verification -- the Loop #30 ECDSA path, against
 ///        a signature a real server produced rather than a KAT
-///     8. SSH_MSG_NEWKEYS
+///     8. SSH_MSG_NEWKEYS, then key derivation and a switch to
+///        aes128-ctr + hmac-sha2-256
+///     9. Loop #33: SSH_MSG_SERVICE_REQUEST over the *encrypted* channel, and
+///        the SERVICE_ACCEPT that proves the server could decrypt it
 ///
-///   Step 7 is the point of the loop: everything up to it could be right and
-///   the exchange hash could still differ by one bit, in which case the
+///   Step 7 is the point of the first half: everything up to it could be right
+///   and the exchange hash could still differ by one bit, in which case the
 ///   signature check fails and the server is (correctly) treated as a MITM.
+///
+///   Step 9 is the point of the second half. Until NEWKEYS the channel is
+///   plaintext, so a bug in the packet layer shows up as a framing error. Past
+///   NEWKEYS every byte on the wire is ciphertext plus a MAC, and the only
+///   honest way to know the keys, the counter and the MAC are all right is for
+///   a real server to send something back. SERVICE_ACCEPT is the cheapest such
+///   message: it proves decrypt-and-verify in both directions without dragging
+///   us into userauth.
+///
+///   Sequencing note (Loop #33): the handshake is driven through
+///   `@bpacket`'s SendCtx/RecvCtx rather than the hand-rolled helpers Loop #31
+///   used. Those helpers had no sequence-number accounting, which is invisible
+///   while everything is plaintext -- but seqnr feeds the MAC, so the first
+///   encrypted packet would have gone out with the wrong one. Going through the
+///   context objects gets it right for free, and the on-wire bytes are
+///   unchanged (the two padding formulas are algebraically identical; see
+///   `framing.mbt` vs `SendCtx::emit`).
 
 ///|
 /// Outcome of a live handshake.
@@ -51,6 +73,9 @@ pub(all) enum LiveError {
   SignatureInvalid(FixedArray[Byte])
   NewkeysSendFailed
   NoNewkeys
+  /// A packet arrived but could not be framed -- bad length, bad padding, or
+  /// (post-NEWKEYS) a MAC that did not verify.
+  BadPacket
 }
 
 ///|
@@ -73,6 +98,39 @@ pub(all) struct LiveReport {
   /// Bytes the client sent and received, for the byte transcript.
   sent_bytes : Int
   recv_bytes : Int
+}
+
+///|
+/// 协商出的加密参数需要派生多少字节(kex.c:1141-1152)
+///
+///   need = max(enc.key_len, enc.block_size, enc.iv_len, mac.key_len)
+///
+/// 对 aes128-ctr + hmac-sha2-256 是 max(16, 16, 16, 32) = 32。六个密钥
+/// 统一按这个长度派生,短的那个取前缀——这一点在 kex.c:1155 对 A..F 一视同仁,
+/// 不是只对加密密钥取 key_len。
+pub fn we_need_for(cipher : String, mac : String) -> Int {
+  let (key_len, block_size, iv_len) = match cipher {
+    "aes128-ctr" => (16, 16, 16)
+    "aes192-ctr" => (24, 16, 16)
+    "aes256-ctr" => (32, 16, 16)
+    "chacha20-poly1305@openssh.com" => (64, 8, 0)
+    _ => abort("we_need_for: unsupported cipher " + cipher)
+  }
+  let mac_key_len = match mac {
+    "hmac-sha2-256" => 32
+    "hmac-sha2-512" => 64
+    "hmac-sha1" => 20
+    "hmac-sha1-96" => 20
+    _ => abort("we_need_for: unsupported mac " + mac)
+  }
+  let m = key_len
+  let m = if block_size > m { block_size } else { m }
+  let m = if iv_len > m { iv_len } else { m }
+  if mac_key_len > m {
+    mac_key_len
+  } else {
+    m
+  }
 }
 
 ///|
@@ -99,8 +157,33 @@ fn hex_head(v : @bigint.BigNat, n : Int) -> String {
 }
 
 ///|
+fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
+  let m = if b.length() < n { b.length() } else { n }
+  let sb = StringBuilder()
+  let hex_chars : String = "0123456789abcdef"
+  let mut i = 0
+  while i < m {
+    let hi = b[i].to_int() / 16
+    let lo = b[i].to_int() % 16
+    sb.write_string(hex_chars.unsafe_substring(start=hi, end=hi + 1))
+    sb.write_string(hex_chars.unsafe_substring(start=lo, end=lo + 1))
+    i = i + 1
+  }
+  sb.to_string()
+}
+
+///|
 /// The algorithm set this client implements. The Loop #31 sshd is pinned to
 /// exactly this, so a mismatch is our bug rather than a negotiation race.
+///
+/// Note we deliberately do **not** advertise `kex-strict-c-v00@openssh.com`.
+/// OpenSSH turns strict KEX on only when the peer advertises it (kex.c:963-970),
+/// so with this proposal `kex_strict` is false and the sequence number runs
+/// straight through NEWKEYS instead of resetting (packet.c:1376-1379).
+/// Advertising it would reset seqnr to 0 and change the handshake transcript,
+/// which would invalidate the Loop #31/#32 byte-count assertions. The contexts
+/// below handle either outcome, so this is a transcript-stability choice, not a
+/// correctness one.
 pub fn live_proposal() -> @kexflow.Proposal {
   {
     kex_algs: "diffie-hellman-group14-sha256",
@@ -142,56 +225,75 @@ priv struct WireCounters {
 }
 
 ///|
-/// Send an unencrypted SSH packet.
+/// Send one SSH packet through a `@bpacket.SendCtx`.
 ///
-///   Wire layout (RFC 4253 §6):
-///       uint32  packet_length
-///       byte    padding_length
-///       byte[]  payload
-///       byte[]  random padding
+///   Wire layout (RFC 4253 §6) is entirely the context's business now: it
+///   knows the block size, the padding rule and, after NEWKEYS, the cipher and
+///   MAC. This function only moves bytes and keeps the counter honest.
 ///
-///   Two constraints are easy to get wrong and produce a packet that looks
-///   plausible but desynchronises the peer: the padding is at least 4 bytes,
-///   and it is the *whole packet* (length field included) that must be a
-///   multiple of 8 -- so packet_length itself is congruent to 4 mod 8, not 0.
-///
-///   The byte arithmetic lives in `framing.mbt` and is shared with Loop #32's
-///   async browser driver; only the socket I/O is local to this function.
-fn send_plain_packet(
+///   `pad_src` is zeros. RFC 4253 §6 asks for unpredictable padding, which a
+///   production client must supply from the CSPRNG -- but Loop #31's whole
+///   point is a byte-exact transcript, and unpredictable padding makes the
+///   transcript irreproducible. The trade is deliberate and this is the place
+///   to change it.
+fn send_packet(
   conn : @tcp.TcpConn,
   counters : WireCounters,
+  s : @bpacket.SendCtx,
   msg_type : Byte,
   payload : FixedArray[Byte],
 ) -> Bool {
-  let pkt = build_plain_packet(msg_type, payload, b'\x00')
-  let ok = conn.send(pkt)
-  if ok {
-    counters.sent = counters.sent + pkt.length()
+  let pad_src : FixedArray[Byte] = FixedArray::make(64, b'\x00')
+  match s.emit(msg_type, payload, pad_src) {
+    Ok(pkt) => {
+      if !conn.send(pkt.wire) {
+        return false
+      }
+      counters.sent = counters.sent + pkt.wire.length()
+      true
+    }
+    _ => false
   }
-  ok
 }
 
 ///|
-/// Read one unencrypted SSH packet. Returns (type, payload).
-fn recv_plain_packet(
+/// Read exactly one SSH packet through a `@bpacket.RecvCtx`.
+///
+///   The read has to be *exact*, not chunked: once a packet has been consumed
+///   the next read is for the following message, and a chunked reader would
+///   block waiting for bytes that will not arrive until we answer. So the
+///   length is asked for first -- `RecvCtx::wire_len_from_header` decrypts the
+///   4-byte length field for us when the channel is encrypted -- and only then
+///   is the remainder pulled in.
+fn recv_packet(
   conn : @tcp.TcpConn,
   counters : WireCounters,
+  r : @bpacket.RecvCtx,
 ) -> (Byte, FixedArray[Byte])? {
-  let head = match conn.read_exact(4) {
+  let hdr = match conn.read_exact(4) {
     None => return None
     Some(h) => h
   }
-  counters.recv = counters.recv + 4
-  let len = be32(head)
-  if !packet_length_ok(len, 1048576) {
+  let rest = match r.wire_len_from_header(hdr) {
+    None => return None
+    Some(v) => v
+  }
+  if rest < 0 || rest > 1048576 {
     return None
   }
-  let rest = match conn.read_exact(len) {
-    None => return None
-    Some(r) => r
+  let body = if rest == 0 {
+    FixedArray::make(0, b'\x00')
+  } else {
+    match conn.read_exact(rest) {
+      None => return None
+      Some(b) => b
+    }
   }
-  counters.recv = counters.recv + len
-  parse_plain_packet(rest)
+  counters.recv = counters.recv + 4 + rest
+  match r.recv(cat2(hdr, body)).event {
+    @bpacket.Packet(_, t, payload) => Some((t, payload))
+    _ => None
+  }
 }
 
 ///|
@@ -202,8 +304,7 @@ fn read_ident_line(
   counters : WireCounters,
   max_bytes : Int,
 ) -> String? {
-  let buf : FixedArray[Byte] = FixedArray::make(0, b'\x00')
-  let mut acc = buf
+  let mut acc : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let mut total = 0
   while total < max_bytes {
     let b = match conn.read_exact(1) {
@@ -245,18 +346,61 @@ fn neg_error_label(e : @kexflow.NegotiationError) -> String {
   }
 }
 
-///|
-/// Run a full handshake against `host:port`.
+///| 穿过 NEWKEYS 之后继续会话所需的全部状态
 ///
-///   `x` is the DH private exponent. A real client draws it from the CSPRNG;
-///   taking it as a parameter keeps this run reproducible, and the caller is
-///   responsible for using a fresh value per connection in production.
-pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
+
+///| 私有:里面的 WireCounters 也是私有的,整体不导出。
+
+///|
+
+///| 打包在一起而不是散成五个返回值,是因为它们必须**同时**从一个连接里取出来:
+
+///|
+/// 只拿到密钥而丢了对应的 SendCtx/RecvCtx,等于把 seqnr 和计数器扔在半路上。
+priv struct SessionState {
+  send : @bpacket.SendCtx
+  recv : @bpacket.RecvCtx
+  counters : WireCounters
+  we_need : Int
+  /// 'A'..'F' 的摘要,便于诊断时与独立实现对拍(不打印原始密钥)
+  key_head : String
+  session_id_head : String
+}
+
+///|
+/// 前 n 个字节
+///
+/// 六个密钥都按 `we_need` 派生(aes128-ctr + hmac-sha2-256 下是 32),但交给
+/// cipher 的只有 key_len / iv_len 字节——OpenSSH 在 ssh_set_newkeys 里传的是
+/// `cipher_new(..., key, cipher_keylen(c), iv, cipher_ivlen(c), ...)`,
+/// 也就是各取前缀。直接把 32 字节塞给 aes128-ctr 会在 cipher 初始化时就长度不符。
+fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+  let m = if b.length() < n { b.length() } else { n }
+  let out : FixedArray[Byte] = FixedArray::make(m, b'\x00')
+  for i = 0; i < m; i = i + 1 {
+    out[i] = b[i]
+  }
+  out
+}
+
+///|
+/// Run the handshake up to and including NEWKEYS, leaving both contexts
+/// switched to the negotiated cipher.
+///
+/// `x` is the DH private exponent. A real client draws it from the CSPRNG;
+/// taking it as a parameter keeps this run reproducible, and the caller is
+/// responsible for using a fresh value per connection in production.
+fn handshake_to_session(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+) -> (LiveResult, SessionState?) {
   let counters = { sent: 0, recv: 0, }
+  let s = @bpacket.SendCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let client_ident = "SSH-2.0-MoonBit_0.1"
   // ---- 1. identification exchange ----
   if !conn.send(cat2(ascii(client_ident), ascii("\r\n"))) {
-    return Failed(ConnectFailed)
+    return (Failed(ConnectFailed), None)
   }
   counters.sent = counters.sent + client_ident.length() + 2
   // A server may emit informational lines before its SSH- line.
@@ -264,7 +408,7 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
   let mut lines = 0
   while lines < 64 {
     match read_ident_line(conn, counters, 255) {
-      None => return Failed(NoServerIdent)
+      None => return (Failed(NoServerIdent), None)
       Some(line) => {
         lines = lines + 1
         if line.has_prefix("SSH-") {
@@ -276,20 +420,20 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
   }
   if !server_ident.has_prefix("SSH-2.0-") &&
     !server_ident.has_prefix("SSH-1.99-") {
-    return Failed(NoServerIdent)
+    return (Failed(NoServerIdent), None)
   }
   // ---- 2. KEXINIT ----
   let my = live_proposal()
   let ic_payload = @kexflow.kexinit_payload(fixed_cookie(), my)
-  if !send_plain_packet(conn, counters, @sshwire.SSH_MSG_KEXINIT, ic_payload) {
-    return Failed(KexinitSendFailed)
+  if !send_packet(conn, counters, s, @sshwire.SSH_MSG_KEXINIT, ic_payload) {
+    return (Failed(KexinitSendFailed), None)
   }
   let mut peer_ic_payload : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let mut got_kexinit = false
   let mut tries = 0
   while !got_kexinit && tries < 32 {
-    match recv_plain_packet(conn, counters) {
-      None => return Failed(NoPeerKexinit)
+    match recv_packet(conn, counters, r) {
+      None => return (Failed(NoPeerKexinit), None)
       Some((t, payload)) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_KEXINIT {
@@ -301,18 +445,18 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
     }
   }
   if !got_kexinit {
-    return Failed(NoPeerKexinit)
+    return (Failed(NoPeerKexinit), None)
   }
   let peer_prop = match @kexflow.parse_kexinit(peer_ic_payload) {
-    None => return Failed(KexinitParseFailed)
+    None => return (Failed(KexinitParseFailed), None)
     Some(p) => p
   }
   let neg = match @kexflow.negotiate(my, peer_prop) {
-    Err(e) => return Failed(NoAgreement(neg_error_label(e)))
+    Err(e) => return (Failed(NoAgreement(neg_error_label(e))), None)
     Ok(n) => n
   }
   if neg.kex_alg != "diffie-hellman-group14-sha256" {
-    return Failed(NoAgreement("kex_alg"))
+    return (Failed(NoAgreement("kex_alg")), None)
   }
   // ---- 3. KEX_ECDH_INIT ----
   let p = @bigint.BigNat::from_bytes_be(@kexdh.group14_prime())
@@ -324,15 +468,15 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
   // mpint encoding. Wrapping it again in write_ssh_string yields a string whose
   // value begins with four zero bytes, and the server rejects that as
   // "invalid public DH value: >= p-1".
-  if !send_plain_packet(conn, counters, @sshwire.SSH_MSG_KEX_ECDH_INIT, e_wire) {
-    return Failed(EcdhInitSendFailed)
+  if !send_packet(conn, counters, s, @sshwire.SSH_MSG_KEX_ECDH_INIT, e_wire) {
+    return (Failed(EcdhInitSendFailed), None)
   }
   // ---- 4. KEX_ECDH_REPLY ----
   let mut reply : FixedArray[Byte]? = None
   let mut tries2 = 0
   while tries2 < 32 {
-    match recv_plain_packet(conn, counters) {
-      None => return Failed(NoEcdhReply)
+    match recv_packet(conn, counters, r) {
+      None => return (Failed(NoEcdhReply), None)
       Some((t, payload)) => {
         tries2 = tries2 + 1
         if t == @sshwire.SSH_MSG_KEX_ECDH_REPLY {
@@ -340,25 +484,25 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
           break
         }
         if t == KX_MSG_KEX_FAILURE {
-          return Failed(EcdhReplyMalformed)
+          return (Failed(EcdhReplyMalformed), None)
         }
       }
     }
   }
   let reply_payload = match reply {
-    None => return Failed(NoEcdhReply)
-    Some(r) => r
+    None => return (Failed(NoEcdhReply), None)
+    Some(v) => v
   }
   let parsed_reply = parse_ecdh_reply(reply_payload)
   let (ks, f_wire, sig_blob) = match parsed_reply {
-    None => return Failed(EcdhReplyMalformed)
+    None => return (Failed(EcdhReplyMalformed), None)
     Some(t) => t
   }
   // ---- 5. shared secret ----
   let f = @bigint.BigNat::from_bytes_be(f_wire)
   if @bigint.BigNat::cmp(f, @bigint.BigNat::from_uint64(1UL)) <= 0 ||
     @bigint.BigNat::cmp(f, p) >= 0 {
-    return Failed(EcdhReplyMalformed)
+    return (Failed(EcdhReplyMalformed), None)
   }
   let k = @kexdh.dh_shared_ctx(ctx, f, x)
   let k_wire = @bigint.BigNat::mpint_encode(k)
@@ -401,7 +545,7 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
   // signature check need, and re-parsing would be wasted work.
   let key = match @hostkey.HostKey::from_blob(ks) {
     @hostkey.Parsed(k) => k
-    _ => return Failed(HostkeyInvalid)
+    _ => return (Failed(HostkeyInvalid), None)
   }
   let (ktype, kbits) = match key {
     @hostkey.EcdsaKey(bits, _) =>
@@ -413,29 +557,30 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
         },
         bits,
       )
-    _ => return Failed(HostkeyInvalid)
+    _ => return (Failed(HostkeyInvalid), None)
   }
   if ktype != neg.hostkey_alg {
-    return Failed(HostkeyInvalid)
+    return (Failed(HostkeyInvalid), None)
   }
   match @hostkey.HostKey::verify(key, h, sig_blob) {
     @hostkey.Accepted => ()
-    _ => return Failed(SignatureInvalid(h))
+    _ => return (Failed(SignatureInvalid(h)), None)
   }
   // ---- 8. NEWKEYS ----
-  if !send_plain_packet(
+  if !send_packet(
       conn,
       counters,
+      s,
       @sshwire.SSH_MSG_NEWKEYS,
       FixedArray::make(0, b'\x00'),
     ) {
-    return Failed(NewkeysSendFailed)
+    return (Failed(NewkeysSendFailed), None)
   }
   let mut got_newkeys = false
   let mut tries3 = 0
   while !got_newkeys && tries3 < 32 {
-    match recv_plain_packet(conn, counters) {
-      None => return Failed(NoNewkeys)
+    match recv_packet(conn, counters, r) {
+      None => return (Failed(NoNewkeys), None)
       Some((t, _)) => {
         tries3 = tries3 + 1
         if t == @sshwire.SSH_MSG_NEWKEYS {
@@ -445,9 +590,32 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
     }
   }
   if !got_newkeys {
-    return Failed(NoNewkeys)
+    return (Failed(NoNewkeys), None)
   }
-  Established({
+  // ---- 9. 派生会话密钥并切换到加密模式 ----
+  // RFC 4253 §7.3:每一端在**发出** NEWKEYS 后立刻切换自己的发送方向,
+  // 在**收到** NEWKEYS 后切换接收方向。上面两个动作都已完成,现在两个方向
+  // 都可以切了。
+  let we_need = we_need_for(neg.cipher_ctos, neg.mac_ctos)
+  if we_need != we_need_for(neg.cipher_stoc, neg.mac_stoc) {
+    return (Failed(NoAgreement("asymmetric key length")), None)
+  }
+  let keys = @kexc25519.derive_keys(h, k_wire, we_need)
+  // 每个方向用自己的 'A'/'B' 计数器与 'C'/'D' 加密密钥;共用一个会让第二个方向
+  // 从错误的密钥流偏移开始解密,而且不会报错,只会安静地解出乱码。
+  let ctos = @bpacket.AesCtrMacCtx::new(
+    head_bytes(keys.enc_key_ctos(), 16),
+    head_bytes(keys.iv_ctos(), 16),
+    keys.mac_key_ctos(),
+  )
+  let stoc = @bpacket.AesCtrMacCtx::new(
+    head_bytes(keys.enc_key_stoc(), 16),
+    head_bytes(keys.iv_stoc(), 16),
+    keys.mac_key_stoc(),
+  )
+  s.set_mode(@bpacket.MacEncrypt(ctos))
+  r.set_mode(@bpacket.MacEncrypt(stoc))
+  let report = Established({
     server_ident,
     client_ident,
     kex_alg: neg.kex_alg,
@@ -463,6 +631,135 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
     shared_secret_head: hex_head(k, SHARED_HEAD_LEN),
     sent_bytes: counters.sent,
     recv_bytes: counters.recv,
+  })
+  (
+    report,
+    Some({
+      send: s,
+      recv: r,
+      counters,
+      we_need,
+      key_head: hex_bytes_head(keys.enc_key_ctos(), 8) +
+      "/" +
+      hex_bytes_head(keys.mac_key_ctos(), 8),
+      session_id_head: hex_bytes_head(keys.session_id(), 16),
+    }),
+  )
+}
+
+///|
+/// Run a full handshake against `host:port`, stopping after NEWKEYS.
+pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
+  let (r, _) = handshake_to_session(conn, x)
+  r
+}
+
+///|
+/// Outcome of handshake + first encrypted round trip.
+pub(all) enum SessionResult {
+  /// The server decrypted our SERVICE_REQUEST and accepted the service.
+  ServiceAccepted(SessionReport)
+  Failed(SessionError)
+}
+
+///|
+/// Why the encrypted phase failed.
+pub(all) enum SessionError {
+  /// The transport handshake never got as far as NEWKEYS.
+  HandshakeFailed(LiveError)
+  /// Nothing came back where SERVICE_ACCEPT was due. With encryption in play
+  /// this is almost always a key/counter/MAC mistake rather than a framing one,
+  /// so the report carries the byte counts to tell the two apart.
+  NoServiceAccept
+  /// The server answered, but not with the service we asked for.
+  UnexpectedService(String)
+}
+
+///|
+/// What the encrypted phase observed.
+pub(all) struct SessionReport {
+  handshake : LiveReport
+  service_name : String
+  accepted_service : String
+  we_need : Int
+  key_head : String
+  session_id_head : String
+  /// Total bytes sent / received across handshake *and* encrypted phase.
+  sent_bytes : Int
+  recv_bytes : Int
+}
+
+///|
+/// 我们请求的服务名(RFC 4253 §7.1)
+pub const USERAUTH_SERVICE : String = "ssh-userauth"
+
+///|
+/// Handshake, then prove the encrypted channel works end to end.
+///
+/// This is the Loop #33 endpoint: a real server decrypts an aes128-ctr +
+/// hmac-sha2-256 packet we produced and answers over the same channel. Nothing
+/// about that can be faked by a self-consistent bug on our side -- if our keys,
+/// counter or MAC were wrong the server would either drop the connection or
+/// reply `MAC error`/`decryption failed`, and this function would report it.
+pub fn live_session(conn : @tcp.TcpConn, x : @bigint.BigNat) -> SessionResult {
+  let (res, state) = handshake_to_session(conn, x)
+  let handshake = match res {
+    Established(rep) => rep
+    Failed(e) => return Failed(SessionError::HandshakeFailed(e))
+  }
+  let st = match state {
+    None => return Failed(SessionError::NoServiceAccept)
+    Some(v) => v
+  }
+  let service_bytes = ascii(USERAUTH_SERVICE)
+  let payload = @sshwire.write_ssh_string(service_bytes)
+  if !send_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_SERVICE_REQUEST,
+      payload,
+    ) {
+    return Failed(SessionError::NoServiceAccept)
+  }
+  let mut tries = 0
+  let mut answer : FixedArray[Byte]? = None
+  while tries < 32 {
+    match recv_packet(conn, st.counters, st.recv) {
+      None => return Failed(SessionError::NoServiceAccept)
+      Some((t, pl)) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
+          answer = Some(pl)
+          break
+        }
+        if t == KX_MSG_KEX_FAILURE {
+          return Failed(SessionError::UnexpectedService("kex_failure"))
+        }
+      }
+    }
+  }
+  let accepted_body = match answer {
+    None => return Failed(SessionError::NoServiceAccept)
+    Some(v) => v
+  }
+  // body 是一个 string,内容应与我们请求的服务名逐字节相同
+  let accepted = match read_field(accepted_body, 0) {
+    None => return Failed(SessionError::UnexpectedService("malformed"))
+    Some((name, _)) => bytes_to_string(name)
+  }
+  if accepted != USERAUTH_SERVICE {
+    return Failed(SessionError::UnexpectedService(accepted))
+  }
+  ServiceAccepted({
+    handshake,
+    service_name: USERAUTH_SERVICE,
+    accepted_service: accepted,
+    we_need: st.we_need,
+    key_head: st.key_head,
+    session_id_head: st.session_id_head,
+    sent_bytes: st.counters.sent,
+    recv_bytes: st.counters.recv,
   })
 }
 

@@ -21,19 +21,32 @@ pub const MSG_NEWKEYS : Byte = b'\x15'
 /// - Unencrypted: none cipher 等价物(bs=8, aadlen=0, 无 tag);
 ///   KEX 完成前的初始包走此模式(cipher.c:350 CFLAG_NONE memcpy 透传)
 /// - Aead: chacha20-poly1305@openssh.com(bs=8, aadlen=4, tag=16)
+/// - MacEncrypt: aes128-ctr + hmac-sha2-256(bs=**16**, aadlen=0, maclen=32),
+///   加密并认证(encrypt-and-MAC)。这就是 Loop #31/#32 与真实 sshd 协商出来的
+///   那一对,也是 Loop #33 让会话真正跑起来要用的一对。
 ///
-/// 未来扩展 HMAC-MAC(EtM/non-EtM) 路径时在此枚举上增加分支。
+/// 块长由模式自己决定,不能写死:none 与 chachapoly 是 8,aes128-ctr 是 16
+/// (cipher.c:93 第 2 列)。块长决定 padding 凑几,写死成 8 会让 NEWKEYS 之后
+/// 的每一个包长度都对不上 block,服务器直接按 padding error 断链。
+///
+/// EtM(hmac-*-etm@openssh.com)路径尚未实现:它把 aadlen 变成 4(长度字段参与认证
+/// 但不加密),需要在 Mode 上另加分支,不能靠给 MacEncrypt 加一个 Bool 糊过去。
 pub(all) enum Mode {
   Unencrypted
   Aead(ChachaPolyCtx)
+  MacEncrypt(AesCtrMacCtx)
 }
 
 ///| 各模式参数(navigator §2)
 
 ///|
 /// block size:none 与 chachapoly 在 OpenSSH cipher 表中都是 8
-fn block_size_of(_mode : Mode) -> Int {
-  8
+fn block_size_of(mode : Mode) -> Int {
+  match mode {
+    Unencrypted => 8
+    Aead(_) => 8
+    MacEncrypt(_) => AESCTR_BLOCK
+  }
 }
 
 ///|
@@ -42,6 +55,7 @@ fn aadlen_of(mode : Mode) -> Int {
   match mode {
     Unencrypted => 0
     Aead(_) => 4
+    MacEncrypt(_) => 0
   }
 }
 
@@ -51,6 +65,20 @@ fn authlen_of(mode : Mode) -> Int {
   match mode {
     Unencrypted => 0
     Aead(_) => 16
+    MacEncrypt(_) => 0
+  }
+}
+
+///|
+/// 独立 MAC 长度(encrypt-and-MAC 模式下追加在密文之后的校验码)
+///
+/// packet.c:1647 `maclen = mac && mac->enabled ? mac->mac_len : 0`;
+/// AEAD 不另带 MAC(authlen 已经是它的认证标签),所以那里是 0。
+fn maclen_of(mode : Mode) -> Int {
+  match mode {
+    Unencrypted => 0
+    Aead(_) => 0
+    MacEncrypt(_) => HMAC_SHA256_LEN
   }
 }
 
@@ -198,6 +226,11 @@ pub enum PacketError {
   AlignError(UInt)
   /// Poly1305 tag 校验失败
   AuthFailed
+  /// hmac-sha2-256 MAC 校验失败(encrypt-and-MAC 路径)
+  ///
+  /// 连接必须终止:packet.c:1758-1769 在非 EtM 下丢弃本包并进入 discard 状态,
+  /// 而 MAC 失败意味着我们和对端对同一段明文的看法不一致,继续读只会解出乱码。
+  MacInvalid
   /// padding 长度小于 4
   BadPadlen(UInt)
   /// padding 超过剩余数据(consume_end 失败的显式化)

@@ -233,3 +233,84 @@ python compare.py
   regenerating the key each run invalidates that trust instantly.
   `host/wt/make_cert.py` reuses an existing pair unless `--rotate`.
 - **Serve `chain.pem` (leaf + CA), not a bare self-signed leaf.**
+
+### Loop #33: aes128-ctr + hmac-sha2-256 (encrypt-and-MAC)
+
+Reaching the encrypted session turned up four protocol facts that are all
+easy to get wrong and all fail silently. Each was read out of the OpenSSH C
+source rather than inferred from the RFC.
+
+- **The block size for `aes128-ctr` is 16, not 8.** `cipher.c:93` lists
+  `{ "aes128-ctr", 16, 16, 0, 0, 0, EVP_aes_128_ctr }` and the second column
+  is `block_size`. So padding must make `4 + packet_length` a multiple of
+  **16** — i.e. `packet_length ≡ 12 (mod 16)` — while the plaintext phase
+  used `≡ 4 (mod 8)`. A hard-coded 8 leaves every post-NEWKEYS packet
+  misaligned and the server answers `padding error: need N block 16 mod M`.
+  This is why `block_size_of` is a function of the mode and not a constant.
+- **`hmac-sha2-256` is a full 32-byte MAC.** `mac.c:62` sets
+  `truncatebits = 0`. Plenty of implementations truncate to 16 by mistake
+  (conflating it with `hmac-sha1-96`); that simply will not interoperate.
+  paramiko agrees — `transport.py` `_mac_info` gives it `size: 32`.
+- **The CTR counter is per-connection, not per-packet.** `cipher.c:280-281`
+  calls `aesctr_ivsetup` once at NEWKEYS and then `aesctr_encrypt_bytes`
+  advances it for the life of the connection. Re-seeding from the IV for
+  every packet still produces a byte-correct *first* packet, so the bug only
+  shows on packet 2 — which is exactly why the KAT cases emit several packets
+  back to back.
+- **Non-EtM MACs cover the *decrypted* packet.** `packet.c:1749-1754` passes
+  `incoming_packet`, which by then holds the full `4 + packet_length` bytes
+  (first block from `packet.c:1687`, remainder appended at `packet.c:1738`).
+  The MAC is appended *after* the ciphertext. Verifying before decrypting, or
+  over the ciphertext, both produce a stream that decrypts to garbage with no
+  error anywhere near the cause.
+- **`kex->we_need` is one length for all six keys.** `kex.c:1141-1152`
+  computes `max(enc.key_len, enc.block_size, enc.iv_len, mac.key_len)` and
+  `kex.c:1155` derives A..F all at that length. For aes128-ctr +
+  hmac-sha2-256 that is **32**, not the cipher's 16. The cipher is then
+  handed only the prefix it wants (`head_bytes(.., 16)`); passing the full
+  32-byte key aborts in `AesCtrMacCtx::new`. This is *not* a bug in the
+  pre-existing `derive_keys`, which was already faithful.
+- **Strict KEX is off unless the peer advertises it** (`kex.c:963-970`), and
+  our proposal does not advertise `kex-strict-c-v00@openssh.com`. So the
+  sequence number runs straight through NEWKEYS instead of resetting to 0
+  (`packet.c:1376-1379`). Advertising it would change the Loop #31/#32
+  transcript and invalidate the 509/753 assertions, so it is a
+  transcript-stability choice; `SendCtx`/`RecvCtx` handle either outcome.
+- **Sequence numbers must be tracked even in the plaintext phase.** Loop #31's
+  hand-rolled packet helpers had no seqnr accounting, which was invisible while
+  everything was plaintext — but seqnr feeds the MAC. Driving the whole
+  handshake through `SendCtx`/`RecvCtx` fixes it and leaves the wire bytes
+  identical (509/753), verified.
+- **Packet reads must be exact, never chunked.** Once a packet is consumed the
+  next read is for the following message, so a chunked reader blocks waiting for
+  bytes nobody asked for. Past NEWKEYS the length is itself ciphertext, so ask
+  for it first: `RecvCtx::wire_len_from_header` decrypts the 4-byte header from
+  a counter snapshot without mutating state, and the caller then pulls exactly
+  `packlen + authlen + maclen` more.
+- **`await` is not MoonBit syntax.** Async calls are plain calls; writing
+  `await f(x)` gives "The value identifier await is unbound" plus a parse
+  error, which reads like a missing import rather than a bad keyword.
+- **MoonBit's `String` indexer yields `UInt16`, not `Char`.** A hex parser
+  declared as `fn hex_nibble(c : Char)` fails to type-check against `s[i]`.
+- **paramiko 5.x has no `Cipher` class** — the framing moved into
+  `Packetizer`. `write_all` (packet.py:348-386) calls `socket.send` and its
+  bare `except Exception: n = -1` turns a typo in a mock socket into an
+  `EOFError` three frames away. `Packetizer._build_packet` uses
+  `3 + bsize - ((len(payload) + 8) % bsize)`, which is algebraically identical
+  to `SendCtx::emit`'s rule — useful to know, since it is the cross-check.
+- **The handshake is not reproducible across connections.** The client pins its
+  DH exponent and KEXINIT cookie, but the *server* draws a fresh one per
+  connection, so K, the exchange hash and `session_id` differ between any two
+  runs. Only framing-level facts (byte counts, block alignment, field shapes)
+  are comparable between the native and browser paths — do not assert hash
+  equality there.
+
+Run the gate with `node host/verify_loop33.mjs` (`--skip-regression` to skip
+the crypto suites). It checks the packet layer against
+`host/ssh_ctrhmac_oracle.py` — which refuses to emit vectors until its own
+from-spec construction matches paramiko byte for byte, so MoonBit is the third
+opinion rather than the first — then drives the native client and the browser
+Worker against a real OpenSSH 8.0p1 sshd and requires `SERVICE_ACCEPTED` from
+both, with identical byte counts (509/753 for the handshake, 573/817 with the
+encrypted exchange).
+

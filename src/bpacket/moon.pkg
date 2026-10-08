@@ -1,1 +1,11 @@
-// SSH binary packet protocol (RFC 4253 §6 + OpenSSH packet.c)
+///| src/bpacket -- SSH binary packet protocol (RFC 4253 §6 + OpenSSH packet.c)
+///
+/// Loop #33 新增 aes128-ctr + hmac-sha2-256 加密并认证路径,于是本包第一次
+/// 依赖外部密码学包:aes 提供密钥流(已过 NIST SP 800-38A KAT),
+/// hmac 提供 HMAC-SHA256(已过 RFC 4231 KAT)。
+///
+/// 依赖方向是单向的:aes / hmac 都不认识 SSH 的概念,不存在环。
+import {
+  "openssh/openssh_moonbit/src/aes",
+  "openssh/openssh_moonbit/src/hmac",
+}

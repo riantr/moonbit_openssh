@@ -43,6 +43,16 @@ fn live_error_name(e : @sshclient.LiveError) -> String {
     SignatureInvalid(h) => "SignatureInvalid"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
+    BadPacket => "BadPacket"
+  }
+}
+
+///|
+fn session_error_name(e : @sshclient.SessionError) -> String {
+  match e {
+    @sshclient.HandshakeFailed(h) => "handshake:" + live_error_name(h)
+    @sshclient.NoServiceAccept => "NoServiceAccept"
+    @sshclient.UnexpectedService(s) => "UnexpectedService:" + s
   }
 }
 
@@ -92,9 +102,67 @@ fn find_port(argv : Array[String]) -> Int {
 }
 
 ///|
+
+///|
+/// Does the caller want the Loop #33 encrypted-session run instead of the
+/// Loop #31 handshake-only run?
+///
+/// `--session` is scanned rather than read as argv[1] for the same reason the
+/// port is: the native and js backends disagree about what argv[1] means.
+fn wants_session(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--session" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
 fn main {
   let argv = @env.args()
   let port = find_port(argv)
+  if wants_session(argv) {
+    println("=== Loop #33 encrypted session vs real sshd ===")
+    println("port: " + port.to_string())
+    match @tcp.TcpConn::connect("127.0.0.1", port) {
+      None => {
+        println("result: CONNECT_FAILED")
+        return
+      }
+      Some(conn) => {
+        let outcome = @sshclient.live_session(conn, fixed_x())
+        conn.close()
+        match outcome {
+          @sshclient.ServiceAccepted(r) => {
+            println("result: SERVICE_ACCEPTED")
+            println("service: " + r.service_name)
+            println("accepted: " + r.accepted_service)
+            println("we_need: " + r.we_need.to_string())
+            println("cipher_ctos: " + r.handshake.cipher_ctos)
+            println("mac_ctos: " + r.handshake.mac_ctos)
+            println("key_head: " + r.key_head)
+            println("session_id_head: " + r.session_id_head)
+            println(
+              "handshake_sent_bytes: " + r.handshake.sent_bytes.to_string(),
+            )
+            println(
+              "handshake_recv_bytes: " + r.handshake.recv_bytes.to_string(),
+            )
+            println("total_sent_bytes: " + r.sent_bytes.to_string())
+            println("total_recv_bytes: " + r.recv_bytes.to_string())
+          }
+          @sshclient.Failed(e) => {
+            println("result: FAILED")
+            println("error: " + session_error_name(e))
+          }
+        }
+      }
+    }
+    return
+  }
   println("=== Loop #31 live SSH handshake vs real sshd ===")
   println("port: " + port.to_string())
   match @tcp.TcpConn::connect("127.0.0.1", port) {

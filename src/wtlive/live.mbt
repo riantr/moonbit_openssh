@@ -99,36 +99,124 @@ priv struct WtWireCounters {
 }
 
 ///|
-/// Write one plaintext packet. Returns false if the transport failed.
-async fn wt_send_plain_packet(
-  conn : @wt.WtConn,
-  counters : WtWireCounters,
-  msg_type : Byte,
-  payload : FixedArray[Byte],
-) -> Bool {
-  let pkt = @sshclient.build_plain_packet(msg_type, payload, b'\x00')
-  conn.send(pkt) catch {
-    _ => return false
-  }
-  counters.sent = counters.sent + pkt.length()
-  true
+/// 穿过 NEWKEYS 之后的加密会话状态
+///
+/// 与 `src/sshclient` 的同名结构刻意保持字段一致:两条传输路径各自持有自己的
+/// 上下文,但「需要什么、怎么算」只有一份定义。
+priv struct WtSessionState {
+  send : @bpacket.SendCtx
+  recv : @bpacket.RecvCtx
+  counters : WtWireCounters
+  we_need : Int
+  key_head : String
+  session_id_head : String
 }
 
 ///|
-/// Read one plaintext packet.
+/// 出参盒子
+///
+/// 握手函数一共有二十几处 `return Failed(...)`,把返回值改成
+/// `(WtLiveResult, WtSessionState?)` 就要把每一处都改一遍——而这些早期失败
+/// 路径根本不需要加密状态。用一个盒子把「成功后才有」的东西带出去,比为了
+/// 统一签名去动二十几行控制流要安全。
+priv struct WtSessionBox {
+  mut state : WtSessionState?
+}
+
+///|
+/// 浏览器侧的加密会话结果
+pub(all) enum WtSessionResult {
+  ServiceAccepted(WtSessionReport)
+  Failed(WtSessionError)
+}
+
+///|
+pub(all) enum WtSessionError {
+  HandshakeFailed(WtLiveError)
+  NoServiceAccept
+  UnexpectedService(String)
+}
+
+///|
+pub(all) struct WtSessionReport {
+  handshake : WtLiveReport
+  service_name : String
+  accepted_service : String
+  we_need : Int
+  key_head : String
+  session_id_head : String
+  sent_bytes : Int
+  recv_bytes : Int
+}
+
+///|
+/// 我们请求的服务名(RFC 4253 §7.1)
+pub const WT_USERAUTH_SERVICE : String = "ssh-userauth"
+
+///|
+/// Write one packet. Framing, encryption and MAC all belong to the
+/// `@bpacket.SendCtx`; this only moves bytes and keeps the counter honest.
+///
+/// The context is threaded in rather than kept here so the sequence number
+/// lives in exactly one place across the handshake -- once NEWKEYS has passed,
+/// seqnr feeds the MAC, and a second bookkeeping path would drift silently.
+async fn wt_send_plain_packet(
+  conn : @wt.WtConn,
+  counters : WtWireCounters,
+  s : @bpacket.SendCtx,
+  msg_type : Byte,
+  payload : FixedArray[Byte],
+) -> Bool {
+  // Zero padding keeps the transcript reproducible; see the note in
+  // `src/sshclient/live.mbt` on why this is a deliberate trade.
+  let pad_src : FixedArray[Byte] = FixedArray::make(64, b'\x00')
+  match s.emit(msg_type, payload, pad_src) {
+    Ok(pkt) => {
+      conn.send(pkt.wire) catch {
+        _ => return false
+      }
+      counters.sent = counters.sent + pkt.wire.length()
+      true
+    }
+    _ => false
+  }
+}
+
+///|
+/// Read exactly one packet.
+///
+/// The read must be exact. Once a packet is consumed the next read is for the
+/// following message, so a reader that grabbed a chunk would sit waiting for
+/// bytes nobody has asked us to receive yet.
+///
+/// The length comes from `RecvCtx::wire_len_from_header`: past NEWKEYS the
+/// length field is itself ciphertext, so only the context can recover it.
+/// Chunking by block size would have been simpler and wrong -- it works
+/// precisely until the first encrypted packet arrives.
 async fn wt_recv_plain_packet(
   conn : @wt.WtConn,
   counters : WtWireCounters,
+  r : @bpacket.RecvCtx,
 ) -> (Byte, FixedArray[Byte])? {
-  let head = conn.read_exact(4) catch { _ => return None }
-  counters.recv = counters.recv + 4
-  let len = @sshclient.be32(head)
-  if !@sshclient.packet_length_ok(len, 1048576) {
+  let hdr = conn.read_exact(4) catch { _ => return None }
+  let rest = match r.wire_len_from_header(hdr) {
+    None => return None
+    Some(v) => v
+  }
+  if rest < 0 || rest > 1048576 {
     return None
   }
-  let body = conn.read_exact(len) catch { _ => return None }
-  counters.recv = counters.recv + len
-  @sshclient.parse_plain_packet(body)
+  let body = if rest == 0 {
+    FixedArray::make(0, b'\x00')
+  } else {
+    let b = conn.read_exact(rest) catch { _ => return None }
+    b
+  }
+  counters.recv = counters.recv + 4 + rest
+  match r.recv(@sshclient.cat2(hdr, body)).event {
+    @bpacket.Packet(_, t, payload) => Some((t, payload))
+    _ => None
+  }
 }
 
 ///|
@@ -179,11 +267,34 @@ async fn wt_read_ident_line(
 
 ///|
 /// transport's own error type does not leak into the SSH layer.
-pub async fn wt_live_handshake(
+
+///|
+/// The full transport handshake over an open browser transport.
+///
+
+///| `conn` is already open: the caller owns connect failure reporting, so the
+///
+
+///|
+/// transport's own error type does not leak into the SSH layer.
+///
+
+///| `box` is filled in only when the handshake gets all the way through
+///
+
+///| NEWKEYS; it stays `None` on every failure path, where there is no
+///
+
+///|
+/// encrypted channel to hand over.
+async fn wt_handshake_into(
   conn : @wt.WtConn,
   x : @bigint.BigNat,
+  box : WtSessionBox,
 ) -> WtLiveResult {
   let counters = { sent: 0, recv: 0, }
+  let s = @bpacket.SendCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let client_ident = "SSH-2.0-MoonBit_0.1"
   // ---- 1. identification exchange ----
   conn.send(
@@ -213,14 +324,20 @@ pub async fn wt_live_handshake(
   // ---- 2. KEXINIT ----
   let my = @sshclient.live_proposal()
   let ic_payload = @kexflow.kexinit_payload(@sshclient.fixed_cookie(), my)
-  if !wt_send_plain_packet(conn, counters, @sshwire.SSH_MSG_KEXINIT, ic_payload) {
+  if !wt_send_plain_packet(
+      conn,
+      counters,
+      s,
+      @sshwire.SSH_MSG_KEXINIT,
+      ic_payload,
+    ) {
     return Failed(KexinitSendFailed)
   }
   let mut peer_ic_payload : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let mut got_kexinit = false
   let mut tries = 0
   while !got_kexinit && tries < 32 {
-    match wt_recv_plain_packet(conn, counters) {
+    match wt_recv_plain_packet(conn, counters, r) {
       None => return Failed(NoPeerKexinit)
       Some((t, payload)) => {
         tries = tries + 1
@@ -259,6 +376,7 @@ pub async fn wt_live_handshake(
   if !wt_send_plain_packet(
       conn,
       counters,
+      s,
       @sshwire.SSH_MSG_KEX_ECDH_INIT,
       e_wire,
     ) {
@@ -268,7 +386,7 @@ pub async fn wt_live_handshake(
   let mut reply : FixedArray[Byte]? = None
   let mut tries2 = 0
   while tries2 < 32 {
-    match wt_recv_plain_packet(conn, counters) {
+    match wt_recv_plain_packet(conn, counters, r) {
       None => return Failed(NoEcdhReply)
       Some((t, payload)) => {
         tries2 = tries2 + 1
@@ -349,6 +467,7 @@ pub async fn wt_live_handshake(
   if !wt_send_plain_packet(
       conn,
       counters,
+      s,
       @sshwire.SSH_MSG_NEWKEYS,
       FixedArray::make(0, b'\x00'),
     ) {
@@ -357,7 +476,7 @@ pub async fn wt_live_handshake(
   let mut got_newkeys = false
   let mut tries3 = 0
   while !got_newkeys && tries3 < 32 {
-    match wt_recv_plain_packet(conn, counters) {
+    match wt_recv_plain_packet(conn, counters, r) {
       None => return Failed(NoNewkeys)
       Some((t, _)) => {
         tries3 = tries3 + 1
@@ -370,6 +489,34 @@ pub async fn wt_live_handshake(
   if !got_newkeys {
     return Failed(NoNewkeys)
   }
+  // ---- 9. 派生会话密钥并切换到加密模式 ----
+  // 与原生路径走同一张长度表(`we_need_for` 从 src/sshclient 导入)。
+  // 两条传输各写一份密钥长度表,迟早会在新增 cipher 时只改一处。
+  let we_need = @sshclient.we_need_for(neg.cipher_ctos, neg.mac_ctos)
+  let keys = @kexc25519.derive_keys(h, k_wire, we_need)
+  // 六个密钥都按 we_need 派生,但 cipher 只取 key_len / iv_len 字节前缀。
+  let ctos = @bpacket.AesCtrMacCtx::new(
+    head_bytes(keys.enc_key_ctos(), 16),
+    head_bytes(keys.iv_ctos(), 16),
+    keys.mac_key_ctos(),
+  )
+  let stoc = @bpacket.AesCtrMacCtx::new(
+    head_bytes(keys.enc_key_stoc(), 16),
+    head_bytes(keys.iv_stoc(), 16),
+    keys.mac_key_stoc(),
+  )
+  s.set_mode(@bpacket.MacEncrypt(ctos))
+  r.set_mode(@bpacket.MacEncrypt(stoc))
+  box.state = Some({
+    send: s,
+    recv: r,
+    counters,
+    we_need,
+    key_head: hex_bytes_head(keys.enc_key_ctos(), 8) +
+    "/" +
+    hex_bytes_head(keys.mac_key_ctos(), 8),
+    session_id_head: hex_bytes_head(keys.session_id(), 16),
+  })
   Established({
     server_ident,
     client_ident,
@@ -386,6 +533,112 @@ pub async fn wt_live_handshake(
     shared_secret_head: shared_secret_head_of(k),
     sent_bytes: counters.sent,
     recv_bytes: counters.recv,
+  })
+}
+
+///|
+/// 前 n 个字节(见 src/sshclient/live.mbt 同名函数的说明)
+fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+  let m = if b.length() < n { b.length() } else { n }
+  let out : FixedArray[Byte] = FixedArray::make(m, b'\x00')
+  for i = 0; i < m; i = i + 1 {
+    out[i] = b[i]
+  }
+  out
+}
+
+///|
+/// 字节前缀的十六进制,用于诊断输出
+fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
+  let m = if b.length() < n { b.length() } else { n }
+  let sb = StringBuilder()
+  let hex_chars : String = "0123456789abcdef"
+  let mut i = 0
+  while i < m {
+    let hi = b[i].to_int() / 16
+    let lo = b[i].to_int() % 16
+    sb.write_string(hex_chars.unsafe_substring(start=hi, end=hi + 1))
+    sb.write_string(hex_chars.unsafe_substring(start=lo, end=lo + 1))
+    i = i + 1
+  }
+  sb.to_string()
+}
+
+///|
+/// 握手到 NEWKEYS 为止(Loop #32 的既有行为,保持不变)
+pub async fn wt_live_handshake(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+) -> WtLiveResult {
+  let box = { state: None, }
+  wt_handshake_into(conn, x, box)
+}
+
+///|
+/// 握手,再在**加密**信道上做一次往返(Loop #33)
+///
+/// 浏览器路径与原生路径到这里已经是同一件事了:组帧、加密、MAC、密钥派生
+/// 全部来自共享的 `src/bpacket` / `src/kexc25519`,两条路径只在「怎么把字节
+/// 搬上传输层」上不同。这正是 Loop #32 抽出共享逻辑时想要的结果,也是为什么
+/// 这里的字节数应该与原生驱动逐字节相同——不一样就说明有一边漂移了。
+pub async fn wt_live_session(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+) -> WtSessionResult {
+  let box = { state: None, }
+  let res = wt_handshake_into(conn, x, box)
+  let handshake = match res {
+    Established(rep) => rep
+    Failed(e) => return Failed(WtSessionError::HandshakeFailed(e))
+  }
+  let st = match box.state {
+    None => return Failed(WtSessionError::NoServiceAccept)
+    Some(v) => v
+  }
+  let payload = @sshwire.write_ssh_string(@sshclient.ascii(WT_USERAUTH_SERVICE))
+  if !wt_send_plain_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_SERVICE_REQUEST,
+      payload,
+    ) {
+    return Failed(WtSessionError::NoServiceAccept)
+  }
+  let mut tries = 0
+  let mut answer : FixedArray[Byte]? = None
+  while tries < 32 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      None => return Failed(WtSessionError::NoServiceAccept)
+      Some((t, pl)) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_SERVICE_ACCEPT {
+          answer = Some(pl)
+          break
+        }
+      }
+    }
+  }
+  let accepted_body = match answer {
+    None => return Failed(WtSessionError::NoServiceAccept)
+    Some(v) => v
+  }
+  let accepted = match @sshclient.read_field(accepted_body, 0) {
+    None => return Failed(WtSessionError::UnexpectedService("malformed"))
+    Some((name, _)) => @sshclient.bytes_to_string(name)
+  }
+  if accepted != WT_USERAUTH_SERVICE {
+    return Failed(WtSessionError::UnexpectedService(accepted))
+  }
+  ServiceAccepted({
+    handshake,
+    service_name: WT_USERAUTH_SERVICE,
+    accepted_service: accepted,
+    we_need: st.we_need,
+    key_head: st.key_head,
+    session_id_head: st.session_id_head,
+    sent_bytes: st.counters.sent,
+    recv_bytes: st.counters.recv,
   })
 }
 

@@ -111,3 +111,55 @@ pub fn DerivedKeys::derive_keys_with_session(
     ),
   }
 }
+
+// ---------------------------------------------------------------------------
+// 只读访问器
+// ---------------------------------------------------------------------------
+
+///|
+/// 字段保持私有,外部只能通过这些访问器取密钥。
+///
+/// 不是洁癖:DerivedKeys 里装的是**已经能解密整条连接**的会话密钥,把它变成
+/// 到处可随手序列化的公开字段,等于在一个打印结构体的调试语句旁边埋一次泄漏。
+
+///|
+/// 'A' —— 客户端→服务器的计数器/IV
+pub fn DerivedKeys::iv_ctos(self : DerivedKeys) -> FixedArray[Byte] {
+  self.iv_ctos
+}
+
+///|
+/// 'B' —— 服务器→客户端的计数器/IV
+pub fn DerivedKeys::iv_stoc(self : DerivedKeys) -> FixedArray[Byte] {
+  self.iv_stoc
+}
+
+///|
+/// 'C' —— 客户端→服务器的加密密钥
+pub fn DerivedKeys::enc_key_ctos(self : DerivedKeys) -> FixedArray[Byte] {
+  self.enc_key_ctos
+}
+
+///|
+/// 'D' —— 服务器→客户端的加密密钥
+pub fn DerivedKeys::enc_key_stoc(self : DerivedKeys) -> FixedArray[Byte] {
+  self.enc_key_stoc
+}
+
+///|
+/// 'E' —— 客户端→服务器的 MAC 密钥
+pub fn DerivedKeys::mac_key_ctos(self : DerivedKeys) -> FixedArray[Byte] {
+  self.mac_key_ctos
+}
+
+///|
+/// 'F' —— 服务器→客户端的 MAC 密钥
+pub fn DerivedKeys::mac_key_stoc(self : DerivedKeys) -> FixedArray[Byte] {
+  self.mac_key_stoc
+}
+
+///|
+/// 首次 KEX 的 H,重连时复用(kex.c:1137-1146)
+pub fn DerivedKeys::session_id(self : DerivedKeys) -> FixedArray[Byte] {
+  self.session_id
+}

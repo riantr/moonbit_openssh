@@ -69,6 +69,15 @@ fn error_name(e : @wtlive.WtLiveError) -> String {
 }
 
 ///|
+fn session_error_name(e : @wtlive.WtSessionError) -> String {
+  match e {
+    @wtlive.HandshakeFailed(h) => "handshake:" + error_name(h)
+    @wtlive.NoServiceAccept => "NoServiceAccept"
+    @wtlive.UnexpectedService(s) => "UnexpectedService:" + s
+  }
+}
+
+///|
 
 ///| `async fn main` because awaiting is itself an async operation, and MoonBit
 
@@ -76,6 +85,45 @@ fn error_name(e : @wtlive.WtLiveError) -> String {
 /// tracks asyncness statically: a sync `fn main` may not touch the transport.
 async fn main {
   let url = cfg("url")
+  // The Worker passes `session: 1` for the Loop #33 run. A config lookup
+  // rather than argv, because a browser has no argv.
+  let want_session = cfg("session") == "1" || cfg("session") == "true"
+  if want_session {
+    println("=== Loop #33 encrypted session in a browser Worker ===")
+    println("transport_url: " + url)
+    let sconn = @wt.WtConn::connect(url) catch {
+      _ => {
+        println("result: FAILED")
+        println("error: ConnectFailed")
+        wt_finish(false, "connect failed")
+        return
+      }
+    }
+    println("transport: connected")
+    match @wtlive.wt_live_session(sconn, fixed_x()) {
+      @wtlive.ServiceAccepted(r) => {
+        println("result: SERVICE_ACCEPTED")
+        println("service: " + r.service_name)
+        println("accepted: " + r.accepted_service)
+        println("we_need: " + r.we_need.to_string())
+        println("cipher_ctos: " + r.handshake.cipher_ctos)
+        println("mac_ctos: " + r.handshake.mac_ctos)
+        println("key_head: " + r.key_head)
+        println("session_id_head: " + r.session_id_head)
+        println("handshake_sent_bytes: " + r.handshake.sent_bytes.to_string())
+        println("handshake_recv_bytes: " + r.handshake.recv_bytes.to_string())
+        println("total_sent_bytes: " + r.sent_bytes.to_string())
+        println("total_recv_bytes: " + r.recv_bytes.to_string())
+      }
+      @wtlive.Failed(e) => {
+        println("result: FAILED")
+        println("error: " + session_error_name(e))
+      }
+    }
+    sconn.close()
+    wt_finish(true, "done")
+    return
+  }
   println("=== Loop #32 SSH transport handshake in a browser Worker ===")
   println("transport_url: " + url)
   let conn = @wt.WtConn::connect(url) catch {
