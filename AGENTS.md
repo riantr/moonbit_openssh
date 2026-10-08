@@ -634,3 +634,76 @@ covers ten defects across both loops; every one of them turns the KAT red.
 
 Run the gate with `node host/verify_loop36.mjs`.
 
+### Loop #37: stdin flow control and the `env` request
+
+Two RFC 4254 features every real `ssh` client uses and neither of the last two
+loops touched. Both fail **silently**, which is the whole reason they need their
+own loop:
+
+- **Sending past the peer's window disconnects the connection** (RFC 4254
+  section 5.2), but *under*-sending looks like success. The remote command still
+  exits 0, the client still prints `EXEC_DONE`, and only the byte count
+  disagrees.
+- **`env` is never answered.** RFC 4254 section 6.4 says "No response is
+  returned by the server", OpenSSH's client sends `channel_request_start(...,
+  "env", 0)` (`clientloop.c:2706`), and paramiko's docstring calls the refusal
+  "silent ... common client practice". Three sources agreeing means there is
+  nothing on the wire to check -- the only oracle is the remote command looking
+  at its own environment.
+
+**The send-side clamp** (`channels.c:3085-3100`), transcribed exactly in shape:
+
+```c
+if (len > c->remote_window)     len = c->remote_window;
+if (len > c->remote_maxpacket)  len = c->remote_maxpacket;
+if (len == 0)                    return 0;
+... send len bytes ...
+sshbuf_consume(c->input, len);
+c->remote_window -= len;
+```
+
+Clamp, not error. **A zero-length clamp is not a failure** -- it means the peer
+has not made room yet, and the bytes stay in the buffer until a
+CHANNEL_WINDOW_ADJUST arrives. `ChanState::stdin_take` returns the unsent tail
+for exactly that reason. `stdin_action` is gone: one clamp, one place, and the
+interactive shell path now goes through the same function instead of a second
+encoding of the same rules.
+
+**CHANNEL_EOF only after the buffer is empty.** `chan_ibuf_empty` returns
+without sending when `sshbuf_len(c->input) != 0` (`nchan.c:130-134`). Sending it
+early tells the peer the input is finished, and the remote command reads a
+truncated stream *without complaining* -- harder to diagnose than a disconnect.
+The `exec` path now sends EOF even with no stdin, which is what `ssh -n` does;
+without it any command that reads stdin blocks forever, so the bug shows up as a
+hang rather than as a wrong answer.
+
+**`env` must go out before `exec`.** `session_input_channel_req` only dispatches
+`"env"` while `c->type == SSH_CHANNEL_LARVAL` (`session.c:2175`); after `exec`
+the request is dropped without a word, and want_reply is FALSE, so there is no
+error either. Exactly two strings, then `sshpkt_get_end` (`session.c:2042-2044`)
+-- a trailing field there is `sshpkt_fatal`, not something ignored.
+
+**How the test proves it.** `sshd_setup.mjs` now names `LOOP37_TEST` and
+`LOOP37_SECOND` in `AcceptEnv`, so one run covers both branches: the accepted
+name arrives, the unlisted one is dropped, and the session completes either way.
+For the bulk transfer the remote fixture reports the byte count *and* a SHA-256
+of what landed, and `host/stdin_expect.py` computes that digest beforehand from
+the same pattern the client uses -- so the comparison is between the far side and
+an independent expectation, not between the client and itself. 3 MiB through the
+2 MiB default window takes 96 packets and no disconnect.
+
+**Two bugs found by the tooling, both worth naming:**
+
+- `--exec` swallowed the rest of argv, so `--exec ... --env FOO=bar` handed the
+  flags to the remote command. The remote ran fine and produced output; only the
+  fact that the flags were also in the command string gave it away. Same class
+  as the `--shell` bug in Loop #36.
+- The KAT's stdin replay **rebuilt** the packets from the clamp, which was the
+  point -- but it never checked the buffer that came back on the stall path, so
+  the mutation "a stalled stdin went out in full" passed. The assertion that a
+  `None` action returns the buffer untouched is now part of both replays.
+
+**Mutation count:** sixteen across three loops, all caught.
+
+Run the gate with `node host/verify_loop37.mjs`.
+
