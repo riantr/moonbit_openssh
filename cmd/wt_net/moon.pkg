@@ -1,0 +1,14 @@
+import {
+  "moonbitlang/async",
+  "openssh/openssh_moonbit/src/wt",
+}
+
+///| Loop #32 G2 driver: js target only, runs inside a browser Web Worker.
+///|
+///| The gating is per file: both `main.mbt` and the `src/wt` files it pulls in
+///| use `extern "js"`, which the wasm backends reject outright.
+pkgtype(kind: "executable")
+
+options(
+  targets: { "main.mbt": [ "js" ] },
+)

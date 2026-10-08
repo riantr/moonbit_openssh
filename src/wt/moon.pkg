@@ -1,0 +1,14 @@
+import {
+  "moonbitlang/async/js_async",
+}
+
+///| Loop #32 WebTransport transport.
+///|
+///| js target only, and deliberately not `supported-targets` at the package
+///| level -- that would block downstream consumers. The gating is per file:
+///| `conn.mbt` and `ffi.mbt` both use `extern "js"`, which the wasm backends
+///| reject outright.
+
+options(
+  targets: { "conn.mbt": [ "js" ], "ffi.mbt": [ "js" ] },
+)

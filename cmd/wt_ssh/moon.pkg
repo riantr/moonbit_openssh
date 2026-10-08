@@ -1,0 +1,17 @@
+import {
+  "moonbitlang/async",
+  "openssh/openssh_moonbit/src/wt",
+  "openssh/openssh_moonbit/src/wtlive",
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/ecdsa",
+}
+
+///| Loop #32 G3 driver: js target only, runs inside a browser Web Worker.
+///|
+///| Both `main.mbt` and the `src/wt` / `src/wtlive` packages it pulls in use
+///| `extern "js"` and async, neither of which the wasm backends support.
+pkgtype(kind: "executable")
+
+options(
+  targets: { "main.mbt": [ "js" ] },
+)

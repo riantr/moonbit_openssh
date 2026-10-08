@@ -84,52 +84,9 @@ const SHARED_HEAD_LEN : Int = 16
 // Small wire helpers
 // ---------------------------------------------------------------------------
 
-///|
-fn cat2(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
-  let out : FixedArray[Byte] = FixedArray::make(
-    a.length() + b.length(),
-    b'\x00',
-  )
-  for i = 0; i < a.length(); i = i + 1 {
-    out[i] = a[i]
-  }
-  for i = 0; i < b.length(); i = i + 1 {
-    out[a.length() + i] = b[i]
-  }
-  out
-}
-
-///| Prepend an SSH message-type byte to a payload, yielding the complete
-
-///| message payload. KEXINIT is the type the exchange hash needs in front of
-
-///|
-/// I_C / I_S; OpenSSH calls this a "fake header" (kexgen.c:70-75).
-fn with_type(msg_type : Byte, payload : FixedArray[Byte]) -> FixedArray[Byte] {
-  let out : FixedArray[Byte] = FixedArray::make(payload.length() + 1, msg_type)
-  for i = 0; i < payload.length(); i = i + 1 {
-    out[1 + i] = payload[i]
-  }
-  out
-}
-
-///|
-fn ascii(s : String) -> FixedArray[Byte] {
-  let a : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
-  for i = 0; i < s.length(); i = i + 1 {
-    a[i] = (s[i].to_int() & 0xFF).to_byte()
-  }
-  a
-}
-
-///|
-fn bytes_to_string(b : FixedArray[Byte]) -> String {
-  let sb = StringBuilder()
-  for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
-  }
-  sb.to_string()
-}
+// cat2 / with_type / ascii / bytes_to_string now live in framing.mbt, shared
+// with Loop #32's async browser driver. Only `hex_head` remains local: it is a
+// reporting helper for the driver output, not part of the protocol.
 
 ///|
 fn hex_head(v : @bigint.BigNat, n : Int) -> String {
@@ -163,7 +120,7 @@ pub fn live_proposal() -> @kexflow.Proposal {
 /// Deterministic 16-byte KEXINIT cookie. A real client would use random
 /// bytes; a fixed cookie keeps the transcript reproducible so a byte diff
 /// against the paramiko capture is meaningful.
-fn fixed_cookie() -> FixedArray[Byte] {
+pub fn fixed_cookie() -> FixedArray[Byte] {
   let c : FixedArray[Byte] = FixedArray::make(16, b'\x00')
   let mut i = 0
   while i < 16 {
@@ -197,40 +154,16 @@ priv struct WireCounters {
 ///   plausible but desynchronises the peer: the padding is at least 4 bytes,
 ///   and it is the *whole packet* (length field included) that must be a
 ///   multiple of 8 -- so packet_length itself is congruent to 4 mod 8, not 0.
+///
+///   The byte arithmetic lives in `framing.mbt` and is shared with Loop #32's
+///   async browser driver; only the socket I/O is local to this function.
 fn send_plain_packet(
   conn : @tcp.TcpConn,
   counters : WireCounters,
   msg_type : Byte,
   payload : FixedArray[Byte],
 ) -> Bool {
-  let unpadded = 2 + payload.length() // padding_length byte + payload
-  let mut pad = 4
-  while (unpadded + pad) % 8 != 4 {
-    pad = pad + 1
-  }
-  let packet_length = unpadded + pad
-  let pkt : FixedArray[Byte] = FixedArray::make(4 + packet_length, b'\x00')
-  pkt[0] = ((packet_length >> 24) & 0xFF).to_byte()
-  pkt[1] = ((packet_length >> 16) & 0xFF).to_byte()
-  pkt[2] = ((packet_length >> 8) & 0xFF).to_byte()
-  pkt[3] = (packet_length & 0xFF).to_byte()
-  pkt[4] = pad.to_byte()
-  pkt[5] = msg_type
-  // Payload starts at 6: four length bytes, one padding_length byte, one
-  // message type byte. Starting it at 5 lets the first payload byte overwrite
-  // the type, which the peer then reports as an unknown message type.
-  for i = 0; i < payload.length(); i = i + 1 {
-    pkt[6 + i] = payload[i]
-  }
-  // Deterministic padding keeps the byte transcript reproducible. OpenSSH
-  // requires the padding to be unpredictable for traffic analysis; a test
-  // client that is not protecting anything may keep it fixed, and a real
-  // client must not copy this.
-  let mut j = 0
-  while j < pad {
-    pkt[6 + payload.length() + j] = (0xD0 + j).to_byte()
-    j = j + 1
-  }
+  let pkt = build_plain_packet(msg_type, payload, b'\x00')
   let ok = conn.send(pkt)
   if ok {
     counters.sent = counters.sent + pkt.length()
@@ -249,11 +182,8 @@ fn recv_plain_packet(
     Some(h) => h
   }
   counters.recv = counters.recv + 4
-  let len = (head[0].to_int() << 24) |
-    (head[1].to_int() << 16) |
-    (head[2].to_int() << 8) |
-    head[3].to_int()
-  if len < 8 || len > 1048576 {
+  let len = be32(head)
+  if !packet_length_ok(len, 1048576) {
     return None
   }
   let rest = match conn.read_exact(len) {
@@ -261,22 +191,7 @@ fn recv_plain_packet(
     Some(r) => r
   }
   counters.recv = counters.recv + len
-  // rest holds [padding_length][msg_type][payload][padding], so the payload
-  // is len - padding_length - 2. Getting this off by one appends a padding
-  // byte to the payload, which every strict parser (KEXINIT included) then
-  // rejects as trailing data.
-  let pad = rest[0].to_int()
-  let payload_len = len - pad - 2
-  if payload_len < 0 {
-    return None
-  }
-  let msg_type = rest[1]
-  // payload starts after padding_length AND the message type byte.
-  let payload : FixedArray[Byte] = FixedArray::make(payload_len, b'\x00')
-  for i = 0; i < payload_len; i = i + 1 {
-    payload[i] = rest[2 + i]
-  }
-  Some((msg_type, payload))
+  parse_plain_packet(rest)
 }
 
 ///|
@@ -552,51 +467,5 @@ pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
 }
 
 ///|
-/// KEX_ECDH_REPLY body: exactly three strings, K_S, Q_S and the signature,
-/// with nothing after them. Returns None on any shape violation.
-fn parse_ecdh_reply(
-  body : FixedArray[Byte],
-) -> (FixedArray[Byte], FixedArray[Byte], FixedArray[Byte])? {
-  let a = read_field(body, 0)
-  match a {
-    None => None
-    Some((ks, o1)) =>
-      match read_field(body, o1) {
-        None => None
-        Some((f, o2)) =>
-          match read_field(body, o2) {
-            None => None
-            Some((sig, o3)) =>
-              if o3 != body.length() {
-                None
-              } else {
-                Some((ks, f, sig))
-              }
-          }
-      }
-  }
-}
-
-///|
-/// SSH_MSG_KEX_FAILURE (RFC 4253 §7)
+/// SSH_MSG_KEX_FAILURE (RFC 4253 section 7)
 pub const KX_MSG_KEX_FAILURE : Byte = b'\x14'
-
-///|
-/// Read an SSH `string` at `off`; returns the bytes and the next offset.
-fn read_field(b : FixedArray[Byte], off : Int) -> (FixedArray[Byte], Int)? {
-  if off < 0 || off + 4 > b.length() {
-    return None
-  }
-  let len = (b[off].to_int() << 24) |
-    (b[off + 1].to_int() << 16) |
-    (b[off + 2].to_int() << 8) |
-    b[off + 3].to_int()
-  if len < 0 || off + 4 + len > b.length() {
-    return None
-  }
-  let out : FixedArray[Byte] = FixedArray::make(len, b'\x00')
-  for i = 0; i < len; i = i + 1 {
-    out[i] = b[off + 4 + i]
-  }
-  Some((out, off + 4 + len))
-}

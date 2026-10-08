@@ -1,0 +1,28 @@
+import {
+  "moonbitlang/async",
+  "openssh/openssh_moonbit/src/wt",
+  "openssh/openssh_moonbit/src/sshclient",
+  "openssh/openssh_moonbit/src/sshwire",
+  "openssh/openssh_moonbit/src/kexflow",
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/kexdh",
+  "openssh/openssh_moonbit/src/hostkey",
+}
+
+///| Loop #32: the SSH transport handshake over a browser transport.
+///|
+///| This is a separate package rather than another file in `src/sshclient`
+///| for one reason: `src/wt` is js-only, because it uses `extern "js"` and
+///| MoonBit's async support does not cover wasm. `src/sshclient` is built for
+///| all four targets, so it cannot depend on `src/wt` -- the dependency only
+///| points one way.
+///|
+///| The framing, proposal and exchange-hash code is imported from
+///| `src/sshclient` rather than copied. That is the point of the split: a
+///| second implementation of the packet framing or of the exchange-hash
+///| layout would be free to drift, and a host key verified on only one
+///: platform is not verified at all.
+
+options(
+  targets: { "live.mbt": [ "js" ] },
+)

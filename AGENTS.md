@@ -107,14 +107,18 @@ For each crypto module:
 ### Build commands
 
 ```bash
-# Run all MoonBit tests
-moon test                                   # defaults to native
+# Loop #32: the full browser gate -- G1 Worker, G2 byte stream, G3 SSH
+# handshake against a real sshd, plus the Loop #30 crypto suites 4x2.
+node host/verify_loop32.mjs
+node host/verify_loop32.mjs --skip-regression   # browser stages only
 
-# Loop #31: full live-sshd gate (starts a private OpenSSH on 127.0.0.1:22230,
-# runs the MoonBit client, cross-checks the exchange hash twice, then re-runs
-# the Loop #30 crypto suites 4 target x 2 mode for regressions)
+# Loop #31: live-sshd gate (real OpenSSH on 127.0.0.1:22230, the MoonBit
+# client, the exchange hash cross-checked twice, Loop #30 regressions)
 node host/verify_loop31.mjs
 node host/verify_loop31.mjs --keep-sshd     # leave the server up for poking
+
+# Run all MoonBit tests
+moon test                                   # defaults to native
 
 # Rebuild C driver (hand-written SHA-512, no OpenSSH sha2.c)
 cd triple_check/c
@@ -182,3 +186,50 @@ python compare.py
 - **Absolute artifact paths in `execSync`**: a bare `_build/...` is
   resolved by `cmd.exe` as a command name, not a path. Quote an
   absolute path instead.
+- **`extern "js"` inline bodies: use the quoted IIFE form.** Write
+  `= "((x) => ...)"`, not `#| (x) => ... |#`. In the `moon` version
+  in use here the `#| ... |#` terminator is left in the emitted
+  JavaScript, so every such FFI becomes a `SyntaxError` at load time
+  in the browser. The quoted form is what `src/tcp/socket_js.mbt`
+  already uses.
+- **MoonBit has no `FixedArray` slice syntax.** `b[off..len]` is a
+  parse error. Use a helper (`slice_bytes` in `src/sshclient/framing.mbt`).
+- **A `suberror` cannot be pattern-matched.** Its constructors are not
+  enum constructors. If a type must both be raised and matched for
+  reporting, keep it a plain `pub(all) enum` and have the inner helpers
+  return `Bool`/`Option` instead of raising -- which is also how
+  Loop #31's blocking driver is structured.
+- **`moonbitlang/async` does not support the wasm backends.** It covers
+  native and js only. Anything awaiting a browser API is therefore
+  `--target js` plus a Web Worker; the wasm artifacts cannot be the
+  browser path. A `targets:` gate on a js-only module is what stops it
+  leaking (the build simply fails for wasm, producing no artifact).
+- **An `async fn main` that raises never reaches the Worker's completion
+  hook.** Wrap the body and report through `wt_finish`, or the page
+  only ever learns "timed out".
+- **Chromium does not accept a locally-added certificate over QUIC.**
+  It reports `QUIC_TLS_CERTIFICATE_UNKNOWN` for every override flag
+  (`--ignore-certificate-errors`, `--ignore-certificate-errors-spki-list`
+  with either the CA or leaf SPKI, dropping `--enable-automation`, and
+  headed mode), while accepting the *same* certificate over plain HTTPS.
+  WebTransport cannot be tested locally against a self-signed endpoint;
+  use `ws://` (see `host/wt/ws_relay.py`) for the local end-to-end proof
+  and keep WebTransport for endpoints with a publicly trusted
+  certificate.
+- **`page.evaluate` passes exactly one argument.** A Node-side variable
+  referenced inside the browser function is simply undefined there, and
+  the failure surfaces as a generic timeout. Put everything the browser
+  needs inside the single config object.
+- **aioquic 1.x: start a server with `serve()`, never a hand-rolled
+  `create_datagram_endpoint`.** `QuicServer` is a `DatagramProtocol`
+  that multiplexes connections off one socket; reusing a single instance
+  leaves the packet loop with nothing to dispatch to, and the symptom is
+  a silent server whose port still appears in `netstat`.
+- **aioquic client: `wait_connected=False` sends nothing.** `connect()`
+  calls `protocol.connect(addr, transmit=wait_connected)`, so the
+  probe never puts an Initial on the wire and can only time out.
+- **Generate the WebTransport test certificate idempotently.** The
+  browser only trusts it because it was added to the Windows store, so
+  regenerating the key each run invalidates that trust instantly.
+  `host/wt/make_cert.py` reuses an existing pair unless `--rotate`.
+- **Serve `chain.pem` (leaf + CA), not a bare self-signed leaf.**
