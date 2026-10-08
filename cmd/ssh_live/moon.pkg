@@ -4,6 +4,7 @@ import {
   "openssh/openssh_moonbit/src/sshclient",
   "openssh/openssh_moonbit/src/bigint",
   "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/sha256",
 }
 
 options(

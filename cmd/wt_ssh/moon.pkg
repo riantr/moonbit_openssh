@@ -4,6 +4,7 @@ import {
   "openssh/openssh_moonbit/src/wtlive",
   "openssh/openssh_moonbit/src/bigint",
   "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/sha256",
 }
 
 ///| Loop #32 G3 driver: js target only, runs inside a browser Web Worker.

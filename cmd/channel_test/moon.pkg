@@ -1,0 +1,12 @@
+///| cmd/channel_test -- Loop #35 RFC 4254 channel layer byte-exact
+///|
+///| Depends on `src/channel` and `src/sshwire` only.  Neither reaches `src/tcp`,
+///| so the whole KAT runs on all four backends in both modes.  Same reason
+///| `src/userauth` was split out for Loop #34: a KAT that can only run where a
+///| TCP stack exists is a quarter of the coverage this repo insists on.
+import {
+  "openssh/openssh_moonbit/src/channel",
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "executable")

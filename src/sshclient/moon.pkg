@@ -13,6 +13,7 @@ import {
   "openssh/openssh_moonbit/src/ecdsa",
   "openssh/openssh_moonbit/src/hostkey",
   "openssh/openssh_moonbit/src/userauth",
+  "openssh/openssh_moonbit/src/channel",
 }
 
 pkgtype(kind: "library")

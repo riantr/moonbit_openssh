@@ -826,6 +826,227 @@ pub async fn wt_live_auth(
 
 ///|
 
+///| 浏览器侧的一次远端命令执行
+pub(all) enum WtExecOutcome {
+  Done(WtExecResult)
+  AuthFailed(WtAuthError)
+  ChannelFailed(WtExecError)
+}
+
+///|
+/// 浏览器侧 `live_exec` 的失败原因。刻意与「远端命令返回非零」分开:后者是
+/// **正常结果**,走 `WtExecResult::exit_status`。
+pub(all) enum WtExecError {
+  NoSessionState
+  Malformed(String)
+  OpenFailed(Int, String)
+  ExecRejected
+  SendFailed
+  BadPacket(String)
+  Closed
+  TooManyPackets
+}
+
+///|
+pub(all) struct WtExecResult {
+  stdout : FixedArray[Byte]
+  stderr : FixedArray[Byte]
+  exit_status : Int
+  remote_id : Int
+  adjusts_sent : Int
+  sent_bytes : Int
+  recv_bytes : Int
+}
+
+///|
+/// 在浏览器里跑一条远端命令,并读回 stdout / stderr / exit-status。
+///
+/// 和 `src/sshclient` 的 `live_exec` 一样,协议本身全部来自 `src/channel` 的
+/// `chan_step`——两条路径共用同一个状态机,只换了搬字节的那一层。所以「原生和
+/// 浏览器结果一致」不是靠两边都写对了来保证的,而是**协议只有一份实现**;
+/// 验证脚本仍然要比一遍字节数与摘要,因为那还能同时抓住搬运层的漂移。
+pub async fn wt_live_exec(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  command : String,
+) -> WtExecOutcome {
+  let box = { state: None, }
+  let res = wt_handshake_into(conn, x, box)
+  match res {
+    Established(_) => ()
+    Failed(e) => return WtExecOutcome::AuthFailed(WtAuthError::HandshakeFailed(e))
+  }
+  // box.state 只在握手收尾时写一次(`wt_handshake_into`),之后的收发都在这
+  // 同一个结构体上更新计数器和 seqnr,所以一路带着它走即可。
+  let st = match box.state {
+    None => return WtExecOutcome::ChannelFailed(WtExecError::NoSessionState)
+    Some(v) => v
+  }
+  let (accepted_opt, svc_err) = wt_request_userauth_service(conn, st)
+  match svc_err {
+    Some(WtSessionError::UnexpectedService(s)) =>
+      return WtExecOutcome::AuthFailed(WtAuthError::UnexpectedService(s))
+    _ => ()
+  }
+  match accepted_opt {
+    None => return WtExecOutcome::AuthFailed(WtAuthError::NoServiceAccept)
+    Some(_) => ()
+  }
+  let curve = @ecdsa.Curve::p256()
+  let (_, _, payload) = match
+    @userauth.userauth_publickey_signed_request(
+      curve,
+      d,
+      st.session_id,
+      user,
+      @userauth.AUTH_SERVICE_CONNECTION,
+    ) {
+    None => return WtExecOutcome::AuthFailed(WtAuthError::SignFailed)
+    Some(v) => v
+  }
+  if !wt_send_plain_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_USERAUTH_REQUEST,
+      payload,
+    ) {
+    return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
+  }
+  let mut tries = 0
+  let mut ok = false
+  while tries < 32 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
+      BadPacket(why) => return WtExecOutcome::AuthFailed(WtAuthError::BadPacket(why))
+      Packet(t, _) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS {
+          ok = true
+          break
+        }
+        if t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+          return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
+        }
+      }
+    }
+  }
+  if !ok {
+    return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
+  }
+  let (chan0, failure) = wt_exec_drive(conn, st, command)
+  match failure {
+    Some(e) => WtExecOutcome::ChannelFailed(e)
+    None => {
+      let rep = chan0.report()
+      WtExecOutcome::Done({
+        stdout: rep.stdout,
+        stderr: rep.stderr,
+        exit_status: rep.exit_status,
+        remote_id: rep.remote_id,
+        adjusts_sent: rep.adjusts_sent,
+        sent_bytes: st.counters.sent,
+        recv_bytes: st.counters.recv,
+      })
+    }
+  }
+}
+
+///|
+/// 浏览器侧的通道收发循环。与 `src/sshclient` 的 `exec_drive` 是同一条控制流,
+/// 只有 `wt_send_plain_packet` / `wt_recv_plain_packet` 不同——协议判断一行
+/// 都没有复制过来。
+async fn wt_exec_drive(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+  command : String,
+) -> (@channel.ChanState, WtExecError?) {
+  let open = @channel.ChanState::new(@channel.LOCAL_CHANNEL).open_action()
+  if !wt_send_action(conn, st, open) {
+    return (
+      @channel.ChanState::new(@channel.LOCAL_CHANNEL),
+      Some(WtExecError::SendFailed),
+    )
+  }
+  let mut first = 0
+  let mut chan = @channel.ChanState::new(@channel.LOCAL_CHANNEL)
+  while first < 8 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(WtExecError::Closed))
+      BadPacket(why) => return (chan, Some(WtExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        let (chan2, _actions, err) = @channel.chan_step(chan, t, pl)
+        chan = chan2
+        match err {
+          None => ()
+          Some(chan_err) => return (chan, Some(wt_chan_error(chan_err)))
+        }
+        if t == 0x5b || t == 0x5c {
+          first = 8
+        } else {
+          first = first + 1
+        }
+      }
+    }
+  }
+  if !chan.open_done {
+    return (chan, Some(WtExecError::Malformed("no_open_confirmation")))
+  }
+  let exec_action = match chan.exec_action(command) {
+    None => return (chan, Some(WtExecError::Malformed("exec_before_open")))
+    Some(a) => a
+  }
+  if !wt_send_action(conn, st, exec_action) {
+    return (chan, Some(WtExecError::SendFailed))
+  }
+  let mut packets = 0
+  let cap = 65536
+  while !chan.finished() {
+    if packets >= cap {
+      return (chan, Some(WtExecError::TooManyPackets))
+    }
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(WtExecError::Closed))
+      BadPacket(why) => return (chan, Some(WtExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        packets = packets + 1
+        let (chan2, actions, err) = @channel.chan_step(chan, t, pl)
+        chan = chan2
+        match err {
+          None => ()
+          Some(chan_err) => return (chan, Some(wt_chan_error(chan_err)))
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          if !wt_send_action(conn, st, actions[i]) {
+            return (chan, Some(WtExecError::SendFailed))
+          }
+        }
+      }
+    }
+  }
+  (chan, None)
+}
+
+async fn wt_send_action(
+  conn : @wt.WtConn,
+  st : WtSessionState,
+  a : @channel.ChanAction,
+) -> Bool {
+  match a {
+    Send(t, payload) => wt_send_plain_packet(conn, st.counters, st.send, t, payload)
+  }
+}
+
+fn wt_chan_error(e : @channel.ChanError) -> WtExecError {
+  match e {
+    OpenFailed(r, d) => WtExecError::OpenFailed(r, d)
+    ExecRejected => WtExecError::ExecRejected
+    Malformed(m) => WtExecError::Malformed(m)
+  }
+}
+
 ///| Render a prefix of the shared secret, enough to correlate two transcripts
 
 ///|

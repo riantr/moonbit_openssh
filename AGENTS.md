@@ -496,3 +496,81 @@ Recomputed baselines: `src/bpacket/pkg.generated.mbti` catches up with Loop
 `cmd/wt_*` packages that report `Missing main function` under a native check —
 generate it per package instead of project-wide).
 
+### Loop #35: RFC 4254 connection layer (channels)
+
+Loops #31-#34 proved we could open an encrypted session and say who we are.
+Neither of them touched the connection layer, which is where SSH actually lives:
+`ssh host cmd` opens a `session` channel, sends `exec`, and reads `CHANNEL_DATA`
+until the peer sends `exit-status`. This loop does that against a real OpenSSH
+8.0p1 server, natively and then inside a browser Web Worker.
+
+**Where the protocol lives.** `src/channel` is a separate package with no
+dependency on `src/sshwire` beyond the wire primitives and none at all on
+`src/tcp`, for the same reason `src/userauth` was split out in Loop #34: a KAT
+that can only run where a TCP stack exists is a quarter of the coverage this
+repo insists on. Its core is `chan_step(state, msg_type, payload) ->
+(new_state, actions, error?)` -- a pure state machine. The transport layers
+(`src/sshclient/live.mbt` over TCP, `src/wtlive/live.mbt` over a WebSocket)
+only move bytes. That is why "native and browser agree" does not rest on both
+being written correctly: the protocol has exactly one implementation.
+
+**Three bugs, all of the same shape.** Every one of them is locally
+self-consistent, passes every check that does not require a big transfer or a
+non-zero channel number, and is only visible to a real counterpart.
+
+- `maybe_adjust` returned the **incoming** state on the no-adjust path, throwing
+  away the window it had just decremented. `local_consumed` therefore never
+  accumulated and not a single `WINDOW_ADJUST` was ever sent. Any output that
+  fits in the 2 MiB window completes normally, which is every output anyone
+  tries first. Found by replaying a 1.5 MiB transcript through the KAT.
+- `maybe_adjust` read the amount off the window **after** `take_adjust` had zeroed
+  `consumed`, so every `WINDOW_ADJUST` carried 0 bytes. The transfer still runs;
+  the window simply never comes back.
+- Inbound packets were matched against `remote_id`. RFC 4254 section 5.2 says the
+  recipient field of an inbound packet names **our** channel. Both ids are 0 on a
+  first channel, so this cannot be observed until a vector uses local=3 /
+  remote=7. OpenSSH itself just resolves the id through `channel_by_id`
+  (`channels.c:3474 channel_from_packet_id`) rather than committing to one side.
+
+**Two deliberate divergences from OpenSSH**, both documented in place:
+
+- `channel_input_extended_data` (`channels.c:3606`) does a bare
+  `c->local_window -= data_len` and nothing else, while `channel_input_data`
+  (`:3518-3523`) also does `c->local_consumed += win_len`. So in OpenSSH a peer
+  that fills our window with nothing but stderr never gets a `WINDOW_ADJUST` and
+  the transfer stalls. `chan_step` runs the same `consume()` on both streams: one
+  extra `WINDOW_ADJUST` is always legal, a stall is not.
+- A non-stderr extended-data code is dropped without touching window state,
+  matching `channels.c:3585-3590`, which discards it before the string is even
+  parsed.
+
+**Oracle.** `host/channel_oracle.py` re-derives every value from the C
+(`channels.h:231-232`, `channels.c:2440-2465`, `channels.c:3505-3523`,
+`channels.c:3126-3135`, `session.c:2344-2347`) and cross-checks its
+`CHANNEL_OPEN` / `exec` / `EOF` bytes against a **live paramiko session** before
+emitting anything. That cross-check earned its place immediately: its
+`CHANNEL_REQUEST` branch had been copy-pasted from the `CHANNEL_OPEN` branch and
+parsed the recipient channel number as a string length, so every exec request
+parsed to a zero-length request type and was silently skipped. "No disagreement
+found" and "we never looked at the right packet" look identical from the outside.
+
+`CHANNEL_EOF` is verified when paramiko emits it but not required -- paramiko
+only sends it on the close path, and whether it appeared says nothing about our
+layout. A check that goes red for unrelated timing reasons trains people to
+ignore it.
+
+**Mutation check.** `host/channel_mutations.py` puts each of the three bugs back
+and requires `cmd/channel_test` to notice, then restores the file. A KAT that
+stays green under the defects it was written for is not evidence of anything.
+
+Run the gate with `node host/verify_loop35.mjs`. It re-derives
+`cmd/channel_test/vectors.mbt` from the oracle and fails on drift, so the KAT
+cannot be satisfied by hand-editing vectors; it runs the mutation check; it
+compares six remote commands byte for byte against a local run of the same
+programs; and it repeats all six inside a browser Web Worker.
+
+One trap worth naming: the remote side is a Windows shell, so `echo` terminates
+lines with CRLF. A hand-written `"hello\n"` reference is the wrong expectation and
+sends you hunting a bug that is correct behaviour -- it did, once. The harness
+reproduces every command locally instead of hard-coding expected bytes.
+

@@ -195,9 +195,149 @@ fn find_user(argv : Array[String]) -> String {
 }
 
 ///|
+/// `--exec <cmd>` 之后的整段命令行就是远端命令(带空格也不拆)。
+///
+/// 同样不能假设 argv[1] 是用户参数:native 的 argv[0] 是 exe 路径,js 的
+/// `process.argv` 前两个是 `[node, main.js]`。所以先扫描出 `--exec` 的位置,
+/// 再把**后面全部**拼起来。
+fn exec_command(argv : Array[String]) -> String? {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--exec" && i + 1 < argv.length() {
+      let sb = StringBuilder()
+      for j = i + 1; j < argv.length(); j = j + 1 {
+        if j > i + 1 {
+          sb.write_char(' ')
+        }
+        sb.write_string(argv[j])
+      }
+      return Some(sb.to_string())
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// Loop #35:在真 sshd 上跑一条远端命令。
+///
+/// stdout / stderr 原样打出来(不做任何解码或转义),但同时给出长度和
+/// SHA-256 摘要。验证脚本要比的是字节数与摘要,不是人眼读一遍——后者在输出
+/// 里混进 ANSI 序列或非 ASCII 时会骗人。
+fn run_exec(port : Int, command : String) -> Unit {
+  let user = find_user(@env.args())
+  println("=== Loop #35 exec vs real sshd ===")
+  println("port: " + port.to_string())
+  println("user: " + user)
+  println("command: " + command)
+  match @tcp.TcpConn::connect("127.0.0.1", port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      return
+    }
+    Some(conn) => {
+      let outcome = @sshclient.live_exec(
+        conn,
+        fixed_x(),
+        user,
+        test_auth_key(),
+        command,
+      )
+      conn.close()
+      match outcome {
+        @sshclient.Done(r) => {
+          println("result: EXEC_DONE")
+          println("stdout_len: " + r.stdout.length().to_string())
+          println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+          // 原始字节也打成十六进制:长度和摘要对不上时,只有它能分清是「收到的
+          // 字节不对」还是「摘要算错了」。超过 128 字节就截断并标注——长度和
+          // 摘要才是判据,1.5 MB 的十六进制既刷屏又会顶掉后面的行。
+          println("stdout_hex: " + dump_prefix(r.stdout))
+          println("stderr_len: " + r.stderr.length().to_string())
+          println("stderr_hex: " + @ecdsa.bytes_to_hex(r.stderr))
+          println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+          println("exit_status: " + r.exit_status.to_string())
+          println("remote_id: " + r.remote_id.to_string())
+          println("adjusts_sent: " + r.adjusts_sent.to_string())
+          println("total_sent_bytes: " + r.sent_bytes.to_string())
+          println("total_recv_bytes: " + r.recv_bytes.to_string())
+          print_bytes(r.stdout)
+          print_bytes(r.stderr)
+        }
+        @sshclient.AuthFailed(e) => {
+          println("result: AUTH_FAILED")
+          print_auth_rejection(e)
+          println("error: " + auth_error_name(e))
+        }
+        @sshclient.ChannelFailed(e) => {
+          println("result: CHANNEL_FAILED")
+          println("error: " + exec_error_name(e))
+        }
+      }
+    }
+  }
+}
+
+///| 原始字节打进标记块,方便人看;验证脚本只读上面那几行数字。
+///|
+///| 超过 128 字节就截断并标出真实长度:1.5 MB 的输出打出来既没有信息量,又会
+///| 把后面真正要核对的行挤出管道缓冲。
+fn print_bytes(b : FixedArray[Byte]) -> Unit {
+  if b.length() == 0 {
+    return
+  }
+  let n = if b.length() > 128 { 128 } else { b.length() }
+  let sb = StringBuilder()
+  for i = 0; i < n; i = i + 1 {
+    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+  }
+  println("--- raw ---")
+  println(sb.to_string())
+  if n < b.length() {
+    println("--- raw truncated at 128 of " + b.length().to_string() + " ---")
+  }
+  println("--- end raw ---")
+}
+
+///| 十六进制前缀,超过 128 字节同样截断并标注
+fn dump_prefix(b : FixedArray[Byte]) -> String {
+  let n = if b.length() > 128 { 128 } else { b.length() }
+  let head = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    head[i] = b[i]
+  }
+  let s = @ecdsa.bytes_to_hex(head)
+  if n < b.length() {
+    s + "...(" + b.length().to_string() + " bytes total)"
+  } else {
+    s
+  }
+}
+
+fn exec_error_name(e : @sshclient.ExecError) -> String {
+  match e {
+    NoSessionState => "NoSessionState"
+    Malformed(m) => "Malformed(" + m + ")"
+    OpenFailed(r, d) => "OpenFailed(" + r.to_string() + ", " + d + ")"
+    ExecRejected => "ExecRejected"
+    SendFailed => "SendFailed"
+    BadPacket(w) => "BadPacket(" + w + ")"
+    Closed => "Closed"
+    TooManyPackets => "TooManyPackets"
+  }
+}
+
+///|
 fn main {
   let argv = @env.args()
   let port = find_port(argv)
+  match exec_command(argv) {
+    Some(cmd) => {
+      run_exec(port, cmd)
+      return
+    }
+    None => ()
+  }
   if auth_mode(argv) {
     let user = find_user(argv)
     println("=== Loop #34 publickey auth vs real sshd ===")

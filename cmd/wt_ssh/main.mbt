@@ -128,6 +128,40 @@ fn auth_error_name(e : @wtlive.WtAuthError) -> String {
 
 ///|
 /// tracks asyncness statically: a sync `fn main` may not touch the transport.
+///|
+/// 原始字节打进标记块,和 cmd/ssh_live 同一套标记,好让两条路径的输出能直接
+/// 逐行对比。验证脚本只读上面那几行数字。
+fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
+  if b.length() == 0 {
+    return
+  }
+  let n = if b.length() > 128 { 128 } else { b.length() }
+  let sb = StringBuilder()
+  for i = 0; i < n; i = i + 1 {
+    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+  }
+  println("--- raw ---")
+  println(sb.to_string())
+  if n < b.length() {
+    println("--- raw truncated at 128 of " + b.length().to_string() + " ---")
+  }
+  println("--- end raw ---")
+}
+
+fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
+  match e {
+    NoSessionState => "NoSessionState"
+    Malformed(m) => "Malformed(" + m + ")"
+    OpenFailed(r, d) => "OpenFailed(" + r.to_string() + ", " + d + ")"
+    ExecRejected => "ExecRejected"
+    SendFailed => "SendFailed"
+    BadPacket(w) => "BadPacket(" + w + ")"
+    Closed => "Closed"
+    TooManyPackets => "TooManyPackets"
+  }
+}
+
+///|
 async fn main {
   let url = cfg("url")
   // The Worker passes `session: 1` for the Loop #33 run. A config lookup
@@ -135,6 +169,61 @@ async fn main {
   let want_session = cfg("session") == "1" || cfg("session") == "true"
   // Loop #34: `auth: 1` goes all the way to SSH_MSG_USERAUTH_SUCCESS.
   let want_auth = cfg("auth") == "1" || cfg("auth") == "true"
+  // Loop #35: `exec: <command>` runs a remote command and reads back its
+  // stdout / stderr / exit-status.
+  let exec_cmd = cfg("exec")
+  if exec_cmd != "" {
+    let user = cfg("user")
+    let uname = if user == "" { "hp" } else { user }
+    println("=== Loop #35 exec in a browser Worker ===")
+    println("transport_url: " + url)
+    println("user: " + uname)
+    println("command: " + exec_cmd)
+    let econn = @wt.WtConn::connect(url) catch {
+      _ => {
+        println("result: FAILED")
+        println("error: ConnectFailed")
+        wt_finish(false, "connect failed")
+        return
+      }
+    }
+    println("transport: connected")
+    let outcome = @wtlive.wt_live_exec(
+      econn,
+      fixed_x(),
+      uname,
+      test_auth_key(),
+      exec_cmd,
+    )
+    match outcome {
+      @wtlive.Done(r) => {
+        println("result: EXEC_DONE")
+        println("stdout_len: " + r.stdout.length().to_string())
+        println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+        println("stderr_len: " + r.stderr.length().to_string())
+        println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+        println("exit_status: " + r.exit_status.to_string())
+        println("remote_id: " + r.remote_id.to_string())
+        println("adjusts_sent: " + r.adjusts_sent.to_string())
+        println("total_sent_bytes: " + r.sent_bytes.to_string())
+        println("total_recv_bytes: " + r.recv_bytes.to_string())
+        wt_print_bytes(r.stdout)
+        wt_print_bytes(r.stderr)
+      }
+      @wtlive.AuthFailed(e) => {
+        println("result: AUTH_FAILED")
+        print_auth_rejection(e)
+        println("error: " + auth_error_name(e))
+      }
+      @wtlive.ChannelFailed(e) => {
+        println("result: CHANNEL_FAILED")
+        println("error: " + wt_exec_error_name(e))
+      }
+    }
+    econn.close()
+    wt_finish(true, "done")
+    return
+  }
   if want_auth {
     let user = cfg("user")
     let uname = if user == "" { "hp" } else { user }

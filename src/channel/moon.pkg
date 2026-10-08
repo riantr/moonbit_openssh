@@ -1,0 +1,18 @@
+import {
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+///| Loop #35: SSH connection protocol channels (RFC 4254).
+///
+/// It is a separate package for the same reason `src/userauth` is: the channel
+/// state machine is pure byte assembly plus bookkeeping, with no socket and no
+/// transport. Putting it here lets `cmd/channel_test` drive a whole session --
+/// open, exec, data, window adjust, exit-status, close -- against vectors on
+/// all four backends, instead of only on the one that has a TCP stack.
+///
+/// The alternative -- writing the flow inside `src/sshclient/live.mbt` and
+/// mirroring it into `src/wtlive` -- is how this project got its duplicate
+/// `head_bytes` in the first place. `chan_step` below is the whole protocol:
+/// give it a packet, get back the packets to send and the updated state. The
+/// transport layer only moves bytes.
+pkgtype(kind: "library")

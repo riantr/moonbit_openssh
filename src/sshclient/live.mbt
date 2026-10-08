@@ -963,23 +963,41 @@ pub fn live_auth(
   user : String,
   d : @bigint.BigNat,
 ) -> AuthResult {
+  let (res, _st) = live_auth_with_state(conn, x, user, d)
+  res
+}
+
+///|
+/// `live_auth`,但把 `SessionState` 一并带出来。
+///
+/// Loop #35 要在认证通过之后继续开通道跑远端命令,而通道层的每个包都得用
+/// 与握手同一套 `SendCtx` / `RecvCtx` / 计数器(seqnr 和字节计数都活在它们里)。
+/// 让 `live_auth` 多返回一个私有结构体不算破坏 API,但它本来是给 CLI 打印用的,
+/// 所以这里保留原样的同时另开一个内部入口——两条路径共用同一份认证代码,
+/// Loop #34 修好的签名逻辑不会被分叉出去。
+fn live_auth_with_state(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+) -> (AuthResult, SessionState?) {
   let (res, state) = handshake_to_session(conn, x)
   let handshake = match res {
     Established(rep) => rep
     Failed(e) =>
-      return Failed(AuthError::Transport(SessionError::HandshakeFailed(e)))
+      return (Failed(AuthError::Transport(SessionError::HandshakeFailed(e))), None)
   }
   let st = match state {
-    None => return Failed(AuthError::Transport(SessionError::NoServiceAccept))
+    None => return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
     Some(v) => v
   }
   let (accepted_opt, err) = request_userauth_service(conn, st)
   match err {
-    Some(e) => return Failed(AuthError::Transport(e))
+    Some(e) => return (Failed(AuthError::Transport(e)), None)
     None => ()
   }
   let accepted = match accepted_opt {
-    None => return Failed(AuthError::Transport(SessionError::NoServiceAccept))
+    None => return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
     Some(a) => a
   }
   let curve = @ecdsa.Curve::p256()
@@ -991,7 +1009,7 @@ pub fn live_auth(
       user,
       @userauth.AUTH_SERVICE_CONNECTION,
     ) {
-    None => return Failed(AuthError::SignFailed)
+    None => return (Failed(AuthError::SignFailed), None)
     Some(v) => v
   }
   let to_sign = @userauth.userauth_signed_blob(
@@ -1008,14 +1026,14 @@ pub fn live_auth(
       @sshwire.SSH_MSG_USERAUTH_REQUEST,
       payload,
     ) {
-    return Failed(AuthError::NoAuthReply)
+    return (Failed(AuthError::NoAuthReply), None)
   }
   let mut tries = 0
   let mut verdict : (Byte, FixedArray[Byte])? = None
   while tries < 32 {
     match recv_packet(conn, st.counters, st.recv) {
-      Closed => return Failed(AuthError::NoAuthReply)
-      BadPacket(why) => return Failed(AuthError::BadPacket(why))
+      Closed => return (Failed(AuthError::NoAuthReply), None)
+      BadPacket(why) => return (Failed(AuthError::BadPacket(why)), None)
       Packet(t, pl) => {
         tries = tries + 1
         if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS ||
@@ -1027,36 +1045,248 @@ pub fn live_auth(
     }
   }
   let (msg_type, body) = match verdict {
-    None => return Failed(AuthError::NoAuthReply)
+    None => return (Failed(AuthError::NoAuthReply), None)
     Some(v) => v
   }
   if msg_type == @sshwire.SSH_MSG_USERAUTH_FAILURE {
-    return Failed(
+    return (Failed(
       AuthError::AuthRejected(
         userauth_failure_reason(body),
         @ecdsa.bytes_to_hex(to_sign),
         @ecdsa.bytes_to_hex(sig_blob),
       ),
-    )
+    ), None)
   }
-  Authenticated({
-    user,
-    method: @userauth.AUTH_METHOD_PUBLICKEY,
-    key_type: curve.ssh_key_type(),
-    signed_blob_hex: @ecdsa.bytes_to_hex(to_sign),
-    sig_blob_hex: @ecdsa.bytes_to_hex(sig_blob),
-    request_hex: @ecdsa.bytes_to_hex(payload),
-    session: {
-      handshake,
-      service_name: USERAUTH_SERVICE,
-      accepted_service: accepted,
-      we_need: st.we_need,
-      key_tag: st.key_tag,
-      session_id_head: st.session_id_head,
-      sent_bytes: st.counters.sent,
-      recv_bytes: st.counters.recv,
-    },
-  })
+  (
+    Authenticated({
+      user,
+      method: @userauth.AUTH_METHOD_PUBLICKEY,
+      key_type: curve.ssh_key_type(),
+      signed_blob_hex: @ecdsa.bytes_to_hex(to_sign),
+      sig_blob_hex: @ecdsa.bytes_to_hex(sig_blob),
+      request_hex: @ecdsa.bytes_to_hex(payload),
+      session: {
+        handshake,
+        service_name: USERAUTH_SERVICE,
+        accepted_service: accepted,
+        we_need: st.we_need,
+        key_tag: st.key_tag,
+        session_id_head: st.session_id_head,
+        sent_bytes: st.counters.sent,
+        recv_bytes: st.counters.recv,
+      },
+    }),
+    Some(st),
+  )
+}
+
+///|
+/// 一次远端命令执行的结果
+pub(all) enum ExecOutcome {
+  /// 通道跑完了:stdout / stderr / exit-status 都在
+  Done(ExecResult)
+  /// 认证没过,命令根本没发出去
+  AuthFailed(AuthError)
+  /// 通道层出错(见 `ExecError`)
+  ChannelFailed(ExecError)
+}
+
+///|
+/// `live_exec` 失败的原因
+///
+/// 刻意和「远端命令返回非零」分开:后者是**正常结果**,走
+/// `ExecResult::exit_status`。
+pub(all) enum ExecError {
+  /// 认证通过了,但 `SessionState` 没带出来(内部不可能,留作兜底)
+  NoSessionState
+  /// 对端发来的包在通道状态下解释不了,或 channel 号不认识
+  Malformed(String)
+  /// 通道没能打开
+  OpenFailed(Int, String)
+  /// 对端拒绝了 exec
+  ExecRejected
+  /// 包发不出去(seqnr 回绕)
+  SendFailed
+  /// 读包时 MAC 不匹配
+  BadPacket(String)
+  /// 对端把连接关了,但通道还没收尾
+  Closed
+  /// 收包次数超过上限还没结束
+  TooManyPackets
+}
+
+///|
+/// 远端命令的结果,形状刻意和 `ssh host cmd` 的退出码对齐
+pub(all) struct ExecResult {
+  stdout : FixedArray[Byte]
+  stderr : FixedArray[Byte]
+  exit_status : Int
+  /// 对端给的通道号
+  remote_id : Int
+  /// 我们一共补了几次窗口
+  adjusts_sent : Int
+  /// 认证 + 通道总共发出的字节数
+  sent_bytes : Int
+  recv_bytes : Int
+}
+
+///|
+/// 在真服务器上跑一条远端命令,并读回 stdout / stderr / exit-status。
+///
+/// 协议本身完全交给 `src/channel` 的 `chan_step`:这里只做三件事——把认证
+/// 之后的 `SessionState` 接上、把状态机吐出来的 `ChanAction` 发出去、再把
+/// 收到的包喂回去。协议语义没有第二份实现,所以原生路径和浏览器路径不可能
+/// 在协议层分叉。
+///
+/// 循环有三个出口,都在这里显式写出来而不是靠 `break` 隐式跳出:
+/// 对端发了 CLOSE 且我们也回了 CLOSE(`finished`)、连接关闭、或者包数超限。
+/// 超限那条不是摆设:状态机里任何一处「回包发不出去」如果没检查,就会变成
+/// 一边等 CHANNEL_CLOSE 一边永远收不到的死等。
+pub fn live_exec(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  command : String,
+) -> ExecOutcome {
+  let (auth, state_opt) = live_auth_with_state(conn, x, user, d)
+  match auth {
+    Authenticated(_) => ()
+    Failed(e) => return ExecOutcome::AuthFailed(e)
+  }
+  let st = match state_opt {
+    None => return ExecOutcome::ChannelFailed(ExecError::NoSessionState)
+    Some(v) => v
+  }
+  let (chan0, failure) = exec_drive(conn, st, command)
+  match failure {
+    Some(e) => ExecOutcome::ChannelFailed(e)
+    None => {
+      let rep = chan0.report()
+      ExecOutcome::Done({
+        stdout: rep.stdout,
+        stderr: rep.stderr,
+        exit_status: rep.exit_status,
+        remote_id: rep.remote_id,
+        adjusts_sent: rep.adjusts_sent,
+        sent_bytes: st.counters.sent,
+        recv_bytes: st.counters.recv,
+      })
+    }
+  }
+}
+
+///|
+/// 通道的收发循环。返回 `(结束时的状态, 失败原因)`。
+///
+/// 失败为 None 时状态是完整的,可以照常出报告。认证已经由 `live_exec` 处理,
+/// 这里只管通道。
+///
+/// 三个出口都显式写出来:对端发了 CLOSE 且我们也回了 CLOSE(`finished`)、
+/// 连接关闭、或者包数超限。超限那条不是摆设——任何一处「回包发不出去」如果
+/// 没检查,就会变成一边等 CHANNEL_CLOSE 一边永远收不到的死等。
+fn exec_drive(
+  conn : @tcp.TcpConn,
+  st0 : SessionState,
+  command : String,
+) -> (@channel.ChanState, ExecError?) {
+  let mut st = st0
+  let open = @channel.ChanState::new(@channel.LOCAL_CHANNEL).open_action()
+  match send_action(conn, st, open) {
+    None => return (
+      @channel.ChanState::new(@channel.LOCAL_CHANNEL),
+      Some(ExecError::SendFailed),
+    )
+    Some(s) => st = s
+  }
+  // 第一步只有一个包:CHANNEL_OPEN_CONFIRMATION 或 CHANNEL_OPEN_FAILURE。
+  let mut first = 0
+  let mut chan = @channel.ChanState::new(@channel.LOCAL_CHANNEL)
+  while first < 8 {
+    match recv_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(ExecError::Closed))
+      BadPacket(why) => return (chan, Some(ExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        let (chan2, _actions, err) = @channel.chan_step(chan, t, pl)
+        chan = chan2
+        match err {
+          None => ()
+          Some(chan_err) => return (chan, Some(chan_error(chan_err)))
+        }
+        // 确认包到了才收工,其余的(理论上不会有)丢掉继续等。
+        if t == 0x5b || t == 0x5c {
+          first = 8
+        } else {
+          first = first + 1
+        }
+      }
+    }
+  }
+  if !chan.open_done {
+    return (chan, Some(ExecError::Malformed("no_open_confirmation")))
+  }
+  // exec 必须在 OPEN_CONFIRMATION 之后发:recipient 用的是对端给的 id。
+  let exec_action = match chan.exec_action(command) {
+    None => return (chan, Some(ExecError::Malformed("exec_before_open")))
+    Some(a) => a
+  }
+  match send_action(conn, st, exec_action) {
+    None => return (chan, Some(ExecError::SendFailed))
+    Some(s) => st = s
+  }
+  let mut packets = 0
+  let cap = 65536
+  while !chan.finished() {
+    if packets >= cap {
+      return (chan, Some(ExecError::TooManyPackets))
+    }
+    match recv_packet(conn, st.counters, st.recv) {
+      Closed => return (chan, Some(ExecError::Closed))
+      BadPacket(why) => return (chan, Some(ExecError::BadPacket(why)))
+      Packet(t, pl) => {
+        packets = packets + 1
+        let (chan2, actions, err) = @channel.chan_step(chan, t, pl)
+        chan = chan2
+        match err {
+          None => ()
+          Some(chan_err) => return (chan, Some(chan_error(chan_err)))
+        }
+        for i = 0; i < actions.length(); i = i + 1 {
+          match send_action(conn, st, actions[i]) {
+            None => return (chan, Some(ExecError::SendFailed))
+            Some(s) => st = s
+          }
+        }
+      }
+    }
+  }
+  (chan, None)
+}
+
+///| 发一个 `ChanAction`,并把更新后的计数器带回来
+fn send_action(
+  conn : @tcp.TcpConn,
+  st : SessionState,
+  a : @channel.ChanAction,
+) -> SessionState? {
+  match a {
+    Send(t, payload) => {
+      let ok = send_packet(conn, st.counters, st.send, t, payload)
+      if ok {
+        Some(st)
+      } else {
+        None
+      }
+    }
+  }
+}
+
+fn chan_error(e : @channel.ChanError) -> ExecError {
+  match e {
+    OpenFailed(r, d) => ExecError::OpenFailed(r, d)
+    ExecRejected => ExecError::ExecRejected
+    Malformed(m) => ExecError::Malformed(m)
+  }
 }
 
 ///|
