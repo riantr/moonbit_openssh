@@ -302,7 +302,14 @@ async function main() {
   // ------------------------------------------------------------------- G2 --
   console.log('\n=== G2: native client past NEWKEYS vs real sshd ===');
   spawnSync('node', ['host/sshd_setup.mjs', '--stop'], { cwd: ROOT });
-  const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(SSHD_PORT)], {
+  // Loop #38: pin the host key to ECDSA. The transcript and payload sizes
+  // asserted below (509/753 and 573/817) are the sizes of a handshake with a
+  // 256-byte ECDSA P-256 host key and an ECDSA signature. sshd_setup.mjs used
+  // to pin this itself; Loop #38 removed that default because it is exactly
+  // what made an ECDSA-only client look complete. The constants outlived the
+  // default, so this loop has to ask for the algorithm it was written against.
+  const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(SSHD_PORT),
+    '--hostkey-algs', 'ecdsa-sha2-nistp256'], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -316,13 +323,32 @@ async function main() {
     natText.includes('we_need: 32'));
   check('aes128-ctr + hmac-sha2-256 negotiated',
     natText.includes('cipher_ctos: aes128-ctr') && natText.includes('mac_ctos: hmac-sha2-256'));
-  check('handshake transcript unchanged (509/753)',
-    natText.includes('handshake_sent_bytes: 509') && natText.includes('handshake_recv_bytes: 753'));
+  // The handshake byte counts moved in Loop #38, and the reason matters: the
+  // client now advertises five host key algorithms instead of one, so its
+  // KEXINIT is larger -- 509 -> 541 sent, 753 -> 737 received. Nothing about
+  // the framing changed.
+  //
+  // What was really being checked is not the absolute numbers but that one
+  // SERVICE_REQUEST costs 64 bytes: a 32-byte frame plus a 32-byte MAC. With
+  // the tag missing it would be 32, which is the cheapest way to catch
+  // "encrypted except for the tag". Asserting the *delta* keeps that property
+  // testable without re-freezing a literal every time the proposal grows --
+  // which is exactly what just had to happen here.
+  const numOf = (t, k) => {
+    const v = (t.match(new RegExp(`^${k}: (\\d+)$`, 'm')) || [])[1];
+    return v === undefined ? undefined : Number(v);
+  };
+  const hs = numOf(natText, 'handshake_sent_bytes');
+  const hr = numOf(natText, 'handshake_recv_bytes');
+  const ts = numOf(natText, 'total_sent_bytes');
+  const tr = numOf(natText, 'total_recv_bytes');
+  check('handshake transcript complete (both directions moved bytes)',
+    hs > 0 && hr > 0, `sent=${hs} recv=${hr}`);
   // SERVICE_REQUEST is a 32-byte frame plus a 32-byte MAC; SERVICE_ACCEPT is
-  // the same shape. If the MAC were missing these would be 541/805 instead,
-  // which is the cheapest way to catch "encrypted except for the tag".
-  check('encrypted payloads carry a 32-byte MAC (573/817)',
-    natText.includes('total_sent_bytes: 573') && natText.includes('total_recv_bytes: 817'));
+  // the same shape.
+  check('encrypted payloads carry a 32-byte MAC (delta 64, not 32)',
+    ts - hs === 64 && tr - hr === 64,
+    `hs=${hs} hr=${hr} ts=${ts} tr=${tr} deltas ${ts - hs}/${tr - hr}`);
 
   // ------------------------------------------------------------------- G3 --
   console.log('\n=== G3: the same, inside a browser Web Worker ===');
@@ -356,11 +382,18 @@ async function main() {
   for (const l of payload.lines || []) console.log(`      ${l}`);
   check('result: SERVICE_ACCEPTED in a browser Worker', lines.includes('result: SERVICE_ACCEPTED'));
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  // Worker against native, measured in this same run. Comparing the two
+  // backends to each other is the real property; the frozen literals this used
+  // to carry had to be re-derived whenever the client's proposal changed,
+  // which is what Loop #38 triggered.
   check('browser byte counts identical to the native driver',
-    lines.includes('handshake_sent_bytes: 509') &&
-    lines.includes('handshake_recv_bytes: 753') &&
-    lines.includes('total_sent_bytes: 573') &&
-    lines.includes('total_recv_bytes: 817'));
+    numOf(lines, 'handshake_sent_bytes') === hs &&
+    numOf(lines, 'handshake_recv_bytes') === hr &&
+    numOf(lines, 'total_sent_bytes') === ts &&
+    numOf(lines, 'total_recv_bytes') === tr &&
+    numOf(lines, 'total_sent_bytes') - numOf(lines, 'handshake_sent_bytes') === 64,
+    `worker hs=${numOf(lines, 'handshake_sent_bytes')} hr=${numOf(lines, 'handshake_recv_bytes')} ` +
+    `ts=${numOf(lines, 'total_sent_bytes')} tr=${numOf(lines, 'total_recv_bytes')}`);
   // The handshake is NOT reproducible across connections: the server draws a
   // fresh DH exponent every time, so K, the exchange hash and therefore
   // session_id differ between any two runs -- native vs browser included. What

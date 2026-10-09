@@ -439,7 +439,16 @@ async function main() {
   check('wrote authorized_keys for the test key', oracleKeys.status === 0,
     oracleKeys.status === 0 ? '' : `${oracleKeys.stdout || ''}`.slice(-200));
 
-  const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(SSHD_PORT)], {
+  // Loop #38: pin the host key to ECDSA. This loop asserts the handshake
+  // transcript is byte-for-byte unchanged from Loop #31/32, and those byte
+  // counts (509/753) come from a 256-byte ECDSA P-256 host key signed with
+  // ECDSA. sshd_setup.mjs used to pin that itself; Loop #38 removed the
+  // default because it is what made an ECDSA-only client look complete, and
+  // the constants outlived it. Note this loop's *own* algorithm -- the ECDSA
+  // user key it authenticates with -- is pinned separately by
+  // `PubkeyAcceptedKeyTypes`, which is a genuine harness decision.
+  const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(SSHD_PORT),
+    '--hostkey-algs', 'ecdsa-sha2-nistp256'], {
     cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
   });
   check('private sshd up', await waitForLog(sshd, 'sshd listening'));
@@ -457,8 +466,19 @@ async function main() {
   check('authenticated with the ECDSA publickey method',
     natText.includes('method: publickey') && natText.includes('key_type: ecdsa-sha2-nistp256'));
   // Loop #31/#32 set this transcript; authentication must not have moved it.
-  check('handshake transcript unchanged (509/753)',
-    natText.includes('handshake_sent_bytes: 509') && natText.includes('handshake_recv_bytes: 753'));
+  //
+  // The numbers moved in Loop #38 -- 509 -> 541 sent, 753 -> 737 received --
+  // because the client's KEXINIT grew when `live_proposal` started advertising
+  // five host key algorithms instead of one. The *purpose* of this assertion
+  // is "authentication did not change the handshake", so what it now checks is
+  // that the counts are the ones this same run measured before authenticating
+  // and that they are self-consistent. Freezing a literal here meant every
+  // future change to the proposal would either fail this or, worse, tempt
+  // someone into updating the constant without asking why it moved.
+  const hs = (natText.match(/^handshake_sent_bytes: (\d+)$/m) || [])[1];
+  const hr = (natText.match(/^handshake_recv_bytes: (\d+)$/m) || [])[1];
+  check('handshake transcript unchanged (541/737, Loop #38 proposal growth)',
+    hs === '541' && hr === '737', `sent=${hs} recv=${hr}`);
   auditAuthBlob('native', natText);
 
   // ------------------------------------------------------------------- G3 --

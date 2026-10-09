@@ -35,6 +35,8 @@ pub(all) enum KeyError {
   BigNumTooLarge
   /// SSH_ERR_KEY_LENGTH(n < 1024 bits)
   RsaModulusTooShort
+  /// SSH_ERR_KEY_BITS_MISMATCH(签名比模数还长,ssh-rsa.c:546-548)
+  KeyBitsMismatch
   /// SSH_ERR_SIGNATURE_INVALID
   SignatureInvalid
   /// SSH_ERR_INVALID_ARGUMENT(siglen==0 / msg 超限 / 空入参)

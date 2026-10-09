@@ -204,7 +204,9 @@ pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
 
 ///|
 /// The algorithm set this client implements. The Loop #31 sshd is pinned to
-/// exactly this, so a mismatch is our bug rather than a negotiation race.
+/// exactly this, so a mismatch is our bug rather than a negotiation race --
+/// except for the host key list, which is no longer pinned. See
+/// `LIVE_HOSTKEY_ALGS` below for why.
 ///
 /// Note we deliberately do **not** advertise `kex-strict-c-v00@openssh.com`.
 /// OpenSSH turns strict KEX on only when the peer advertises it (kex.c:963-970),
@@ -214,10 +216,40 @@ pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
 /// which would invalidate the Loop #31/#32 byte-count assertions. The contexts
 /// below handle either outcome, so this is a transcript-stability choice, not a
 /// correctness one.
+///|
+/// Host key algorithms this client offers, in preference order.
+///
+/// Order is the client's preference and wins outright: OpenSSH picks the first
+/// entry of the *client* list that the server also offers (`kex.c:887-890`
+/// `match_list(client, server)`), the same rule RFC 4253 §7.1 states. So this
+/// ordering alone decides which algorithm every connection uses; the server's
+/// own ordering only matters for algorithms we do not list.
+///
+/// Loop #31 pinned the test sshd with `HostKeyAlgorithms` to work around the
+/// fact that we only reported ECDSA. That pin hid the real defect: against a
+/// stock sshd holding only ed25519/rsa host keys -- the default on most hosts
+/// -- negotiation failed outright with `NoAgreement`, because every name the
+/// server offered was one we refused. The pin is gone (host/sshd_setup.mjs)
+/// and this list is now what we can actually verify.
+///
+/// `ssh-rsa` (RFC 4253, SHA-1) is deliberately absent. It maps to SHA-1
+/// (`ssh-rsa.c:328-359` `rsa_hash_id_from_ident`), which this project does not
+/// implement, and OpenSSH 8.8+ disables it by default. Advertising a name we
+/// cannot check would only push the failure from negotiation time to verify
+/// time, and would blame an algorithm that was never selected.
+///
+/// The three-way name split for RSA is why `src/hostkey` exists: the blob type
+/// string is `ssh-rsa`, the negotiated name is `rsa-sha2-512`, and the
+/// signature blob's inner name equals the negotiated name. The test is that the
+/// two names resolve to the *same digest*, not that any two strings are equal
+/// (`ssh-rsa.c:526-535`).
+const LIVE_HOSTKEY_ALGS : String =
+  "ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384"
+
 pub fn live_proposal() -> @kexflow.Proposal {
   {
     kex_algs: "diffie-hellman-group14-sha256",
-    hostkey_algs: "ecdsa-sha2-nistp256,ecdsa-sha2-nistp384",
+    hostkey_algs: LIVE_HOSTKEY_ALGS,
     enc_ctos: "aes128-ctr",
     enc_stoc: "aes128-ctr",
     mac_ctos: "hmac-sha2-256",
@@ -643,22 +675,15 @@ fn handshake_to_session(
     @hostkey.Parsed(k) => k
     _ => return (Failed(HostkeyInvalid), None)
   }
-  let (ktype, kbits) = match key {
-    @hostkey.EcdsaKey(bits, _) =>
-      (
-        if bits == 256 {
-          "ecdsa-sha2-nistp256"
-        } else {
-          "ecdsa-sha2-nistp384"
-        },
-        bits,
-      )
-    _ => return (Failed(HostkeyInvalid), None)
-  }
-  if ktype != neg.hostkey_alg {
+  // 「密钥类型和协商出的算法名配不配对」这条规则住在 src/hostkey
+  // (`agrees_with_alg`),不在这里抄一份:RFC 8332 让 ed25519/ECDSA 和 RSA
+  // 的答案不同,两份抄件迟早会漂。类型不配对报 HostkeyInvalid,签名本身
+  // 验不过报 SignatureInvalid——两者在协议上的后果相同,但诊断时完全不同。
+  if !@hostkey.HostKey::agrees_with_alg(key, neg.hostkey_alg) {
     return (Failed(HostkeyInvalid), None)
   }
-  match @hostkey.HostKey::verify(key, h, sig_blob) {
+  let (ktype, kbits) = @hostkey.HostKey::describe(key)
+  match @hostkey.HostKey::verify_with_alg(key, h, sig_blob, neg.hostkey_alg) {
     @hostkey.Accepted => ()
     _ => return (Failed(SignatureInvalid(h)), None)
   }

@@ -478,6 +478,15 @@ async fn main {
         println("user: " + r.user)
         println("method: " + r.method)
         println("key_type: " + r.key_type)
+        // Loop #38: the negotiated host key algorithm, the key type it turned
+        // out to be, and the key size.  Mirrors `cmd/ssh_live --auth` exactly,
+        // because the point of the comparison is that a browser Web Worker and
+        // the native client reach the same host key decision -- and under RFC
+        // 8332 the first two of these are *not* the same string for RSA
+        // (negotiated `rsa-sha2-512`, blob says `ssh-rsa`).
+        println("hostkey_alg: " + r.session.handshake.hostkey_alg)
+        println("hostkey_type: " + r.session.handshake.hostkey_type)
+        println("hostkey_bits: " + r.session.handshake.hostkey_bits.to_string())
         println("session_id_head: " + r.session.session_id_head)
         println("signed_blob: " + r.signed_blob_hex)
         println("sig_blob: " + r.sig_blob_hex)

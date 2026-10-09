@@ -148,6 +148,12 @@ Three ways this repo got it wrong, all found by review rather than by a test:
 ### Build commands
 
 ```bash
+# Loop #38: host key algorithms (ssh-ed25519 + RFC 8332 rsa-sha2-*).
+# Starts its own sshd with NO HostKeyAlgorithms pin, plus one pinned instance
+# per algorithm so each dispatch is proved separately.
+node host/verify_loop38.mjs
+node host/verify_loop38.mjs --skip-regression
+
 # Loop #32: the full browser gate -- G1 Worker, G2 byte stream, G3 SSH
 # handshake against a real sshd, plus the Loop #30 crypto suites 4x2.
 node host/verify_loop32.mjs
@@ -706,4 +712,131 @@ an independent expectation, not between the client and itself. 3 MiB through the
 **Mutation count:** sixteen across three loops, all caught.
 
 Run the gate with `node host/verify_loop37.mjs`.
+
+### Loop #38: real host key algorithms (`ssh-ed25519` + RFC 8332 RSA)
+
+Thirty-seven loops of green, and the client could not talk to a stock
+OpenSSH server. Not a subtle failure -- the handshake died outright:
+
+```
+client: NoAgreement
+server: kex: host key algorithm: (no match)
+        Unable to negotiate ... no matching host key type found.
+        Their offer: ecdsa-sha2-nistp256,ecdsa-sha2-nistp384
+```
+
+The cause was a test fixture, not a protocol gap. `host/sshd_setup.mjs` pinned
+`HostKeyAlgorithms` to ECDSA, and `live_proposal()` reported only ECDSA, so the
+two always agreed. A server holding the ed25519 and RSA keys that a default
+install actually has offered nothing we would accept. The pin made an
+incomplete client look complete, and it took a *probe server with the pin
+removed* to see it.
+
+**The three names, which is the whole content of RFC 8332.** For RSA:
+
+| what | value |
+|---|---|
+| the key blob's type string | `ssh-rsa` |
+| the negotiated algorithm name | `rsa-sha2-512` |
+| the algorithm name inside the signature blob | `rsa-sha2-512` |
+
+All three are in play and the first two legitimately differ. Writing the check
+by analogy with `ssh-ed25519` -- "the signature name must equal the key type" --
+rejects every RFC 8332 signature, and rejects it as `TypeMismatch`, pointing at
+a name that looks perfectly fine. The real test is what
+`ssh-rsa.c:526-535` says: the two names must each resolve to a digest, and
+**the digests must be equal**. So `src/hostkey` grew
+`rsa_digest_of_sigtype` (`:328-338`) and `rsa_digest_of_keyname`
+(`:345-359`) as two separate functions rather than one -- collapsing "signature
+type" and "key type" into a single table is precisely the mistake RFC 8332
+exists to correct.
+
+`ssh-rsa` is deliberately **absent** from the proposal. It maps to SHA-1
+(`ssh-rsa.c:331`), which this project does not implement, and OpenSSH 8.8+
+disables it by default. Advertising a name we cannot verify would move the
+failure from negotiation time to verify time and blame an algorithm that was
+never selected. Loop #38's G4 asserts the good version of that: a SHA-1-only
+server is refused with `NoAgreement`, not accepted and then failed at the
+signature check.
+
+**What else changed.** `src/rsa` takes a digest parameter instead of being
+SHA-256-only, and `rsa_verify_pkcs1_prefix` now enforces `RSA_PKCS1_MIN_FF = 8`
+(`RFC 8017` §9.2) -- it had been more permissive than OpenSSL. The rule for
+left-padding a signature shorter than the modulus (`ssh-rsa.c:549-560`, because
+`sshbuf_put_bignum2` strips leading zeros) is transcribed explicitly rather
+than left to `RSA_verify`. `agrees_with_alg` and `describe` live in
+`src/hostkey`, not in the two drivers: RSA's answer differs structurally from
+ed25519's and ECDSA's, and two copies of that rule drift. `live_proposal()`
+now reports `ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384`
+-- and the client's order is the preference outright (`kex.c:887-890`
+`match_list(client, server)`, the rule RFC 4253 §7.1 states).
+
+**A framing detail that a spec reading would have gotten wrong.** The algorithm
+name in a signature blob is a length-prefixed `string`, not a NUL-terminated
+`cstring` -- OpenSSH's `sshbuf_get_cstring` reads a length-prefixed string and
+strips a trailing NUL, and both spellings accept the same bytes. This was not
+believed but measured: `host/hostkey_capture.py` interposes on a real
+handshake and takes the bytes at the point paramiko is about to verify them.
+
+```
+0000000b "ssh-ed25519"  00000040 <64 bytes>
+0000000c "rsa-sha2-512" 00000100 <256 bytes>
+```
+
+Three of the KAT's vectors are those captures -- bytes an actual sshd put on
+the wire over an exchange hash it actually computed. The rest are paramiko
+blobs, and every case expected to be `Accepted` is verified raw by
+`cryptography` 50.0 before being written out, so the KAT cannot agree that
+garbage is valid. Negative expectations are declared per *layer*
+(`agree` / `rsa` / `crypto`), because pinning the wrong layer's answer is
+worse than pinning none: it keeps passing while the layer that matters is
+broken.
+
+**Two bugs the tooling found, one of them a real implementation defect:**
+
+- `rsa_parse_pkcs1_prefix` counted the `0x00` separator as a padding byte, so a
+  signature with seven `0xFF` instead of eight was accepted. It was *more*
+  permissive than OpenSSL, in the direction that only shows up against a
+  deliberately malformed signature. The mutation "count the 0x00 separator as a
+  padding byte, which the fix removed" is in the harness and reproduces it.
+- The test harness's `waitForLog` read `proc.stdout.data` from a poll loop
+  without attaching a `data` handler. Without one the stream stays paused and
+  the buffer is never filled, so it timed out on a child that was printing
+  exactly the marker it was waiting for. Worth naming because it presented as
+  "the sshd did not start" and sent the investigation at the server.
+
+`hostkey_test`'s `t5[5]` was also red before this loop and for an unrelated
+reason: `ecdsa-sha2-nistp256` with a name and no fields expects
+`UnsupportedType`, but `sshkey.c:2031-2046` looks the name up in the impl table
+*before* it tries to parse, so `InvalidFormat` is correct. The test was wrong,
+not the code.
+
+**Removing the pin moved four earlier harnesses, and that is the point.**
+`verify_loop31/32/33/34` had inherited the ECDSA default silently: loop31
+asserts `hostkey_alg: ecdsa-sha2-nistp256` and hand-verifies the server's
+ECDSA signature over the exchange hash, and loops 32/33/34 carry transcript
+byte counts (`509/753`, `573/817`) that are the sizes of *that* handshake. With
+the pin gone they negotiated ed25519 and every constant moved. Each of them now
+passes `--hostkey-algs ecdsa-sha2-nistp256` explicitly, which restores exactly
+what they were written to test. Relaxing them to accept any algorithm would
+have been the tempting move and the wrong one: the constants would have had to
+be deleted rather than corrected, and loop31's hand-verified ECDSA signature is
+the whole subject of that loop.
+
+`verify_loop31`'s `ecdsa_test` baseline had been stale since Loop #34 (`6f8271b`
+changed both `cmd/ecdsa_test` and `src/ecdsa` to add the RFC 6979 user-key
+vectors, after the hash was frozen in Loop #31). It was re-baselined, with the
+cause named in a comment -- worth recording because it presented as an ECDSA
+regression and no ECDSA code had moved.
+
+**Harness:** `cmd/hostkey_test`, 39 vectors (8 key blobs, 16 signatures, 12
+PKCS#1 shapes, 3 real captures), green on all four backends in both modes with
+byte-identical output. `host/hostkey_mutations.py` carries fourteen
+mutations, all caught -- one of them can only be caught as a crash, since
+removing the longer-than-modulus check makes the left-pad offset negative and
+panics before any verdict is compared. `host/sshd_setup.mjs` grew
+`--hostkey-algs` and `--name` so several pinned instances can run at once; the
+pin is a test lever again, not a default.
+
+Run the gate with `node host/verify_loop38.mjs`.
 

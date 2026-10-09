@@ -94,6 +94,10 @@ pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int, UInt64) -> Unit
 
 pub fn rotr(Int, UInt64) -> UInt64
 
+pub fn rsa_digest_of_keyname(String) -> Int?
+
+pub fn rsa_digest_of_sigtype(String) -> Int?
+
 pub let s256_block_len : Int
 
 pub fn s256_ch(UInt, UInt, UInt) -> UInt
@@ -162,9 +166,13 @@ pub fn verify(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> Bool
 pub(all) enum HostKey {
   Ed25519Key(FixedArray[Byte])
   RsaKey(FixedArray[Byte], FixedArray[Byte])
+  EcdsaKey(Int, FixedArray[Byte])
 }
+pub fn HostKey::agrees_with_alg(Self, String) -> Bool
+pub fn HostKey::describe(Self) -> (String, Int)
 pub fn HostKey::from_blob(FixedArray[Byte]) -> ParseResult
 pub fn HostKey::verify(Self, FixedArray[Byte], FixedArray[Byte]) -> VerifyResult
+pub fn HostKey::verify_with_alg(Self, FixedArray[Byte], FixedArray[Byte], String) -> VerifyResult
 
 pub(all) enum KeyError {
   InvalidFormat
@@ -175,8 +183,11 @@ pub(all) enum KeyError {
   BigNumNegative
   BigNumTooLarge
   RsaModulusTooShort
+  KeyBitsMismatch
   SignatureInvalid
   InvalidArgument
+  EcCurveMismatch
+  KeyInvalidEcValue
   RsaVerifyUnavailable
 }
 

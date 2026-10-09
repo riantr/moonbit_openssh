@@ -639,8 +639,50 @@ fn is_switch(s : String) -> Bool {
 }
 
 ///|
+///|
+/// `--proposal`: print the algorithm set this client offers, then exit.
+///
+/// Deliberately connects to nothing.  Loop #38's whole point is that the
+/// proposal has to be complete *before* any server is involved, and a check
+/// that needs a server running cannot tell "we offered fewer algorithms" from
+/// "the server only had one".
+fn proposal_flag(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--proposal" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+fn run_proposal() -> Unit {
+  let p = @sshclient.live_proposal()
+  println("=== proposal (no connection attempted) ===")
+  println("kex_algs: " + p.kex_algs)
+  println("hostkey_algs: " + p.hostkey_algs)
+  println("enc_ctos: " + p.enc_ctos)
+  println("enc_stoc: " + p.enc_stoc)
+  println("mac_ctos: " + p.mac_ctos)
+  println("mac_stoc: " + p.mac_stoc)
+  println("comp_ctos: " + p.comp_ctos)
+  println("comp_stoc: " + p.comp_stoc)
+}
+
 fn main {
   let argv = @env.args()
+  // Loop #38: dump the proposal and exit, without opening a socket.
+  //
+  // The reason this exists: "the connection succeeded" does not show *which*
+  // algorithms were offered. For thirty-seven loops the test server pinned
+  // HostKeyAlgorithms to ECDSA, so an ECDSA-only proposal and a complete one
+  // were indistinguishable from the outside. Asserting on the proposal string
+  // is the only way a regression that silently narrows it can be caught.
+  if proposal_flag(argv) {
+    run_proposal()
+    return
+  }
   let port = find_port(argv)
   let (shell_cmd, def_cols, def_rows, _) = shell_mode(argv)
   if shell_cmd != "" {
@@ -680,6 +722,18 @@ fn main {
             println("user: " + r.user)
             println("method: " + r.method)
             println("key_type: " + r.key_type)
+            // Loop #38: which host key algorithm was negotiated, which key type
+            // it turned out to be, and how big that key is.  Printed here as
+            // well as on the session path because `--auth` returns before the
+            // session runs, and this is the shortest path from a handshake to
+            // an answer -- so it is the one a per-algorithm sweep uses.
+            //
+            // RFC 8332 下前两个字段**本来就不同**(协商 rsa-sha2-512,blob 写
+            // ssh-rsa),两个都印出来才看得出走的哪条路;只印一个会把「协商名」
+            // 和「密钥类型」混为一谈,而那正是 Loop #38 要修的那个混淆。
+            println("hostkey_alg: " + r.session.handshake.hostkey_alg)
+            println("hostkey_type: " + r.session.handshake.hostkey_type)
+            println("hostkey_bits: " + r.session.handshake.hostkey_bits.to_string())
             println("signed_blob: " + r.signed_blob_hex)
             println("sig_blob: " + r.sig_blob_hex)
             // 请求载荷也一并带出来:验证脚本要能**独立地**从它重建出
@@ -734,6 +788,12 @@ fn main {
             println("we_need: " + r.we_need.to_string())
             println("cipher_ctos: " + r.handshake.cipher_ctos)
             println("mac_ctos: " + r.handshake.mac_ctos)
+            // Loop #38: 协商出的主机密钥算法名,和密钥 blob 里的类型名。
+            // RFC 8332 下这两个**本来就不同**(协商 rsa-sha2-512,blob 写 ssh-rsa),
+            // 所以两个都印出来——只印一个就看不出到底走的是哪条路。
+            println("hostkey_alg: " + r.handshake.hostkey_alg)
+            println("hostkey_type: " + r.handshake.hostkey_type)
+            println("hostkey_bits: " + r.handshake.hostkey_bits.to_string())
             println("key_tag: " + r.key_tag)
             println("session_id_head: " + r.session_id_head)
             println(

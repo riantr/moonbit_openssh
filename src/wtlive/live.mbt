@@ -462,22 +462,12 @@ async fn wt_handshake_into(
     @hostkey.Parsed(k) => k
     _ => return Failed(HostkeyInvalid)
   }
-  let (ktype, kbits) = match key {
-    @hostkey.EcdsaKey(bits, _) =>
-      (
-        if bits == 256 {
-          "ecdsa-sha2-nistp256"
-        } else {
-          "ecdsa-sha2-nistp384"
-        },
-        bits,
-      )
-    _ => return Failed(HostkeyInvalid)
-  }
-  if ktype != neg.hostkey_alg {
+  // 规则在 src/hostkey(`agrees_with_alg`),和 src/sshclient 的握手用的是同一份。
+  if !@hostkey.HostKey::agrees_with_alg(key, neg.hostkey_alg) {
     return Failed(HostkeyInvalid)
   }
-  match @hostkey.HostKey::verify(key, h, sig_blob) {
+  let (ktype, kbits) = @hostkey.HostKey::describe(key)
+  match @hostkey.HostKey::verify_with_alg(key, h, sig_blob, neg.hostkey_alg) {
     @hostkey.Accepted => ()
     _ => return Failed(SignatureInvalid(h))
   }

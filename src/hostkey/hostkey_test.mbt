@@ -58,6 +58,7 @@ fn hk_err_name(e : KeyError) -> String {
     BigNumNegative => "BigNumNegative"
     BigNumTooLarge => "BigNumTooLarge"
     RsaModulusTooShort => "RsaModulusTooShort"
+    KeyBitsMismatch => "KeyBitsMismatch"
     SignatureInvalid => "SignatureInvalid"
     InvalidArgument => "InvalidArgument"
     EcCurveMismatch => "EcCurveMismatch"
@@ -346,8 +347,15 @@ test "t5_malformed_blob_matrix" {
       "000000207373682d656432353531392d636572742d763031406f70656e7373682e636f6d00000020ffb3b57c2f8bd3bb1fc072037fbf02d1a091c3a9ff80d23715ff5acd743c278d",
       "CertNotAllowed",
     ),
-    // ecdsa_name:仅名字无后续字段
-    ("0000001365636473612d736861322d6e69737470323536", "UnsupportedType"),
+    // ecdsa_name:仅名字无后续字段。
+    // 期望 InvalidFormat 而不是 UnsupportedType —— 这一条以前写错了,
+    // 而且它一直「红着」没人碰。sshkey.c:2031-2046 的顺序是:
+    //   impl = sshkey_impl_from_type(type) == NULL → KEY_TYPE_UNKNOWN
+    //   然后才进 impl->deserialize_public(读曲线名 + 点)
+    // `ecdsa-sha2-nistp256` 是一个**已知**类型,impl 查找会通过,所以缺字段
+    // 是格式错误。把它写成 UnsupportedType,等于断言「合法的 ECDSA 类型名
+    // 查不到实现」,和 C 的顺序正相反。
+    ("0000001365636473612d736861322d6e69737470323536", "InvalidFormat"),
     // sk_name:硬件代理名不支持
     (
       "0000001a736b2d7373682d65643235353139406f70656e7373682e636f6d00000020ffb3b57c2f8bd3bb1fc072037fbf02d1a091c3a9ff80d23715ff5acd743c278d",

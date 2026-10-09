@@ -1,16 +1,29 @@
 // host/sshd_setup.mjs -- start a private OpenSSH server for Loop #31
 //
 // The server is deliberately narrow so the handshake is deterministic:
-//   * HostKeyAlgorithms  forced to ECDSA, so the Loop #30 host key path is
-//     what actually runs against a real sshd rather than an RSA shortcut.
 //   * KexAlgorithms      forced to diffie-hellman-group14-sha256, the group the
 //     MoonBit client implements (RFC 3526 group 14).
 //   * Ciphers/MACs       fixed, so a mismatch is our bug and not negotiation.
 //
+// Loop #38 removed the `HostKeyAlgorithms` pin. It had been forcing the server
+// to ECDSA, which for thirty-seven loops made an ECDSA-only client look
+// sufficient -- against a server holding only ed25519/rsa keys, every name the
+// server offered was one we refused and the handshake died with `NoAgreement`.
+// A client that cannot talk to a default-configured host is not a client.
+//
+// The pin is available again, but as a *test* lever (`--hostkey-algs`) rather
+// than as a default: Loop #38 needs to force each algorithm in turn to prove
+// the dispatch works for all of them instead of only for whichever one the
+// server happens to prefer. `--name` gives each such instance its own config,
+// pid and log so they can run side by side.
+//
 // Keys and logs live under .loop31/ (gitignored). Nothing here touches the
 // machine's real OpenSSH install or the user's ~/.ssh.
 //
-// Usage: node host/sshd_setup.mjs [--port 22222] [--stop]
+// Usage:
+//   node host/sshd_setup.mjs [--port 22222] [--stop]
+//                           [--hostkey-algs a,b,c] [--name suffix]
+//   node host/sshd_setup.mjs --stop --name suffix
 
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, rmSync, openSync, readFileSync } from 'node:fs';
@@ -26,6 +39,17 @@ const DIR = join(ROOT, '.loop31', 'sshd');
 const argv = process.argv.slice(2);
 const PORT = Number(argv[argv.indexOf('--port') + 1]) || 22222;
 const STOP = argv.includes('--stop');
+const HOSTKEY_ALGS = (() => {
+  const i = argv.indexOf('--hostkey-algs');
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : '';
+})();
+// Every per-instance file is namespaced so several pinned servers can run at
+// once. The default name is empty, which keeps the original filenames.
+const NAME = (() => {
+  const i = argv.indexOf('--name');
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : '';
+})();
+const tagged = s => (NAME ? `${s}_${NAME}` : s);
 
 function sh(cmd, args) {
   return execFileSync(cmd, args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
@@ -47,7 +71,7 @@ function waitForPort(port, timeoutMs = 15000) {
 }
 
 if (STOP) {
-  const pidFile = join(DIR, 'sshd.pid');
+  const pidFile = join(DIR, tagged('sshd.pid'));
   if (existsSync(pidFile)) {
     const pid = Number(readFileSafe(pidFile));
     try { process.kill(pid); console.log(`stopped pid ${pid}`); } catch (e) { console.log(`no process ${pid}: ${e.message}`); }
@@ -64,17 +88,30 @@ function readFileSafe(p) {
 
 mkdirSync(DIR, { recursive: true });
 
-// ---- host keys: ECDSA P-256 + P-384 (what we want to verify) and RSA (spare)
+// ---- host keys: every algorithm the client actually supports.
+// Loop #38 stopped pinning `HostKeyAlgorithms`, so this list is what decides
+// the negotiation. A server that only had ECDSA keys made the ECDSA-only
+// proposal look sufficient for thirty-seven loops.
 const KEYS = [
   ['ecdsa', 256, 'hostkey_ecdsa_256'],
   ['ecdsa', 384, 'hostkey_ecdsa_384'],
+  ['ed25519', null, 'hostkey_ed25519'],
   ['rsa', 2048, 'hostkey_rsa_2048'],
 ];
 for (const [type, bits, name] of KEYS) {
   const priv = join(DIR, name);
   if (!existsSync(priv)) {
-    sh(KEYGEN_BIN, ['-t', type, '-b', String(bits), '-f', priv, '-N', '""', '-q',
-                    '-C', 'loop31 test host key']);
+    const args = ['-t', type, '-f', priv, '-q', '-C', 'loop31 test host key'];
+    // ssh-keygen 8.0p1 takes -b for RSA/ECDSA but not for ed25519, whose size
+    // is fixed at 256. Passing -b there is an error, not a warning.
+    if (bits !== null) args.splice(3, 0, '-b', String(bits));
+    // -N must be an actually-empty argument. The two-character string `""`
+    // is accepted as "no passphrase" by the old PEM formats and silently
+    // becomes the passphrase for the newer OpenSSH private key format --
+    // sshd then refuses the key with "incorrect passphrase supplied to
+    // decrypt private key", which only shows up at `sshd -t`, not at keygen.
+    args.splice(args.length, 0, '-N', '');
+    sh(KEYGEN_BIN, args);
     console.log(`generated ${name}`);
   }
 }
@@ -84,21 +121,30 @@ for (const [type, bits, name] of KEYS) {
 const authKeys = join(DIR, 'authorized_keys');
 if (!existsSync(authKeys)) writeFileSync(authKeys, '');
 
-const conf = join(DIR, 'sshd_config');
+const conf = join(DIR, tagged('sshd_config'));
 writeFileSync(conf, [
   `Port ${PORT}`,
   'AddressFamily any',
   'ListenAddress 127.0.0.1',
-  `HostKey ${join(DIR, 'hostkey_ecdsa_256')}`,
-  `HostKey ${join(DIR, 'hostkey_ecdsa_384')}`,
-  `PidFile ${join(DIR, 'sshd.pid')}`,
+  ...KEYS.map(([_type, _bits, name]) => `HostKey ${join(DIR, name)}`),
+  `PidFile ${join(DIR, tagged('sshd.pid'))}`,
   `LogLevel DEBUG3`,
   `Subsystem sftp internal-sftp`,
 
   // Deterministic negotiation surface. Note the option name: 8.0p1 predates
   // the PubkeyAcceptedAlgorithms rename and only knows the KeyTypes spelling.
   'KexAlgorithms diffie-hellman-group14-sha256',
-  'HostKeyAlgorithms ecdsa-sha2-nistp256,ecdsa-sha2-nistp384',
+  // Loop #38: no HostKeyAlgorithms pin by default. Pinning it to ECDSA is what
+  // hid the fact that the client could not talk to anything else -- the
+  // server said "no matching host key type found" and the client said
+  // "NoAgreement", which reads like a cipher problem and is not one.
+  // `--hostkey-algs` re-enables the pin for one instance at a time so each
+  // algorithm can be forced in turn and proved independently.
+  ...(HOSTKEY_ALGS ? [`HostKeyAlgorithms ${HOSTKEY_ALGS}`] : []),
+  //
+  // `PubkeyAcceptedKeyTypes` (the 8.0p1 spelling of the user key algorithm)
+  // stays pinned: that one really is a test-harness decision, not a
+  // client limitation -- the client signs with ECDSA P-256.
   'PubkeyAcceptedKeyTypes ecdsa-sha2-nistp256,ecdsa-sha2-nistp384',
   'Ciphers aes128-ctr,aes256-ctr',
   'MACs hmac-sha2-256',
@@ -134,7 +180,7 @@ try {
   process.exit(1);
 }
 
-const logPath = join(DIR, 'sshd.log');
+const logPath = join(DIR, tagged('sshd.log'));
 const logFd = openSync(logPath, 'a');
 const child = spawn(SSHD_BIN, ['-D', '-e', '-f', conf], {
   cwd: ROOT,
@@ -156,6 +202,7 @@ child.on('exit', (code, sig) => {
 try {
   await waitForPort(PORT);
   console.log(`sshd listening on 127.0.0.1:${PORT}`);
+  if (HOSTKEY_ALGS) console.log(`  hostkeys pinned to: ${HOSTKEY_ALGS}`);
   console.log(`  config: ${conf}`);
   console.log(`  log:    ${logPath}`);
   console.log(`  pid:    ${child.pid}`);

@@ -2,4 +2,5 @@
 import {
   "openssh/openssh_moonbit/src/bigint",
   "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/rsa",
 }

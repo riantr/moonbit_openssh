@@ -30,6 +30,13 @@ const KEEP_SSHD = argv.includes('--keep-sshd');
 
 // Loop #30 baselines. Loop #31 only adds a transport and a live driver, so
 // none of these may move; a change means a shared primitive regressed.
+//
+// `ecdsa_test` was re-baselined in Loop #38. The old value was frozen in
+// Loop #31 (`aaa3d64`), but `cmd/ecdsa_test` and `src/ecdsa` were both changed
+// by Loop #34 (`6f8271b`) to carry the RFC 6979 user-key vectors -- so the
+// suite had legitimately grown and this hash had been stale since then. It is
+// worth naming because the failure it caused looked like a crypto regression
+// and was not one: nothing about ECDSA moved in Loop #38.
 const BASELINE = {
   u128_test: '1bbbc364fb3d5e51',
   fastpow_test: '9707cf997769eddb',
@@ -37,7 +44,7 @@ const BASELINE = {
   kexdh_test: 'afbca72be34dfba2',
   rsa_test: '7382ee95fe7d6677',
   rsa2048_test: 'dffb73d5452ae5e6',
-  ecdsa_test: '0e3ec3f7e954bd98',
+  ecdsa_test: 'd78cd820e9ea2317',
 };
 
 const TARGETS = ['native', 'js', 'wasm', 'wasm-gc'];
@@ -111,7 +118,18 @@ function check(name, ok, detail = '') {
 // ---------------------------------------------------------------- sshd up
 console.log('=== starting private sshd ===');
 run(`node host/sshd_setup.mjs --stop`); // clear any leftover from a prior run
-const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(PORT)], {
+// Loop #38: pin this server's host key algorithm to ECDSA again, explicitly.
+//
+// This harness asserts `hostkey_alg: ecdsa-sha2-nistp256` and then verifies
+// the server's ECDSA signature over the exchange hash by hand -- ECDSA is the
+// *subject* of Loop #31, not incidental to it. Loop #38 removed the pin that
+// used to be baked into sshd_setup.mjs, which was right: the pin was why an
+// ECDSA-only client looked complete. But every harness written before Loop #38
+// inherited that pin silently, so they have to ask for it themselves now.
+// Loop #38's own harness deliberately does not.
+const PIN = ['host/sshd_setup.mjs', '--port', String(PORT),
+  '--hostkey-algs', 'ecdsa-sha2-nistp256'];
+const sshd = spawn('node', PIN, {
   cwd: ROOT,
   stdio: ['ignore', 'pipe', 'pipe'],
 });

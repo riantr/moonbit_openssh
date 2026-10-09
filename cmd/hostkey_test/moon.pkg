@@ -1,0 +1,12 @@
+///| cmd/hostkey_test -- Loop #38 RFC 8332 主机密钥算法 KAT
+///|
+///| Depends on `src/hostkey` and `src/rsa` only.  Neither reaches `src/tcp`, so
+///| the whole KAT runs on all four backends in both modes -- same reason
+///| `src/userauth` and `src/channel` were split out for Loops #34 and #35.
+
+import {
+  "openssh/openssh_moonbit/src/hostkey",
+  "openssh/openssh_moonbit/src/rsa",
+}
+
+pkgtype(kind: "executable")

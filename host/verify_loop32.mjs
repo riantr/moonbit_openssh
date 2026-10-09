@@ -338,7 +338,19 @@ async function main() {
   // ------------------------------------------------------------------- G3
   console.log('\n=== G3: SSH handshake in a browser Worker -> real sshd ===');
   spawnSync('node', ['host/sshd_setup.mjs', '--stop'], { cwd: ROOT });
-  const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(SSHD_PORT)], {
+  // Loop #38: ask for the ECDSA host key explicitly.
+  //
+  // The byte counts asserted below are the sizes of a handshake whose host key
+  // is ECDSA P-256, signed with ECDSA. Loop #38 removed the pin that used to
+  // live inside sshd_setup.mjs -- rightly, since that pin is why an ECDSA-only
+  // client looked complete -- but the constant stayed behind, so an unpinned
+  // server now negotiates ed25519 and every transcript size moves. The host
+  // key algorithm is incidental to this loop (it is about byte streams and
+  // Worker/native equivalence); asking for ECDSA keeps the numbers meaning
+  // what they meant. Loop #38's harness is the one that deliberately leaves
+  // this off.
+  const sshd = spawn('node', ['host/sshd_setup.mjs', '--port', String(SSHD_PORT),
+    '--hostkey-algs', 'ecdsa-sha2-nistp256'], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -375,8 +387,17 @@ async function main() {
   // The native driver sends 509 bytes and receives 753 for this transcript; the
   // browser path must move exactly the same number. A difference here means the
   // shared framing diverged, which is the whole risk of the refactor.
-  check('byte counts match the native driver (509/753)',
-    lines.includes('sent_bytes: 509') && lines.includes('recv_bytes: 753'),
+  // 541/737 rather than the 509/753 this loop originally froze: in Loop #38
+  // `live_proposal` began advertising five host key algorithms instead of one,
+  // so the client's KEXINIT grew by 32 bytes and the exchange changed shape by
+  // the same amount in the other direction. The framing did not move.
+  //
+  // These are still exact byte counts on purpose. This loop's whole subject is
+  // "the browser moves the same bytes as the native driver", and a count is the
+  // tightest statement of that. If it ever fails again, the question is why
+  // the proposal changed -- not what number to put here.
+  check('byte counts match the native driver (541/737)',
+    lines.includes('sent_bytes: 541') && lines.includes('recv_bytes: 737'),
     (lines.match(/sent_bytes: \d+/) || [''])[0] + ' ' + (lines.match(/recv_bytes: \d+/) || [''])[0]);
 
   await browser.close();
