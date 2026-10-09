@@ -1,0 +1,28 @@
+///| SFTP protocol version 3 (draft-ietf-secsh-filexfer-01.txt)
+///
+/// A separate package for the same reason `src/channel` is one: this is pure
+/// byte assembly with no socket and no transport, so `cmd/sftp_test` can drive
+/// whole request/response exchanges against vectors on all four backends
+/// instead of only the one that has a TCP stack.
+///
+/// The framing is *not* SSH packet framing. There is no padding, no
+/// padding-length byte and no message-type byte in the outer header:
+///
+///     uint32   length      -- of everything after this field
+///     byte     type
+///     ...      type-specific fields
+///
+/// transcribed from `send_msg` / `get_msg_extended` (sftp-client.c:151-210).
+/// Two details there are load-bearing and easy to get wrong:
+///
+///   * `put_u32(mlen, sshbuf_len(m))` -- the length does **not** count itself.
+///   * both sides use `atomicio6`, which loops until it has read exactly the
+///     requested count. A packet is therefore *not* required to fit inside one
+///     CHANNEL_DATA, and one CHANNEL_DATA may carry several packets. The
+///     framing is a byte stream layered on a byte stream, and `SftpInbuf` in
+///     stream.mbt is where that gets reassembled.
+import {
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "library")

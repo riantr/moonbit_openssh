@@ -1,0 +1,42 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/cmd/sftp_test"
+
+// Values
+pub const CAPTURE_EXTENSIONS : Int = 6
+
+pub const CAPTURE_FIXTURE : String = "E:/src/moon/openssh_moonbit/.loop39/sftp"
+
+pub const CAPTURE_VERSION : Int = 3
+
+pub let cases : Array[Case]
+
+// Errors
+
+// Types and methods
+pub(all) struct Case {
+  name : String
+  ops : Array[Op]
+  chunks : Array[String]
+  requests : Array[String]
+  results : Array[String]
+  expect_done : Bool
+  expect_failed : Bool
+  note : String
+}
+
+pub(all) struct InbufCase {
+  name : String
+  feeds : Array[String]
+  expect_packets : Array[String]
+  expect_pending : Int
+  expect_failed : Bool
+}
+
+pub(all) struct Op {
+  kind : Int
+  path : String
+}
+
+// Type aliases
+
+// Traits

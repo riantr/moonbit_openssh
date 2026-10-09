@@ -1,0 +1,309 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/sftp"
+
+// Values
+pub const ATTR_ACMODTIME : Int = 0x00000008
+
+pub const ATTR_EXTENDED : Int = 0x80000000
+
+pub const ATTR_PERMISSIONS : Int = 0x00000004
+
+pub const ATTR_SIZE : Int = 0x00000001
+
+pub const ATTR_UIDGID : Int = 0x00000002
+
+pub const FXF_APPEND : Int = 0x00000004
+
+pub const FXF_CREAT : Int = 0x00000008
+
+pub const FXF_EXCL : Int = 0x00000020
+
+pub const FXF_READ : Int = 0x00000001
+
+pub const FXF_TRUNC : Int = 0x00000010
+
+pub const FXF_WRITE : Int = 0x00000002
+
+pub const FXP_ATTRS : Int = 105
+
+pub const FXP_CLOSE : Int = 4
+
+pub const FXP_DATA : Int = 103
+
+pub const FXP_FSETSTAT : Int = 10
+
+pub const FXP_FSTAT : Int = 8
+
+pub const FXP_HANDLE : Int = 102
+
+pub const FXP_INIT : Int = 1
+
+pub const FXP_LSTAT : Int = 7
+
+pub const FXP_MKDIR : Int = 14
+
+pub const FXP_NAME : Int = 104
+
+pub const FXP_OPEN : Int = 3
+
+pub const FXP_OPENDIR : Int = 11
+
+pub const FXP_READ : Int = 5
+
+pub const FXP_READDIR : Int = 12
+
+pub const FXP_READLINK : Int = 19
+
+pub const FXP_REALPATH : Int = 16
+
+pub const FXP_REMOVE : Int = 13
+
+pub const FXP_RENAME : Int = 18
+
+pub const FXP_RMDIR : Int = 15
+
+pub const FXP_SETSTAT : Int = 9
+
+pub const FXP_STAT : Int = 17
+
+pub const FXP_STATUS : Int = 101
+
+pub const FXP_SYMLINK : Int = 20
+
+pub const FXP_VERSION : Int = 2
+
+pub const FXP_WRITE : Int = 6
+
+pub const FX_BAD_MESSAGE : Int = 5
+
+pub const FX_CONNECTION_LOST : Int = 7
+
+pub const FX_EOF : Int = 1
+
+pub const FX_FAILURE : Int = 4
+
+pub const FX_MAX : Int = 8
+
+pub const FX_NO_CONNECTION : Int = 6
+
+pub const FX_NO_SUCH_FILE : Int = 2
+
+pub const FX_OK : Int = 0
+
+pub const FX_OP_UNSUPPORTED : Int = 8
+
+pub const FX_PERMISSION_DENIED : Int = 3
+
+pub const SFTP_MAX_MSG_LENGTH : Int = 262144
+
+pub const SFTP_MAX_READ_LENGTH : Int = 261120
+
+pub const SFTP_VERSION : Int = 3
+
+pub fn reply_id(SftpReply) -> Int
+
+pub fn reply_kind(SftpReply) -> String
+
+pub fn sftp_ascii(String) -> FixedArray[Byte]
+
+pub fn sftp_cat(Array[FixedArray[Byte]]) -> FixedArray[Byte]
+
+pub fn sftp_close(Int, FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn sftp_error_name(SftpError) -> String
+
+pub fn sftp_frame(FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn sftp_init(Int) -> FixedArray[Byte]
+
+pub fn sftp_open(Int, String, Int, SftpAttrs) -> FixedArray[Byte]
+
+pub fn sftp_opendir(Int, String) -> FixedArray[Byte]
+
+pub fn sftp_parse_attrs(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_parse_data(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_parse_handle(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_parse_name(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_parse_reply(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_parse_status(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_parse_version(FixedArray[Byte]) -> SftpParse
+
+pub fn sftp_read(Int, FixedArray[Byte], UInt64, Int) -> FixedArray[Byte]
+
+pub fn sftp_read_length(Int) -> Int
+
+pub fn sftp_readdir(Int, FixedArray[Byte]) -> FixedArray[Byte]
+
+pub fn sftp_realpath(Int, String) -> FixedArray[Byte]
+
+pub fn sftp_reply_kind(SftpParse) -> String
+
+pub fn sftp_stat(Int, String) -> FixedArray[Byte]
+
+pub fn sftp_u64_to_int(UInt64) -> Int
+
+// Errors
+
+// Types and methods
+pub(all) struct SftpAttrs {
+  mut size : UInt64?
+  mut uid : Int?
+  mut gid : Int?
+  mut permissions : Int?
+  mut atime : Int?
+  mut mtime : Int?
+  mut ext_count : Int
+}
+pub fn SftpAttrs::encode(Self) -> FixedArray[Byte]
+pub fn SftpAttrs::none() -> Self
+
+pub(all) struct SftpAttrsReply {
+  id : Int
+  attrs : SftpAttrs
+}
+
+pub(all) struct SftpCursor {
+  buf : FixedArray[Byte]
+  mut off : Int
+  mut err : SftpError?
+}
+pub fn SftpCursor::attrs(Self) -> SftpAttrs
+pub fn SftpCursor::byte_bool(Self) -> Bool
+pub fn SftpCursor::expect_end(Self) -> Unit
+pub fn SftpCursor::new(FixedArray[Byte]) -> Self
+pub fn SftpCursor::remaining(Self) -> Int
+pub fn SftpCursor::str(Self) -> String
+pub fn SftpCursor::string(Self) -> FixedArray[Byte]
+pub fn SftpCursor::u32(Self) -> Int
+pub fn SftpCursor::u64(Self) -> UInt64
+pub fn SftpCursor::u8(Self) -> Int
+
+pub(all) struct SftpDataReply {
+  id : Int
+  data : FixedArray[Byte]
+}
+
+pub(all) enum SftpError {
+  Truncated
+  BadLength
+  UnknownType(Int)
+  TrailingData
+  Unexpected(Int)
+}
+
+pub(all) struct SftpHandleReply {
+  id : Int
+  handle : FixedArray[Byte]
+}
+
+pub(all) struct SftpInbuf {
+  mut buf : Array[Byte]
+  mut want : Int
+  mut failed : SftpError?
+}
+pub fn SftpInbuf::drain(Self) -> Array[FixedArray[Byte]]
+pub fn SftpInbuf::failure(Self) -> SftpError?
+pub fn SftpInbuf::feed(Self, FixedArray[Byte]) -> Unit
+pub fn SftpInbuf::new() -> Self
+pub fn SftpInbuf::pending(Self) -> Int
+pub fn SftpInbuf::take(Self) -> FixedArray[Byte]?
+
+pub(all) struct SftpNameEntry {
+  filename : FixedArray[Byte]
+  longname : FixedArray[Byte]
+  attrs : SftpAttrs
+}
+
+pub(all) struct SftpNameReply {
+  id : Int
+  names : Array[SftpNameEntry]
+}
+
+pub(all) enum SftpOp {
+  Realpath(String)
+  Stat(String)
+  ListDir(String)
+  ReadFile(String)
+}
+
+pub(all) enum SftpOpResult {
+  RealpathOk(String)
+  Attrs(SftpAttrs)
+  Listing(Array[(String, Int, Bool)])
+  Contents(FixedArray[Byte])
+  Failed(Int, String)
+}
+
+pub(all) enum SftpParse {
+  Parsed(SftpReply)
+  Rejected(SftpError)
+}
+
+pub(all) enum SftpReply {
+  Version(SftpVersionReply)
+  Status(SftpStatus)
+  Handle(SftpHandleReply)
+  Data(SftpDataReply)
+  Attrs(SftpAttrsReply)
+  Name(SftpNameReply)
+}
+
+pub(all) struct SftpSession {
+  mut inbuf : SftpInbuf
+  mut outq : Array[FixedArray[Byte]]
+  mut ops : Array[SftpOp]
+  mut results : Array[SftpOpResult]
+  mut op_index : Int
+  mut next_id : Int
+  mut step : Step
+  mut phase : Int
+  mut handle : FixedArray[Byte]
+  mut offset : UInt64
+  mut chunks : Array[FixedArray[Byte]]
+  mut listing : Array[(String, Int, Bool)]
+  mut listing_failed : SftpOpResult?
+  mut contents : SftpOpResult?
+  mut version : Int
+  mut extensions : Int
+  mut requests_sent : Int
+  mut replies_recv : Int
+  mut sftp_bytes_in : Int
+  mut failure : String?
+}
+pub fn SftpSession::bytes_in_count(Self) -> Int
+pub fn SftpSession::done(Self) -> Bool
+pub fn SftpSession::extensions_of(Self) -> Int
+pub fn SftpSession::failed(Self) -> Bool
+pub fn SftpSession::failure_reason(Self) -> String
+pub fn SftpSession::feed(Self, FixedArray[Byte]) -> Unit
+pub fn SftpSession::new(Array[SftpOp]) -> Self
+pub fn SftpSession::pump(Self) -> Unit
+pub fn SftpSession::replies_recv_count(Self) -> Int
+pub fn SftpSession::requests_sent_count(Self) -> Int
+pub fn SftpSession::results_of(Self) -> Array[SftpOpResult]
+pub fn SftpSession::take_out(Self) -> Array[FixedArray[Byte]]
+pub fn SftpSession::version_of(Self) -> Int
+
+pub(all) struct SftpStatus {
+  id : Int
+  code : Int
+  message : FixedArray[Byte]
+  lang : FixedArray[Byte]
+}
+
+pub(all) struct SftpVersionReply {
+  version : Int
+  extensions : Int
+}
+
+type Step
+
+// Type aliases
+
+// Traits

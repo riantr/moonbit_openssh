@@ -145,9 +145,122 @@ Three ways this repo got it wrong, all found by review rather than by a test:
 - A negative wire test whose *builder* used a different blob layout than the
   decoder under test: it kept passing, for the wrong reason.
 
+### Loop #39: SFTP over a subsystem channel
+
+`exec`, `pty-req`/`shell` and `window-change` all worked. `subsystem` -- the
+third channel request type, and the one most deployments actually use -- did
+not exist. The client could run a command, open a shell, and could not
+transfer a file.
+
+**The architectural decision, which is the reason this loop restructured
+itself once.** The first draft put ~400 lines of SFTP in
+`src/sshclient/sftp.mbt`. Adding the browser transport then meant writing the
+same 400 lines again in `src/wtlive`, and a second copy of "when does a
+READDIR end" is a second answer waiting to drift. So the protocol moved into
+`src/sftp` as a transport-free state machine (`SftpSession`) and both drivers
+became thin: ~120 lines each, and the only thing they are allowed to disagree
+about is which function moves bytes.
+
+The contract is four lines:
+
+```moonbit
+let s = SftpSession::new(ops)   // queues INIT
+//   out = s.take_out()          // framed requests, for the channel
+//   s.pump()                    // drain + advance
+//   s.feed(channel_data_payload)// each inbound CHANNEL_DATA
+// until s.done() or s.failed()
+```
+
+`pump` is called outside `feed` as well, on purpose: a reply may already be
+sitting in the reassembly buffer while the socket has nothing left, and a
+client that only pumps after a read ends up waiting forever for a packet it
+already has.
+
+**`subsystem` is want_reply=TRUE, and that is the whole point.**
+`clientloop.c:2799-2811` sends it and then `client_expect_confirm(CONFIRM_CLOSE)`.
+`env` is want_reply=FALSE and nothing ever answers it (RFC 4254 §6.4); the two
+cannot share a rule. Waiting is what makes `ChanError::SubsystemRejected` /
+`ExecError::SubsystemRejected` possible at all -- and it is deliberately *not*
+folded into `ExecRejected`, because "there is no such subsystem" (usually a
+typo: `sftp` vs `sftp-server`) and "the server refused this command" are
+different diagnoses. `session.c:1945-1948` is the C that tells them apart.
+Without the wait, a typo in `sshd_config` presents as "SFTP hangs after
+connecting", which is the single most common SFTP deployment mistake.
+
+**Two facts that only exist on the wire, and one of them nearly bit us.**
+
+1. The reply numbers are `101 STATUS / 102 HANDLE / 103 DATA / 104 NAME /
+   105 ATTRS`. The draft lists the *same five numbers sorted by name* --
+   `101 DATA / 102 HANDLE / 103 NAME / 104 ATTRS / 105 STATUS` -- which reads
+   naturally enough to be what an implementer writes from memory. A parser
+   built on that ordering accepts every reply it is fed: a NAME reply parses
+   as ATTRS, an ATTRS reply parses as NAME with a count of its first flag
+   word. `host/sftp_capture.py` is what put the right order in the source, and
+   `host/sftp_mutations.py` keeps it there by swapping the constants and
+   requiring the KAT to go red.
+2. `STATUS` carries a language tag after the message, so `expect_end` before
+   reading it turns *every* STATUS into a parse failure -- including the
+   `FX_EOF` that ends a read and the `SSH2_FX_NO_SUCH_FILE` a negative test
+   expects. Same shape as VERSION's extension pairs: a parser that wants
+   end-of-packet after the version number dies on the first byte a real
+   server sends (six pairs on OpenSSH 8.0p1, more on newer ones -- so the
+   count is *reported*, never asserted as a constant).
+
+**End-of-read has two spellings.** A real server sends `STATUS(FX_EOF)`;
+some send a zero-length `DATA`. Both are handled, and neither is confused with
+a short chunk: a short chunk is NOT EOF, because treating one as EOF
+truncates every file larger than a single read. The 200 KB fixture in the
+gate exists for exactly this -- it takes many READs, many CHANNEL_DATA
+packets, and at least one WINDOW_ADJUST back from the server.
+
+**READDIR ends on `STATUS(FX_EOF)`, not on a short name list**, and the READ
+offset accumulates over the whole file. Resetting it each round re-reads the
+head of the file every time while the total length still looks plausible --
+the worst kind of bug to find.
+
+**The negative case is a status, not a transport error.**
+`SSH2_FX_NO_SUCH_FILE` is a *successful* SFTP exchange: the request went out,
+the server answered, the answer was code 2. `SftpOpResult::Failed(code, msg)`
+carries it, so a routine negative test does not look like a broken client.
+
+**Sizes are bounded before anything is sized from them.**
+`SFTP_MAX_MSG_LENGTH` (256 KiB, `sftp-common.h:29`) is checked on the length
+prefix itself, in the same order `sftp-client.c:195` does. A framing refusal
+ends the session rather than only stopping packets from being handed out --
+otherwise the driver waits for a reply that is never coming, and the symptom
+is a hang rather than a refusal.
+
+**The KAT has 14 session cases and 7 buffer cases.** All inbound bytes are a
+real `internal-sftp` capture, with exactly one rewrite: the 4-byte request
+id, because ids are client-chosen and pinning our numbering to paramiko's
+would test the wrong thing. Two cases (`two_packets_one_feed`,
+`second_packet_only_after_another_feed`) live at the `SftpInbuf` level rather
+than the session level, because with one outstanding request there is no
+causally possible session in which two replies arrive together -- writing it
+as a session case would have demanded that the client ignore a reply it never
+asked for.
+
+19 mutations, all caught. `host/verify_loop39.mjs`: KAT on 4 backends x 2
+modes byte-identical, the capture replayed, the mutations, a real
+`internal-sftp` (realpath / listdir / read 11 B / read 200 KB / missing file),
+the refused subsystem, and the browser Worker.
+
+Run the gate with `node host/verify_loop39.mjs`.
+
+Note: the Worker section skips with a message if Playwright's Chromium was
+never downloaded (`npx playwright install chromium`). It is a *skip*, printed
+in the summary -- silently reporting the browser path as verified is the one
+outcome worse than a failure.
+
 ### Build commands
 
 ```bash
+# Loop #39: SFTP over a subsystem channel. Starts its own sshd (18781),
+# replays a captured internal-sftp through cmd/sftp_test on 4 backends x 2
+# modes, runs the 19 mutations, then the same script natively and in a Worker
+# against the real server
+node host/verify_loop39.mjs
+
 # Loop #38: host key algorithms (ssh-ed25519 + RFC 8332 rsa-sha2-*).
 # Starts its own sshd with NO HostKeyAlgorithms pin, plus one pinned instance
 # per algorithm so each dispatch is proved separately.
@@ -712,6 +825,28 @@ an independent expectation, not between the client and itself. 3 MiB through the
 **Mutation count:** sixteen across three loops, all caught.
 
 Run the gate with `node host/verify_loop37.mjs`.
+
+**Two lessons from Loop #39, both of which cost a red regression run.**
+
+Adding a constructor to `ChanError` (`SubsystemRejected`) turned loop35, loop36
+and loop37 red at once, with no change to any of their code. MoonBit treats a
+non-exhaustive `match` on an enum as an error, which is the *right* default,
+but the blast radius is every `describe(e : ChanError)`-style helper across
+`cmd/` and `src/` -- five files, not one. When a loop adds a variant to a
+shared error enum, grep for the enum name and fix every match in the same
+commit; the regression suite is what found it, and it found it all three times
+in a row, which is exactly as noisy as it is useful.
+
+The second is quieter. `host/channel_mutations.py` anchors each mutation on a
+literal source snippet, and this loop's edit to the 0x64 branch turned
+`      if st.interactive {` into `  } else if st.interactive {` -- so one
+mutation became a silent `SKIP` and loop35/36/37 all reported
+`all mutations turn the KAT red` as failed while the KAT itself was perfectly
+green. A mutation harness treats "the anchor is not where I left it" as a
+failure, not a warning, and that is the right default: an anchor that moved
+means either the code changed (so the mutation no longer describes anything)
+or the harness went stale (so it is not testing what it claims). Either way
+there is no reading of it under which it should be quietly skipped.
 
 ### Loop #38: real host key algorithms (`ssh-ed25519` + RFC 8332 RSA)
 

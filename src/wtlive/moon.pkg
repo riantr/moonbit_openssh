@@ -12,6 +12,7 @@ import {
   "openssh/openssh_moonbit/src/ecdsa",
   "openssh/openssh_moonbit/src/userauth",
   "openssh/openssh_moonbit/src/channel",
+  "openssh/openssh_moonbit/src/sftp",
 }
 
 ///| Loop #32: the SSH transport handshake over a browser transport.
@@ -29,5 +30,5 @@ import {
 ///: platform is not verified at all.
 
 options(
-  targets: { "live.mbt": [ "js" ] },
+  targets: { "live.mbt": [ "js" ], "sftp.mbt": [ "js" ] },
 )

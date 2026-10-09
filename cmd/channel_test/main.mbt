@@ -173,6 +173,7 @@ fn describe(e : @channel.ChanError) -> String {
   match e {
     OpenFailed(r, d) => "OpenFailed(" + r.to_string() + ", " + d + ")"
     ExecRejected => "ExecRejected"
+    SubsystemRejected => "SubsystemRejected"
     Malformed(m) => "Malformed(" + m + ")"
   }
 }

@@ -14,6 +14,7 @@ import {
   "openssh/openssh_moonbit/src/hostkey",
   "openssh/openssh_moonbit/src/userauth",
   "openssh/openssh_moonbit/src/channel",
+  "openssh/openssh_moonbit/src/sftp",
 }
 
 pkgtype(kind: "library")

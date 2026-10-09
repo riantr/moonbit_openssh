@@ -1,0 +1,11 @@
+///| cmd/sftp_test -- Loop #39 SFTP v3 known-answer test
+///|
+///| Depends on `src/sftp` only.  That package reaches neither `src/tcp` nor
+///| `src/wt`, so this runs on all four backends in both modes -- the same
+///| reason `src/userauth` was split out for Loop #34 and `src/channel` for
+///| Loop #35.
+import {
+  "openssh/openssh_moonbit/src/sftp",
+}
+
+pkgtype(kind: "executable")

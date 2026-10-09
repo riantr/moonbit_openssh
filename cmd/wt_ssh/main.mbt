@@ -131,6 +131,19 @@ fn auth_error_name(e : @wtlive.WtAuthError) -> String {
 ///|
 /// 原始字节打进标记块,和 cmd/ssh_live 同一套标记,好让两条路径的输出能直接
 /// 逐行对比。验证脚本只读上面那几行数字。
+///
+/// 前 128 字节的十六进制。截断长度与 `cmd/ssh_live` 的 `dump_prefix` 一致,
+/// 否则两条路径的输出会在长路径或长文件上分叉,而分叉的是**断言**本身。
+fn wt_dump_prefix(b : FixedArray[Byte]) -> String {
+  let n = if b.length() > 128 { 128 } else { b.length() }
+  let sb = StringBuilder()
+  for i = 0; i < n; i = i + 1 {
+    let one : FixedArray[Byte] = FixedArray::from_array([b[i]])
+    sb.write_string(@ecdsa.bytes_to_hex(one))
+  }
+  sb.to_string()
+}
+
 fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   if b.length() == 0 {
     return
@@ -295,6 +308,7 @@ fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
     Malformed(m) => "Malformed(" + m + ")"
     OpenFailed(r, d) => "OpenFailed(" + r.to_string() + ", " + d + ")"
     ExecRejected => "ExecRejected"
+    SubsystemRejected => "SubsystemRejected"
     SendFailed => "SendFailed"
     BadPacket(w) => "BadPacket(" + w + ")"
     Closed => "Closed"
@@ -304,6 +318,140 @@ fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
 }
 
 ///|
+///
+/// Loop #39:SFTP / subsystem,跑在浏览器 Worker 里。
+///
+/// 输出字段与 `cmd/ssh_live` 的 SFTP 模式**逐字相同**,验证脚本因此可以直接把
+/// 两条输出按行对比——这才是「协议只有一份实现」的可检验形式:如果这里另写一套
+/// 打印逻辑,两份输出就会在措辞上分叉,而分叉的恰好是**断言**本身。
+async fn wt_sftp_run(url : String) -> Unit {
+  let user = cfg("user")
+  let uname = if user == "" { "hp" } else { user }
+  let dir = cfg("sftp")
+  let read_path = cfg("sftp_read")
+  let missing = cfg("sftp_missing") == "1" || cfg("sftp_missing") == "true"
+  let subsystem = cfg("subsystem")
+  let subsys = if subsystem == "" { "sftp" } else { subsystem }
+  println("=== Loop #39 SFTP vs real sshd ===")
+  println("user: " + uname)
+  println("subsystem: " + subsys)
+  let ops : Array[@sftp.SftpOp] = []
+  ops.push(@sftp.SftpOp::Realpath("."))
+  if dir != "" {
+    ops.push(@sftp.SftpOp::ListDir(dir))
+  }
+  if read_path != "" {
+    ops.push(@sftp.SftpOp::ReadFile(read_path))
+  }
+  if missing {
+    ops.push(@sftp.SftpOp::Stat(
+      ".loop39/definitely-not-here-" + "0f3a91c7",
+    ))
+  }
+  let conn = @wt.WtConn::connect(url) catch {
+    _ => {
+      println("result: FAILED")
+      println("error: ConnectFailed")
+      wt_finish(false, "connect failed")
+      return
+    }
+  }
+  println("transport: connected")
+  let outcome = @wtlive.wt_live_sftp(
+    conn,
+    fixed_x(),
+    uname,
+    test_auth_key(),
+    ops,
+  )
+  match outcome {
+    @wtlive.WtSftpOutcome::Done(r) => {
+      println("result: SFTP_DONE")
+      println("version: " + r.version.to_string())
+      println("extensions: " + r.extensions.to_string())
+      println("requests_sent: " + r.requests_sent.to_string())
+      println("replies_recv: " + r.replies_recv.to_string())
+      println("sftp_bytes_in: " + r.sftp_bytes_in.to_string())
+      println("total_sent_bytes: " + r.total_sent_bytes.to_string())
+      println("total_recv_bytes: " + r.total_recv_bytes.to_string())
+      for i = 0; i < r.ops.length(); i = i + 1 {
+        wt_print_sftp_op(i, r.ops[i])
+      }
+    }
+    @wtlive.WtSftpOutcome::Failed(e) => {
+      println("result: SFTP_FAILED")
+      println("error: " + wt_sftp_error_name(e))
+    }
+  }
+  conn.close()
+  wt_finish(true, "done")
+}
+
+fn wt_print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
+  let tag = "op" + i.to_string()
+  match op {
+    @sftp.SftpOpResult::RealpathOk(p) => {
+      println(tag + ": REALPATH")
+      println(tag + "_path: " + @sftp.sftp_ascii(p).length().to_string())
+      println(tag + "_hex: " + wt_dump_prefix(@sftp.sftp_ascii(p)))
+    }
+    @sftp.SftpOpResult::Attrs(a) => {
+      println(tag + ": ATTRS")
+      println(tag + "_size: " + wt_opt_u64(a.size))
+      println(tag + "_uid: " + wt_opt_int(a.uid))
+      println(tag + "_gid: " + wt_opt_int(a.gid))
+      println(tag + "_perm: " + wt_opt_int(a.permissions))
+    }
+    @sftp.SftpOpResult::Listing(entries) => {
+      println(tag + ": LISTING")
+      println(tag + "_count: " + entries.length().to_string())
+      for j = 0; j < entries.length(); j = j + 1 {
+        println(
+          tag + "_entry" + j.to_string() + ": " +
+          wt_dump_prefix(@sftp.sftp_ascii(entries[j].0)) + " " +
+          entries[j].1.to_string() + " " +
+          (if entries[j].2 { "dir" } else { "file" }),
+        )
+      }
+    }
+    @sftp.SftpOpResult::Contents(b) => {
+      println(tag + ": CONTENTS")
+      println(tag + "_len: " + b.length().to_string())
+      println(tag + "_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(b)))
+      println(tag + "_hex: " + wt_dump_prefix(b))
+    }
+    @sftp.SftpOpResult::Failed(code, msg) => {
+      println(tag + ": FAILED")
+      println(tag + "_code: " + code.to_string())
+      println(tag + "_msg_hex: " + wt_dump_prefix(@sftp.sftp_ascii(msg)))
+    }
+  }
+}
+
+fn wt_opt_int(v : Int?) -> String {
+  match v {
+    None => "-"
+    Some(x) => x.to_string()
+  }
+}
+
+fn wt_opt_u64(v : UInt64?) -> String {
+  match v {
+    None => "-"
+    Some(x) => @sftp.sftp_u64_to_int(x).to_string()
+  }
+}
+
+fn wt_sftp_error_name(e : @wtlive.WtSftpError) -> String {
+  match e {
+    AuthFailed(a) => "AUTH_FAILED " + auth_error_name(a)
+    ChannelFailed(c) => "CHANNEL_FAILED " + wt_exec_error_name(c)
+    Protocol(m) => "PROTOCOL " + m
+    TooManyPackets => "TooManyPackets"
+    Closed => "Closed"
+  }
+}
+
 async fn main {
   let url = cfg("url")
   // The Worker passes `session: 1` for the Loop #33 run. A config lookup
@@ -317,6 +465,12 @@ async fn main {
   // Loop #36: `shell: <command>` opens a pty, types, optionally resizes, exits.
   // Checked before `exec` so a config carrying both runs the interactive one.
   let shell_cmd = cfg("shell")
+  // Loop #39: `sftp` / `sftp_read` / `sftp_missing`.  Checked after `shell`,
+  // which keeps the earlier dispatch order intact.
+  if cfg("sftp") != "" || cfg("sftp_read") != "" || cfg("sftp_missing") != "" {
+    wt_sftp_run(url)
+    return
+  }
   if shell_cmd != "" {
     let user = cfg("user")
     let uname = if user == "" { "hp" } else { user }

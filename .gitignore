@@ -82,5 +82,13 @@ desktop.ini
 # captures. Everything in here is derived; nothing here is source.
 .loop*/
 
+# === Deliberately untracked package interfaces ===
+# These two are generated for local convenience but are NOT part of the
+# source: they describe packages that also build for js/wasm, where the
+# generated interface drifts with the target. Every other pkg.generated.mbti
+# IS tracked.
+src/sshclient/pkg.generated.mbti
+src/wtlive/pkg.generated.mbti
+
 # === Third-party vendored source (keep) ===
 # Do NOT ignore *.c, *.h, *.py, *.json in src/ and verify_c/ etc.

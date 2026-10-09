@@ -107,8 +107,10 @@ MUTATIONS = [
     ),
     (
         "treat a refused pty-req as fatal instead of falling back",
-        "      if st.interactive {",
-        "      if false {",
+        "} else if st.interactive {\n"
+        "        // 交互式流程:CHANNEL_FAILURE 只说明「这个请求被拒了」。最常见的是服务端",
+        "} else if false {\n"
+        "        // 交互式流程:CHANNEL_FAILURE 只说明「这个请求被拒了」。最常见的是服务端",
         "chan_shell_sessions",
     ),
     # ---- Loop #37 --------------------------------------------------------

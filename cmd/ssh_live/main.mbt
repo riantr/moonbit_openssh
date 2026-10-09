@@ -356,6 +356,7 @@ fn exec_error_name(e : @sshclient.ExecError) -> String {
     Malformed(m) => "Malformed(" + m + ")"
     OpenFailed(r, d) => "OpenFailed(" + r.to_string() + ", " + d + ")"
     ExecRejected => "ExecRejected"
+    SubsystemRejected => "SubsystemRejected"
     SendFailed => "SendFailed"
     BadPacket(w) => "BadPacket(" + w + ")"
     Closed => "Closed"
@@ -670,6 +671,182 @@ fn run_proposal() -> Unit {
   println("comp_stoc: " + p.comp_stoc)
 }
 
+///
+/// Loop #39:SFTP / subsystem。
+///
+/// `--sftp <dir>` 是要列的目录,`--sftp-read <path>` 是要读的文件,`--sftp-missing`
+/// 用来跑负面用例。输出全部是**长度 + SHA-256**,文件内容只给前 128 字节的
+/// 十六进制:验证脚本要比的是字节,不是人眼读一遍,而 200 KB 的十六进制既刷屏
+/// 又会把后面的行顶掉。
+///
+/// `--subsystem <name>` 故意传一个不存在的子系统名。这时必须报
+/// `SubsystemRejected`,而不是「发了 INIT 之后莫名其妙没反应」:want_reply=TRUE
+/// 的 CHANNEL_FAILURE 是「没有这个子系统」的唯一信号(session.c:1945-1948)。
+fn sftp_mode(argv : Array[String], port : Int) -> Bool {
+  let mut dir : String? = None
+  // 可以给多次:`--sftp-read a --sftp-read b` 就是脚本里的两个 ReadFile。
+  // 只保留最后一个的话,验证脚本就没法在一次会话里同时读小文件和大文件,而
+  // 「大文件要跨很多次 READ」正是这一轮要证明的事。
+  let reads : Array[String] = []
+  let mut missing = false
+  let mut subsystem = "sftp"
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--sftp" && i + 1 < argv.length() {
+      dir = Some(argv[i + 1])
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-read" && i + 1 < argv.length() {
+      reads.push(argv[i + 1])
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-missing" {
+      missing = true
+      i = i + 1
+      continue
+    }
+    if argv[i] == "--subsystem" && i + 1 < argv.length() {
+      subsystem = argv[i + 1]
+      i = i + 2
+      continue
+    }
+    i = i + 1
+  }
+  if dir is None && reads.length() == 0 && !missing {
+    return false
+  }
+  let user = find_user(@env.args())
+  println("=== Loop #39 SFTP vs real sshd ===")
+  println("port: " + port.to_string())
+  println("user: " + user)
+  println("subsystem: " + subsystem)
+  let ops : Array[@sftp.SftpOp] = []
+  ops.push(@sftp.SftpOp::Realpath("."))
+  match dir {
+    Some(d) => ops.push(@sftp.SftpOp::ListDir(d))
+    None => ()
+  }
+  for j = 0; j < reads.length(); j = j + 1 {
+    ops.push(@sftp.SftpOp::ReadFile(reads[j]))
+  }
+  if missing {
+    ops.push(@sftp.SftpOp::Stat(no_such_path()))
+  }
+  match @tcp.TcpConn::connect("127.0.0.1", port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      return true
+    }
+    Some(conn) => {
+      let outcome = @sshclient.live_sftp_named(
+        conn,
+        fixed_x(),
+        user,
+        test_auth_key(),
+        subsystem,
+        ops,
+      )
+      conn.close()
+      print_sftp_outcome(outcome)
+      return true
+    }
+  }
+}
+
+///| 一个必定不存在的路径,拿来跑「不是传输错误,而是一次成功的 SFTP 交换」。
+fn no_such_path() -> String {
+  ".loop39/definitely-not-here-" + "0f3a91c7"
+}
+
+fn print_sftp_outcome(outcome : @sshclient.SftpOutcome) -> Unit {
+  match outcome {
+    @sshclient.SftpOutcome::Done(r) => {
+      println("result: SFTP_DONE")
+      println("version: " + r.version.to_string())
+      println("extensions: " + r.extensions.to_string())
+      println("requests_sent: " + r.requests_sent.to_string())
+      println("replies_recv: " + r.replies_recv.to_string())
+      println("sftp_bytes_in: " + r.sftp_bytes_in.to_string())
+      println("total_sent_bytes: " + r.total_sent_bytes.to_string())
+      println("total_recv_bytes: " + r.total_recv_bytes.to_string())
+      for i = 0; i < r.ops.length(); i = i + 1 {
+        print_sftp_op(i, r.ops[i])
+      }
+    }
+    @sshclient.SftpOutcome::Failed(e) => {
+      println("result: SFTP_FAILED")
+      println("error: " + sftp_error_name(e))
+    }
+  }
+}
+
+fn print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
+  let tag = "op" + i.to_string()
+  match op {
+    @sftp.SftpOpResult::RealpathOk(p) => {
+      println(tag + ": REALPATH")
+      println(tag + "_path: " + @sftp.sftp_ascii(p).length().to_string())
+      println(tag + "_hex: " + dump_prefix(@sftp.sftp_ascii(p)))
+    }
+    @sftp.SftpOpResult::Attrs(a) => {
+      println(tag + ": ATTRS")
+      println(tag + "_size: " + opt_u64_text(a.size))
+      println(tag + "_uid: " + opt_int_text(a.uid))
+      println(tag + "_gid: " + opt_int_text(a.gid))
+      println(tag + "_perm: " + opt_int_text(a.permissions))
+    }
+    @sftp.SftpOpResult::Listing(entries) => {
+      println(tag + ": LISTING")
+      println(tag + "_count: " + entries.length().to_string())
+      for j = 0; j < entries.length(); j = j + 1 {
+        println(
+          tag + "_entry" + j.to_string() + ": " +
+          dump_prefix(@sftp.sftp_ascii(entries[j].0)) + " " +
+          entries[j].1.to_string() + " " +
+          (if entries[j].2 { "dir" } else { "file" }),
+        )
+      }
+    }
+    @sftp.SftpOpResult::Contents(b) => {
+      println(tag + ": CONTENTS")
+      println(tag + "_len: " + b.length().to_string())
+      println(tag + "_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(b)))
+      println(tag + "_hex: " + dump_prefix(b))
+    }
+    @sftp.SftpOpResult::Failed(code, msg) => {
+      println(tag + ": FAILED")
+      println(tag + "_code: " + code.to_string())
+      println(tag + "_msg_hex: " + dump_prefix(@sftp.sftp_ascii(msg)))
+    }
+  }
+}
+
+fn opt_int_text(v : Int?) -> String {
+  match v {
+    None => "-"
+    Some(x) => x.to_string()
+  }
+}
+
+fn opt_u64_text(v : UInt64?) -> String {
+  match v {
+    None => "-"
+    Some(x) => @sftp.sftp_u64_to_int(x).to_string()
+  }
+}
+
+fn sftp_error_name(e : @sshclient.SftpError) -> String {
+  match e {
+    AuthFailed(a) => "AUTH_FAILED " + auth_error_name(a)
+    ChannelFailed(c) => "CHANNEL_FAILED " + exec_error_name(c)
+    Protocol(m) => "PROTOCOL " + m
+    TooManyPackets => "TooManyPackets"
+    Closed => "Closed"
+  }
+}
+
 fn main {
   let argv = @env.args()
   // Loop #38: dump the proposal and exit, without opening a socket.
@@ -684,6 +861,9 @@ fn main {
     return
   }
   let port = find_port(argv)
+  if sftp_mode(argv, port) {
+    return
+  }
   let (shell_cmd, def_cols, def_rows, _) = shell_mode(argv)
   if shell_cmd != "" {
     let cols = int_flag(argv, "--cols", def_cols)

@@ -6,6 +6,7 @@ import {
   "openssh/openssh_moonbit/src/ecdsa",
   "openssh/openssh_moonbit/src/sha256",
   "openssh/openssh_moonbit/src/sshclient",
+  "openssh/openssh_moonbit/src/sftp",
 }
 
 ///| Loop #32 G3 driver: js target only, runs inside a browser Web Worker.

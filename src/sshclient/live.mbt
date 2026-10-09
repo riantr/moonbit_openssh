@@ -1130,6 +1130,14 @@ pub(all) enum ExecError {
   OpenFailed(Int, String)
   /// 对端拒绝了 exec
   ExecRejected
+  ///|
+  /// 对端拒绝了 subsystem 请求——通常就是「没有这个子系统」。
+  ///
+  /// 单列而非复用 `ExecRejected`:subsystem 的 `want_reply` 是 TRUE,所以这个
+  /// FAILURE 是**服务端明确告诉你子系统名字不对**的唯一信号
+  /// (session.c:1945-1948)。把它报成「命令被拒」会把一个配置拼写错误说成
+  /// 远端拒绝执行,方向完全反了。
+  SubsystemRejected
   /// 包发不出去(seqnr 回绕)
   SendFailed
   /// 读包时 MAC 不匹配
@@ -1450,6 +1458,7 @@ fn chan_error(e : @channel.ChanError) -> ExecError {
   match e {
     OpenFailed(r, d) => ExecError::OpenFailed(r, d)
     ExecRejected => ExecError::ExecRejected
+    SubsystemRejected => ExecError::SubsystemRejected
     Malformed(m) => ExecError::Malformed(m)
   }
 }

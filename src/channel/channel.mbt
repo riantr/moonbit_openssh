@@ -317,6 +317,41 @@ pub fn channel_shell_payload(recipient : Int) -> FixedArray[Byte] {
 }
 
 ///|
+/// CHANNEL_REQUEST "subsystem"(RFC 4254 §6.5 / clientloop.c:2799-2811)
+///
+///     uint32  recipient channel
+///     string  "subsystem"
+///     boolean TRUE
+///     string  subsystem name
+///
+/// `want_reply` 是 TRUE,而且**必须**是 TRUE。OpenSSH 客户端发的是
+/// `channel_request_start(ssh, id, "subsystem", 1)` 紧跟一个
+/// `client_expect_confirm(ssh, id, "subsystem", CONFIRM_CLOSE)`
+/// (clientloop.c:2801-2803)——它会**等**服务端回 CHANNEL_SUCCESS,拿不到就
+/// 关掉通道。这和 `env`(want_reply=FALSE,永不回包)是反的,也是本项目里
+/// 第一个「必须等回包」的通道请求:子系统名写错时服务端回 CHANNEL_FAILURE,
+/// 而这个 FAILURE 是唯一能告诉你「名字不对」的信号。
+///
+/// 服务端读法是 `sshpkt_get_cstring` 紧跟 `sshpkt_get_end`
+/// (session.c:1915-1916),所以 name 之后多一个字节就是协议错误——和
+/// `window-change` 一样,这里不放 modes 串。
+///
+/// 另外 `exec` 和 `shell` 之后通道里是「远端进程的字节」,`subsystem` 之后是
+/// 「子系统自己的字节」:SFTP 的包被原样塞进 CHANNEL_DATA,两端都不解释它。
+/// 这一点不是这里实现的——它在 `src/sftp`,而这层只负责把请求发出去。
+pub fn channel_subsystem_payload(
+  recipient : Int,
+  name : String,
+) -> FixedArray[Byte] {
+  channel_request_payload(
+    recipient,
+    "subsystem",
+    true,
+    @sshwire.write_ssh_string(ch_ascii(name)),
+  )
+}
+
+///|
 /// CHANNEL_REQUEST "window-change"(RFC 4254 §6.7 / session.c:1847-1851)
 ///
 ///     uint32  recipient channel

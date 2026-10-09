@@ -831,6 +831,11 @@ pub(all) enum WtExecError {
   Malformed(String)
   OpenFailed(Int, String)
   ExecRejected
+  /// 子系统请求被 CHANNEL_FAILURE 拒了。与 `ExecRejected` 分开,因为它说的是
+  /// 「没有这个子系统」——通常只是名字写错了(sftp → sftp-server),而
+  /// `ExecRejected` 说的是命令本身不被允许。混成一个名字,配置拼写错误就会被
+  /// 报成「远端拒绝执行」。
+  SubsystemRejected
   SendFailed
   BadPacket(String)
   Closed
@@ -880,6 +885,88 @@ pub async fn wt_live_exec(
 }
 
 ///|
+/// 握手 + 服务请求 + publickey 认证,成功时交出可用的会话状态。
+///
+/// Loop #39 抽出来的。原先这段认证是**内联**在 `wt_live_exec_io` 里的,而 SFTP
+/// 要走的是同一条认证路:同样的 SERVICE_ACCEPT、同样的
+/// `userauth_publickey_signed_request`、同样等 USERAUTH_SUCCESS。留在调用点各写
+/// 一份的话,任何一处改动都只覆盖一半路径——而两条路径的差别本来只应该是
+/// `wt_send_plain_packet` / `wt_recv_plain_packet` 之外的搬字节方式。
+///
+/// 注意 `box.state` 只在握手收尾时写一次,之后的收发都在同一个结构体上更新
+/// 计数器和 seqnr,所以一路带着它走即可。
+async fn wt_auth_into(
+  conn : @wt.WtConn,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+) -> Result[WtSessionState, WtAuthError] {
+  let box = { state: None, }
+  let res = wt_handshake_into(conn, x, box)
+  match res {
+    Established(_) => ()
+    Failed(e) => return Err(WtAuthError::HandshakeFailed(e))
+  }
+  let st = match box.state {
+    None => return Err(WtAuthError::HandshakeFailed(WtLiveError::BadPacket("no_session_state")))
+    Some(v) => v
+  }
+  let (accepted_opt, svc_err) = wt_request_userauth_service(conn, st)
+  match svc_err {
+    Some(WtSessionError::UnexpectedService(s)) =>
+      return Err(WtAuthError::UnexpectedService(s))
+    _ => ()
+  }
+  match accepted_opt {
+    None => return Err(WtAuthError::NoServiceAccept)
+    Some(_) => ()
+  }
+  let curve = @ecdsa.Curve::p256()
+  let (_, _, payload) = match
+    @userauth.userauth_publickey_signed_request(
+      curve,
+      d,
+      st.session_id,
+      user,
+      @userauth.AUTH_SERVICE_CONNECTION,
+    ) {
+    None => return Err(WtAuthError::SignFailed)
+    Some(v) => v
+  }
+  if !wt_send_plain_packet(
+      conn,
+      st.counters,
+      st.send,
+      @sshwire.SSH_MSG_USERAUTH_REQUEST,
+      payload,
+    ) {
+    return Err(WtAuthError::NoAuthReply)
+  }
+  let mut tries = 0
+  let mut ok = false
+  while tries < 32 {
+    match wt_recv_plain_packet(conn, st.counters, st.recv) {
+      Closed => return Err(WtAuthError::NoAuthReply)
+      BadPacket(why) => return Err(WtAuthError::BadPacket(why))
+      Packet(t, _) => {
+        tries = tries + 1
+        if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS {
+          ok = true
+          break
+        }
+        if t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
+          return Err(WtAuthError::NoAuthReply)
+        }
+      }
+    }
+  }
+  if !ok {
+    return Err(WtAuthError::NoAuthReply)
+  }
+  Ok(st)
+}
+
+///|
 /// 浏览器侧的 `live_exec_io`:带 stdin 和 env 的那条路。
 ///
 /// 和 `src/sshclient` 的 `live_exec_io` 是同一条控制流、同一份 `chan_step`,
@@ -894,69 +981,9 @@ pub async fn wt_live_exec_io(
   stdin_data : FixedArray[Byte],
   envs : Array[@sshclient.EnvVar],
 ) -> WtExecOutcome {
-  let box = { state: None, }
-  let res = wt_handshake_into(conn, x, box)
-  match res {
-    Established(_) => ()
-    Failed(e) => return WtExecOutcome::AuthFailed(WtAuthError::HandshakeFailed(e))
-  }
-  // box.state 只在握手收尾时写一次(`wt_handshake_into`),之后的收发都在这
-  // 同一个结构体上更新计数器和 seqnr,所以一路带着它走即可。
-  let st = match box.state {
-    None => return WtExecOutcome::ChannelFailed(WtExecError::NoSessionState)
-    Some(v) => v
-  }
-  let (accepted_opt, svc_err) = wt_request_userauth_service(conn, st)
-  match svc_err {
-    Some(WtSessionError::UnexpectedService(s)) =>
-      return WtExecOutcome::AuthFailed(WtAuthError::UnexpectedService(s))
-    _ => ()
-  }
-  match accepted_opt {
-    None => return WtExecOutcome::AuthFailed(WtAuthError::NoServiceAccept)
-    Some(_) => ()
-  }
-  let curve = @ecdsa.Curve::p256()
-  let (_, _, payload) = match
-    @userauth.userauth_publickey_signed_request(
-      curve,
-      d,
-      st.session_id,
-      user,
-      @userauth.AUTH_SERVICE_CONNECTION,
-    ) {
-    None => return WtExecOutcome::AuthFailed(WtAuthError::SignFailed)
-    Some(v) => v
-  }
-  if !wt_send_plain_packet(
-      conn,
-      st.counters,
-      st.send,
-      @sshwire.SSH_MSG_USERAUTH_REQUEST,
-      payload,
-    ) {
-    return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
-  }
-  let mut tries = 0
-  let mut ok = false
-  while tries < 32 {
-    match wt_recv_plain_packet(conn, st.counters, st.recv) {
-      Closed => return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
-      BadPacket(why) => return WtExecOutcome::AuthFailed(WtAuthError::BadPacket(why))
-      Packet(t, _) => {
-        tries = tries + 1
-        if t == @sshwire.SSH_MSG_USERAUTH_SUCCESS {
-          ok = true
-          break
-        }
-        if t == @sshwire.SSH_MSG_USERAUTH_FAILURE {
-          return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
-        }
-      }
-    }
-  }
-  if !ok {
-    return WtExecOutcome::AuthFailed(WtAuthError::NoAuthReply)
+  let st = match wt_auth_into(conn, x, user, d) {
+    Err(e) => return WtExecOutcome::AuthFailed(e)
+    Ok(v) => v
   }
   let (chan0, failure) = wt_exec_drive(conn, st, command, stdin_data, envs)
   match failure {
@@ -1113,6 +1140,7 @@ fn wt_chan_error(e : @channel.ChanError) -> WtExecError {
   match e {
     OpenFailed(r, d) => WtExecError::OpenFailed(r, d)
     ExecRejected => WtExecError::ExecRejected
+    SubsystemRejected => WtExecError::SubsystemRejected
     Malformed(m) => WtExecError::Malformed(m)
   }
 }

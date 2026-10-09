@@ -36,6 +36,14 @@ pub(all) enum ChanError {
   OpenFailed(Int, String)
   /// 对端拒绝了 exec 请求
   ExecRejected
+  ///|
+  /// 对端拒绝了 subsystem 请求。
+  ///
+  /// 单列而不是复用 `ExecRejected`:subsystem 的 `want_reply` 是 TRUE,这个
+  /// CHANNEL_FAILURE **就是**「没有这个子系统」的答案(session.c:1945-1948
+  /// 在 `options.subsystem_name[]` 里找不到名字时返回失败),它和「命令被拒」
+  /// 是两种诊断,混成一个报出去的话,拼错一个子系统名会看起来像远端拒绝执行。
+  SubsystemRejected
   /// 包在通道状态下无法解释(字段截断、尾部有残余、channel 号不认识)
   Malformed(String)
 }
@@ -115,6 +123,14 @@ pub(all) struct ChanState {
   /// (nchan.c:127-146 的 `chan_ibuf_empty` 先看 `sshbuf_len(c->input) != 0`
   /// 就直接 return),否则对端以为没有更多 stdin,远端命令读到的是截断的流。
   eof_sent : Bool
+  ///|
+  /// 发过 subsystem 请求没有。
+  ///
+  /// 存在的唯一理由是让 `chan_step` 认出「这个 CHANNEL_FAILURE 回答的是
+  /// subsystem 请求」——subsystem 的 `want_reply` 是 TRUE,而 subsystem 会话
+  /// 里在收到任何数据之前只发过这一个请求,所以这个布尔足以定位,不必去跟踪
+  /// 一个待确认请求队列。`interactive` 那一支用的是同一个思路。
+  mut subsystem_sent : Bool
 }
 
 ///|
@@ -144,6 +160,7 @@ pub fn ChanState::new(local_channel : Int) -> ChanState {
     stdin_sent: 0,
     stdin_packets: 0,
     eof_sent: false,
+    subsystem_sent: false,
   }
 }
 
@@ -156,6 +173,30 @@ pub fn ChanState::new(local_channel : Int) -> ChanState {
 /// 含义相反。
 pub fn ChanState::new_interactive(local_channel : Int) -> ChanState {
   { ..ChanState::new(local_channel), interactive: true }
+}
+
+///|
+/// 要发出去的 CHANNEL_REQUEST "subsystem"。
+///
+/// 必须在 OPEN_CONFIRMATION 之后调用:recipient 是对端在确认包里给的号,在那
+/// 之前还是 -1。和 `exec_action` 同一个理由。
+///
+/// 发完就把 `subsystem_sent` 置位,之后 `chan_step` 见到 CHANNEL_FAILURE 会
+/// 报 `SubsystemRejected` 而不是 `ExecRejected`。
+pub fn ChanState::subsystem_action(
+  self : ChanState,
+  name : String,
+) -> ChanAction? {
+  if !self.open_done {
+    return None
+  }
+  self.subsystem_sent = true
+  Some(
+    Send(
+      0x62,
+      channel_subsystem_payload(self.remote_id, name),
+    ),
+  )
 }
 
 ///|
@@ -443,7 +484,13 @@ pub fn chan_step(
         (st, none, Some(ChanError::Malformed("success_before_open")))
       }
     0x64 =>
-      if st.interactive {
+      // 判据的顺序有讲究:subsystem 先判,因为它的 want_reply 是 TRUE,而
+      // subsystem 会话在收到任何数据之前只发过这一个请求——所以这个
+      // CHANNEL_FAILURE 只可能是在回答它。判在 `interactive` 之前是因为
+      // 交互式流程的「可以继续」和 subsystem 的「到此为止」不该混。
+      if st.subsystem_sent {
+        (st, none, Some(ChanError::SubsystemRejected))
+      } else if st.interactive {
         // 交互式流程:CHANNEL_FAILURE 只说明「这个请求被拒了」。最常见的是服务端
         // 不给 pty(`PermitTTY no`),而真实客户端会退回无 pty 继续开 shell
         // (clientloop.c:2750)。当成致命错误会让整个 shell 用不了。
