@@ -1146,3 +1146,64 @@ still passing -- the native-only dependency pollutes nothing.
 `pkg.generated.mbti`, not from the README -- the same rule as every other
 third-party surface in this repo.
 
+### Loop #42: three harness defects behind one impossible verdict
+
+`verify_loop40`'s regression reported `FAIL loop39 still passes` with the
+detail line `ALL PASS (44 checks)` -- a gate that passed everything and
+failed anyway. Three defects were stacked under that one line, and none of
+them was in the code any loop tests.
+
+**1. A shadowed variable that only exploded on success.**
+`verify_loop39.mjs`'s G2 declared `const skipped = <SKIP-line count>` inside
+`main()`, shadowing the global `skipped` **array** (line 61) with a Number
+for the whole function. The ending's `for (const s of skipped)` then threw
+`TypeError: skipped is not iterable` -- but only on the ALL-PASS path,
+because the failure path returns 1 without ever touching it. So loop39
+printed ALL PASS and exited 1; every run with a real failure had shown a
+clean FAILURES summary, which is what made the verdict look impossible.
+Renaming the counter `skippedCount` is the whole fix.
+
+**2. A mutation batch that died mid-run with no traceback.** The nested runs
+also showed loop37 at `46/47` with `5 caught, 0 missed` -- five CAUGHT lines
+and then silence, no MISSED, no SKIP, nothing. `channel_mutations.py`'s
+`run_kat()` used `text=True` with no explicit encoding, so moon's output was
+decoded with the locale codec (cp936 here); one box-drawing character the
+compiler prints on a cold-build diagnostic path raised
+`UnicodeDecodeError` inside the batch loop, the `finally` restored the
+sources, and the child died with its stdout buffer unflushed -- leaving
+exactly the five lines that had made it out. Single runs on a warm `_build`
+printed pure ASCII and could not reproduce it, which is why it looked like a
+timing flake. The fix is three independent belts: `encoding="utf-8",
+errors="replace"` (the decode can never raise), `flush=True` on every batch
+line (what is printed is delivered), and an explicit 64 MiB `maxBuffer` on
+the spawnSync side (the 1 MiB default is one cold build away from killing
+the child for a different reason).
+
+**3. Nested failures that discarded their own evidence.** loop38 captured
+each child gate's full output and kept only a 200-char summary; loop39 kept
+400 chars; the gate file kept one line. Diagnosing defect 2 required three
+level-deep re-runs on a warm machine and a hope. Both `verify_loop38.mjs`
+and `verify_loop40.mjs` now write each failed child's complete output to
+`.loop38/last_<label>.log` / `.loop40/last_loopN.log` (gitignored,
+overwritten each run) at the moment the failure is detected -- the failure
+and its evidence land together, and one run is enough.
+
+**4. An assertion on the wrong half of the stream.** With 1-3 fixed, the
+next full nested run exposed a fourth defect that had been hiding behind
+them: `verify_loop36.mjs` asserted `total_recv_bytes` cross-transport --
+the **encrypted stream from the server**, which carries WINDOW_ADJUST
+timing. Under nested load the server answers a window-consuming shell with
+one extra 80-byte adjust (correct behavior), and the gate read it as a
+transport bug. The Loop #40 gate excludes `total_*_bytes` from
+cross-transport comparison for exactly this reason; loop36 predates that
+rule. It now keeps `total_sent_bytes` -- the half that is ours and is
+byte-exact -- and drops the recv side, with the rationale in a comment.
+
+**Method note, because it is what found defect 1.** The impossibility
+("ALL PASS and failed anyway") was chased by treating the two halves as two
+different bugs -- which they were: defect 3 made the evidence invisible,
+defect 2 supplied the flaky red, and defect 1 turned the green path red too.
+Defect 4 only surfaced once 1-3 stopped flaking. Each fix was verified
+against the next full nested run, not against a warm single run -- a warm
+single run is what made defect 2 invisible for weeks.
+

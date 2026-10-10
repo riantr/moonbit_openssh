@@ -375,6 +375,18 @@ async function main() {
       const m = t.match(/(\d+)\/(\d+) checks/);
       check(`${label} harness still green`, r.status === 0 && t.includes('✓ PASS'),
         m ? `${m[1]}/${m[2]}` : t.slice(-200));
+      // A nested FAIL with only "46/47" in the summary is undiagnosable: the
+      // failing check's NAME is in the child's output, which this capture is
+      // about to throw away. Persist it -- one file per child, overwritten
+      // each run, ignored by git -- so the nested failure can be read instead
+      // of re-run three levels deep on a warm machine and hoped for.
+      if (r.status !== 0) {
+        try {
+          const { writeFileSync } = await import('node:fs');
+          writeFileSync(join(ROOT, '.loop38', `last_${label}.log`), t);
+          console.log(`  (child output saved to .loop38/last_${label}.log)`);
+        } catch { /* best effort; the check above already failed */ }
+      }
     }
   }
 

@@ -262,7 +262,13 @@ async function main() {
     kat.includes('chan_io_coverage: PASS'));
 
   console.log('\n=== G1b: mutation check ===');
-  const mut = spawnSync('python', ['host/channel_mutations.py'], { cwd: ROOT, encoding: 'utf-8' });
+  // maxBuffer is stated because the default (1 MiB) is one cold-build's
+  // diagnostics away from killing the child mid-batch -- which surfaced as
+  // "5 caught, 0 missed" and nothing else (Loop #42). A killed child loses
+  // its buffered stdout; the summary then proves nothing about the
+  // remaining mutations.
+  const mut = spawnSync('python', ['host/channel_mutations.py'],
+    { cwd: ROOT, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
   const mutText = norm(`${mut.stdout || ''}${mut.stderr || ''}`);
   for (const l of mutText.split('\n')) {
     if (/^(CAUGHT|MISSED|SKIP)/.test(l)) console.log(`      ${l}`);

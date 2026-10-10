@@ -168,7 +168,16 @@ def write(state):
 def run_kat():
     r = subprocess.run(
         ["moon", "run", "cmd/channel_test", "--target", "native"],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True,
+        # text=True alone would decode moon's output with the locale codec
+        # (cp936 here), and one box-drawing character the compiler prints on
+        # some paths would raise UnicodeDecodeError *inside* the batch loop.
+        # The child would die after the last flushed line -- looking exactly
+        # like "5 caught, 0 missed" with no traceback in the captured stderr,
+        # which is what the nested Loop #42 run showed. Explicit utf-8 with
+        # replacement cannot raise, whatever moon decides to print.
+        encoding="utf-8", errors="replace", text=True,
+        timeout=1200,
     )
     return r.stdout + r.stderr
 
@@ -195,12 +204,13 @@ def main():
             write(state)
             out = run_kat()
             caught = ("%s: FAIL" % must_fail) in out
-            print("%s  %s" % ("CAUGHT" if caught else "MISSED", label))
+            print("%s  %s" % ("CAUGHT" if caught else "MISSED", label),
+                  flush=True)
             if not caught:
                 failures.append(label)
                 for line in out.splitlines():
                     if "FAIL" in line:
-                        print("        " + line.strip())
+                        print("        " + line.strip(), flush=True)
     finally:
         write(original)
 

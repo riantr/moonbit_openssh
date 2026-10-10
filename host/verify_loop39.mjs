@@ -315,8 +315,14 @@ async function main() {
   });
   const mutText = `${mut.stdout || ''}${mut.stderr || ''}`;
   const missed = (mutText.match(/^MISSED.*$/gm) || []).length;
-  const skipped = (mutText.match(/^SKIP.*$/gm) || []).length;
-  check('every mutation turned the KAT red', mut.status === 0 && missed === 0 && skipped === 0,
+  // Named ..._count because line 61 declares the global `skipped` ARRAY this
+  // summary appends to. Naming this counter `skipped` shadowed the array with
+  // a Number for the whole of main(), and the ending's
+  // `for (const s of skipped)` then threw "TypeError: skipped is not
+  // iterable" -- but ONLY on the ALL-PASS path, which is why every gate
+  // before this saw loop39 print ALL PASS and still exit 1.
+  const skippedCount = (mutText.match(/^SKIP.*$/gm) || []).length;
+  check('every mutation turned the KAT red', mut.status === 0 && missed === 0 && skippedCount === 0,
     mutText.trim().split('\n').slice(-12).join('\n'));
 
   // ---- G3: a real internal-sftp ---------------------------------------

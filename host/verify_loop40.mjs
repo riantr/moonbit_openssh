@@ -572,6 +572,18 @@ async function main() {
       const text = `${r.stdout || ''}${r.stderr || ''}`;
       const m = text.match(/(\d+)\/(\d+) passed/) || text.match(/ALL PASS \((\d+) checks\)/);
       check(`loop${n} still passes`, r.status === 0, m ? m[0] : text.slice(-400));
+      // loop39 runs its own regression (loop31..38, each of which runs its
+      // own browser section and mutation pass). When it fails, its stdout is
+      // the only place the real cause lives -- and the summary line above
+      // says nothing about which grandchild broke. Persist the whole thing,
+      // one file per child, before the diagnosis needs a third re-run.
+      if (r.status !== 0) {
+        try {
+          const { writeFileSync } = await import('node:fs');
+          writeFileSync(join(ROOT, '.loop40', `last_loop${n}.log`), text);
+          console.log(`  (child output saved to .loop40/last_loop${n}.log)`);
+        } catch { /* best effort; the check above already failed */ }
+      }
     }
   }
 
