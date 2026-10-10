@@ -1,0 +1,23 @@
+///| cmd/proton_gui -- Loop #41: a native desktop shell for debugging the
+///| client by hand.
+///|
+///| Native-only by construction: Proton's manifest pins `preferred_target:
+///| native` / `supported-targets: "+native"`, and the CEF runtime it drives
+///| has no wasm story.  This package is the ONLY place in the module that
+///| imports `@proton` -- `src/` must stay free of it so the 4-target KAT
+///| gates never depend on a 0.x GUI framework.
+import {
+  "moonbit-community/proton",
+  "moonbitlang/async",
+}
+
+pkgtype(kind: "executable")
+
+// Proton is native-only (its manifest pins `supported-targets: "+native"`),
+// and the compiler wants that stated here rather than inferred from the
+// dependency -- which keeps a wasm check of this package a *declared*
+// impossibility instead of a surprise.
+options(
+  supported_targets: "+native",
+)
+

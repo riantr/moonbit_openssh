@@ -1078,3 +1078,71 @@ pin is a test lever again, not a default.
 
 Run the gate with `node host/verify_loop38.mjs`.
 
+### Loop #41: Proton desktop shell (debug console, milestone 1)
+
+`proton@0.3.4` is the GUI framework for a **manual fault-injection console**:
+commands that drive `src/sftp`'s `SftpSession` directly -- malformed WRITEs,
+wrong request ids, EXTENDED names no server has -- the branches a KAT against
+a real well-behaved server never reaches. Not an SFTP file browser: the
+browser-Worker gate already proves that path, and a second front end would
+prove it again with more code.
+
+**The boundary that keeps it safe: `src/` never imports `@proton`.** Only
+`cmd/proton_gui` does. Proton is native-only (`supported-targets: "+native"`,
+six packages in lockstep at 0.3.4), and a 0.x GUI framework must not become a
+dependency of the 4-target KAT gates. The compiler enforces half of this
+itself -- it warns when a package depends on Proton without declaring
+`supported_targets` explicitly, which `cmd/proton_gui/moon.pkg` now does.
+
+**The three prerequisites were already on the machine** (installed by the
+`moonbit_static_analysis` project): `proton_cli 0.3.4` on PATH, the CEF
+runtime in `~/.proton/store/win32-x64/cef-<sha256>-layout-1/`, and the
+version-locked `cef_process.exe` helper in `~/.proton/helpers/win32-x64/0.3.4/`.
+What was missing was only `moon add moonbit-community/proton@0.3.4` and the
+runtime layout beside the built executable.
+
+**What the executable wants at run time, relative to itself** -- derived from
+the runtime's own error messages, which name each missing path in turn; this
+is the complete list it asks for:
+
+- the CEF **Release** set (`libcef.dll`, `chrome_elf.dll`, `libEGL.dll`,
+  `libGLESv2.dll`, `d3dcompiler_47.dll`, `dxcompiler.dll`, `dxil.dll`,
+  `vk_swiftshader.dll`, `vulkan-1.dll`, `icudtl.dat`, `resources.pak`,
+  `chrome_100_percent.pak`, `chrome_200_percent.pak`,
+  `v8_context_snapshot.bin`, `vk_swiftshader_icd.json`) in the exe's own
+  directory. **Not `bin\`**: the first run put them in `bin\` because the
+  runtime's earlier error text names `bin\libcef.dll`, and the result was
+  `0xC0000135` (STATUS_DLL_NOT_FOUND) before `main()` -- the Windows loader
+  resolves the import table before any MoonBit code runs, the exe's own
+  directory is on the default search path and a `bin\` subdirectory is not,
+  and the runtime's `bin\` convention is only its *later* check. The loader's
+  rule wins.
+- `cef_process.exe` (the subprocess helper, version-locked to the proton
+  release) beside the exe.
+- `Resources/` (the CEF pak/icu tree) beside the exe.
+
+`host/proton_stage.mjs` does all three from the store, reading the CEF
+archive's sha256 from
+`.mooncakes/moonbit-community/proton/cef_requirements.generated.mjs` rather
+than hard-coding it, so a proton bump takes the script along. Run it after
+every `moon build` that removed `_build`:
+
+```
+node host/proton_stage.mjs
+$env:PROTON_HEADLESS = "1"; _build\native\debug\build\cmd\proton_gui\proton_gui.exe   # smoke, no window
+_build\native\debug\build\cmd\proton_gui\proton_gui.exe                               # the window
+```
+
+**Verified:** milestone 1 -- window opens (headless run stays alive consuming
+CPU through the event loop; visible run opens the window). The 5-step
+third-party check ran clean: `.mooncakes` populated, `moon tree` shows all six
+packages at 0.3.4, and `src/sftp` checks green on all four targets with the KAT
+still passing -- the native-only dependency pollutes nothing.
+
+**Milestone 2 (next):** the command bridge. `.commands(...)` /
+`CommandRegistrar::bind` from `proton_contract`, handlers calling
+`src/sftp.SftpSession` directly, and the JS side invoking them through
+`window.__MoonBit__.core.invokeOp`. The API signatures come from
+`pkg.generated.mbti`, not from the README -- the same rule as every other
+third-party surface in this repo.
+

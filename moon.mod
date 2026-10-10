@@ -26,4 +26,5 @@ description = ""
 import {
   "moonbitlang/async@0.22.2",
   "moonbit-community/sqlite3@0.2.2",
+  "moonbit-community/proton@0.3.4",
 }
