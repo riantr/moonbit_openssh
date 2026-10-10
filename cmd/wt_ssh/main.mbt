@@ -324,15 +324,38 @@ fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
 /// 输出字段与 `cmd/ssh_live` 的 SFTP 模式**逐字相同**,验证脚本因此可以直接把
 /// 两条输出按行对比——这才是「协议只有一份实现」的可检验形式:如果这里另写一套
 /// 打印逻辑,两份输出就会在措辞上分叉,而分叉的恰好是**断言**本身。
+///|
+/// 与 `cmd/ssh_live` 的 `payload_of` 逐行相同的规则。
+///
+/// 这是**故意重复**的:Worker 里没有文件系统,没法把一份 blob 传进去,而把
+/// 规则抄一遍的风险由门禁消掉——两条路径写出的文件由同一个 Python 规则算出
+/// SHA-256 再对比,一旦有一侧算错,哈希立刻不等。所以这里宁可重复三行算术,
+/// 也不要引入一个「共用的生成器」再给每个后端多加一条依赖。
+fn wt_payload_of(n : Int) -> FixedArray[Byte] {
+  let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    out[i] = ((i * 31 + 7) % 256).to_byte()
+  }
+  out
+}
+
 async fn wt_sftp_run(url : String) -> Unit {
   let user = cfg("user")
   let uname = if user == "" { "hp" } else { user }
   let dir = cfg("sftp")
   let read_path = cfg("sftp_read")
   let missing = cfg("sftp_missing") == "1" || cfg("sftp_missing") == "true"
+  // Loop #40 写侧。Config 是 URL 查询参数,所以每个操作自带名字而不是位置。
+  let write_path = cfg("sftp_write")
+  let write_size = cfg_int("sftp_write_size", 0)
+  let mk = cfg("sftp_mkdir")
+  let rm = cfg("sftp_remove")
+  let rmd = cfg("sftp_rmdir")
+  let rn_from = cfg("sftp_rename_from")
+  let rn_to = cfg("sftp_rename_to")
   let subsystem = cfg("subsystem")
   let subsys = if subsystem == "" { "sftp" } else { subsystem }
-  println("=== Loop #39 SFTP vs real sshd ===")
+  println("=== Loop #40 SFTP write side vs real sshd ===")
   println("user: " + uname)
   println("subsystem: " + subsys)
   let ops : Array[@sftp.SftpOp] = []
@@ -340,8 +363,27 @@ async fn wt_sftp_run(url : String) -> Unit {
   if dir != "" {
     ops.push(@sftp.SftpOp::ListDir(dir))
   }
+  // 固定顺序,不是命令行顺序:config 是 URL 查询参数,每种操作只有一个值,
+  // 没有「谁先出现」可言。顺序本身是有语义的——mkdir 必须在往里面写的
+  // write 前面,rename 必须在被改名的文件存在之后。和 `cmd/ssh_live` 的差别
+  // 是刻意的,那边是真正的 argv 序列。
+  if mk != "" {
+    ops.push(@sftp.SftpOp::MakeDir(mk, @sftp.SftpAttrs::none()))
+  }
+  if write_path != "" {
+    ops.push(@sftp.SftpOp::WriteFile(write_path, wt_payload_of(write_size)))
+  }
+  if rn_from != "" && rn_to != "" {
+    ops.push(@sftp.SftpOp::Rename(rn_from, rn_to))
+  }
   if read_path != "" {
     ops.push(@sftp.SftpOp::ReadFile(read_path))
+  }
+  if rm != "" {
+    ops.push(@sftp.SftpOp::RemovePath(rm))
+  }
+  if rmd != "" {
+    ops.push(@sftp.SftpOp::RemoveDir(rmd))
   }
   if missing {
     ops.push(@sftp.SftpOp::Stat(
@@ -420,6 +462,13 @@ fn wt_print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
       println(tag + "_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(b)))
       println(tag + "_hex: " + wt_dump_prefix(b))
     }
+    @sftp.SftpOpResult::Wrote(n) => {
+      println(tag + ": WROTE")
+      println(tag + "_bytes: " + n.to_string())
+    }
+    @sftp.SftpOpResult::Changed => {
+      println(tag + ": CHANGED")
+    }
     @sftp.SftpOpResult::Failed(code, msg) => {
       println(tag + ": FAILED")
       println(tag + "_code: " + code.to_string())
@@ -465,9 +514,12 @@ async fn main {
   // Loop #36: `shell: <command>` opens a pty, types, optionally resizes, exits.
   // Checked before `exec` so a config carrying both runs the interactive one.
   let shell_cmd = cfg("shell")
-  // Loop #39: `sftp` / `sftp_read` / `sftp_missing`.  Checked after `shell`,
-  // which keeps the earlier dispatch order intact.
-  if cfg("sftp") != "" || cfg("sftp_read") != "" || cfg("sftp_missing") != "" {
+  // Loop #39/40: SFTP read and write side.  Checked after `shell`, which keeps
+  // the earlier dispatch order intact.
+  if cfg("sftp") != "" || cfg("sftp_read") != "" || cfg("sftp_missing") != "" ||
+    cfg("sftp_write") != "" || cfg("sftp_mkdir") != "" ||
+    cfg("sftp_remove") != "" || cfg("sftp_rmdir") != "" ||
+    cfg("sftp_rename_from") != "" {
     wt_sftp_run(url)
     return
   }

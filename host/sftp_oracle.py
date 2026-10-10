@@ -39,6 +39,33 @@ And three things it can only learn from a real server, which
      unconditionally desynchronises here and then reports a plausible size for
      a path that has none.
 
+And four more that `host/sftp_write_capture.py` established for the write side:
+
+  4. **WRITE offsets are file offsets and they walk.**  `process_write` does
+     `lseek(fd, off, SEEK_SET)` before every write (sftp-server.c:865-866),
+     so "bytes still to send" is not a harmless alternative encoding: the
+     capture shows `0, 8192, 16384, …` strictly increasing, and a client that
+     sent the offset twice would overwrite rather than append while the file
+     length stayed plausible.
+
+  5. **`FXP_RENAME` and `posix-rename@openssh.com` are different requests.**
+     The draft's RENAME is specified to fail when the target exists; the
+     extension is `rename(2)` and replaces it.  The capture confirms the
+     replacement is accepted (STATUS 0) where the target was known to exist.
+
+  6. **An unknown extension name is a clean `STATUS(SSH2_FX_OP_UNSUPPORTED=8)`**
+     (`process_extended`), not a dropped channel.  Treating it as fatal hangs
+     the client against any server that lacks the extension.
+
+  7. **MKDIR and SETSTAT carry an attribute block; REMOVE and RMDIR do not.**
+     `SSH2_FXP_REMOVE` is 13 and `SSH2_FXP_RMDIR` is 15 — adjacent and easy to
+     swap, and swapping them sends a valid-looking message the server will
+     reject.
+
+Note on the STATUS body: after the 4-byte code comes the message string and
+then a **language tag** (sftp-common.c `send_status`).  Reading the code and
+declaring the packet finished desynchronises every later reply.
+
 The generator rewrites exactly one field when it replays a captured reply into
 a vector: the 4-byte request id, which is client-chosen and would otherwise
 force our session's numbering to be paramiko's.  Everything else -- the
@@ -60,10 +87,17 @@ FXP_VERSION = 2
 FXP_OPEN = 3
 FXP_CLOSE = 4
 FXP_READ = 5
-FXP_STAT = 17
+FXP_WRITE = 6
+FXP_SETSTAT = 9
+FXP_FSETSTAT = 10
 FXP_OPENDIR = 11
 FXP_READDIR = 12
+FXP_REMOVE = 13
+FXP_MKDIR = 14
+FXP_RMDIR = 15
 FXP_REALPATH = 16
+FXP_STAT = 17
+FXP_RENAME = 18
 
 FXP_STATUS = 101
 FXP_HANDLE = 102
@@ -80,6 +114,16 @@ ATTR_ACMODTIME = 0x00000008
 ATTR_EXTENDED = 0x80000000
 
 FXF_READ = 0x00000001
+FXF_WRITE = 0x00000002
+FXF_APPEND = 0x00000004
+FXF_CREAT = 0x00000008
+FXF_TRUNC = 0x00000010
+FXF_EXCL = 0x00000020
+
+# The chunk size `src/sftp` asks for.  Kept in one place so the KAT's expected
+# request stream and the client's actual behaviour cannot drift: if either
+# moves, the KAT stops agreeing with the code and starts agreeing with itself.
+WRITE_CHUNK = 32768
 
 SFTP_VERSION = 3
 SFTP_MAX_MSG_LENGTH = 256 * 1024
@@ -87,6 +131,7 @@ SFTP_MAX_READ_LENGTH = SFTP_MAX_MSG_LENGTH - 1024
 
 FX_EOF = 1
 FX_NO_SUCH_FILE = 2
+FX_OP_UNSUPPORTED = 8
 
 REPLY_NAMES = {
     FXP_VERSION: "VERSION", FXP_STATUS: "STATUS", FXP_HANDLE: "HANDLE",
@@ -150,6 +195,101 @@ def f_read(rid, handle, offset, length):
 
 def f_close(rid, handle):
     return pkt(FXP_CLOSE, u32(rid), s(handle))
+
+
+# ---- the write side --------------------------------------------------------
+
+def encode_attrs(size=None, uid=None, gid=None, permissions=None,
+                 atime=None, mtime=None, extended=()):
+    """sftp-common.c `encode_attrib` -- flags first, then a fixed field order.
+
+    A field is present exactly when its flag is set, so "change nothing" is not
+    the empty block but four zero bytes.  Writing an empty attribute block
+    where one is expected is a parse failure on the server, not a default.
+    """
+    flags = 0
+    body = b""
+    if size is not None:
+        flags |= ATTR_SIZE
+        body += u64(size)
+    if uid is not None and gid is not None:
+        flags |= ATTR_UIDGID
+        body += u32(uid) + u32(gid)
+    if permissions is not None:
+        flags |= ATTR_PERMISSIONS
+        body += u32(permissions)
+    if atime is not None and mtime is not None:
+        flags |= ATTR_ACMODTIME
+        body += u32(atime) + u32(mtime)
+    if extended:
+        flags |= ATTR_EXTENDED
+        body += u32(len(extended))
+        for k, v in extended:
+            body += s(k) + s(v)
+    return u32(flags) + body
+
+
+def f_attrs_none():
+    return u32(0)
+
+
+def f_write(rid, handle, offset, data):
+    """sftp.h:39.  `offset` is a **file** offset -- see `process_write`'s
+    `lseek(fd, off, SEEK_SET)` at sftp-server.c:865-866."""
+    return pkt(FXP_WRITE, u32(rid), s(handle), u64(offset), s(data))
+
+
+def f_setstat(rid, path, attrs):
+    return pkt(FXP_SETSTAT, u32(rid), s(path), attrs)
+
+
+def f_fsetstat(rid, handle, attrs):
+    return pkt(FXP_FSETSTAT, u32(rid), s(handle), attrs)
+
+
+def f_mkdir(rid, path, attrs):
+    """sftp.h:48.  MKDIR carries attributes after the path; REMOVE and RMDIR
+    do not.  Zero bytes there is a parse failure, not a default."""
+    return pkt(FXP_MKDIR, u32(rid), s(path), attrs)
+
+
+def f_remove(rid, path):
+    return pkt(FXP_REMOVE, u32(rid), s(path))
+
+
+def f_rmdir(rid, path):
+    return pkt(FXP_RMDIR, u32(rid), s(path))
+
+
+def f_rename(rid, old_path, new_path):
+    """sftp.h:52.  Specified to fail when the target exists."""
+    return pkt(FXP_RENAME, u32(rid), s(old_path), s(new_path))
+
+
+def f_extended(rid, name, body=b""):
+    return pkt(FXP_EXTENDED, u32(rid), s(name), body)
+
+
+EXT_POSIX_RENAME = "posix-rename@openssh.com"
+
+
+def f_posix_rename(rid, old_path, new_path):
+    """`process_extended_posix_rename`: the name, then two paths, nothing else.
+
+    Unlike FXP_RENAME this *replaces* an existing target, because it is
+    `rename(2)` rather than the draft's rule.
+    """
+    return f_extended(rid, EXT_POSIX_RENAME, s(old_path) + s(new_path))
+
+
+def write_chunks(payload, chunk=WRITE_CHUNK):
+    """The (offset, bytes) pairs a WriteFile sends, in order."""
+    out = []
+    off = 0
+    while off < len(payload):
+        out.append((off, payload[off:off + chunk]))
+        off += chunk
+    return out
 
 
 # ---- decoding --------------------------------------------------------------
@@ -221,8 +361,13 @@ def parse_reply(raw):
         return typ, {"version": version, "extensions": ext}
     rid = buf.u32()
     if typ == FXP_STATUS:
-        return typ, {"id": rid, "code": buf.u32(),
-                     "message": buf.s().decode("utf-8", "replace")}
+        # After the code comes the message and then a **language tag**
+        # (`send_status`).  A parser that stops after the message treats the
+        # language bytes as the start of the next reply.
+        code = buf.u32()
+        msg = buf.s().decode("utf-8", "replace")
+        lang = buf.s().decode("utf-8", "replace") if not buf.at_end() else ""
+        return typ, {"id": rid, "code": code, "message": msg, "lang": lang}
     if typ == FXP_HANDLE:
         return typ, {"id": rid, "handle": buf.s()}
     if typ == FXP_DATA:
@@ -292,7 +437,8 @@ def script_requests(ops, read_len=32768, first_read_bytes=11):
     """
     out = [f_init()]
     rid = 1
-    for kind, path in ops:
+    for op in ops:
+        kind, path = op[0], op[1]
         if kind == "realpath":
             out.append(f_realpath(rid, path))
             rid += 1
@@ -319,9 +465,78 @@ def script_requests(ops, read_len=32768, first_read_bytes=11):
                 rid += 1
             out.append(f_close(rid, b"\x00\x00\x00\x00"))
             rid += 1
+        elif kind == "writefile":
+            payload = op_payload(op)
+            # CREAT and TRUNC together, which is exactly what OpenSSH's own
+            # client sends when it renames a file into place
+            # (sftp-client.c:2502).  CREAT alone would leave an existing
+            # file's contents in front of what we write.
+            out.append(f_open(rid, path,
+                              FXF_WRITE | FXF_CREAT | FXF_TRUNC))
+            rid += 1
+            # An empty payload sends **zero** WRITE requests.  One empty WRITE
+            # would come back STATUS(OK) -- indistinguishable on the wire from
+            # having written a file -- while TRUNC has already destroyed the
+            # old contents.
+            for off, chunk in write_chunks(payload):
+                out.append(f_write(rid, b"\x00\x00\x00\x00", off, chunk))
+                rid += 1
+            out.append(f_close(rid, b"\x00\x00\x00\x00"))
+            rid += 1
+        elif kind == "setattrs":
+            out.append(f_setstat(rid, path, op_attrs(op)))
+            rid += 1
+        elif kind == "mkdir":
+            out.append(f_mkdir(rid, path, op_attrs(op)))
+            rid += 1
+        elif kind == "remove":
+            out.append(f_remove(rid, path))
+            rid += 1
+        elif kind == "rmdir":
+            out.append(f_rmdir(rid, path))
+            rid += 1
+        elif kind == "rename":
+            # The session picks the extension only when VERSION advertised it;
+            # every capture this KAT replays did, so that is the branch under
+            # test.  The v3 fallback is a separate case.
+            out.append(f_posix_rename(rid, path, op_path2(op)))
+            rid += 1
         else:
             raise ValueError(kind)
     return out
+
+
+# ---- op payload helpers ----------------------------------------------------
+#
+# Ops are tuples whose length depends on what they need, so reading them in
+# three different places must not mean three different ideas about what a
+# missing element is.
+
+HANDLE0 = b"\x00\x00\x00\x00"
+
+
+def op_path2(op):
+    return op[2] if len(op) > 2 else ""
+
+
+def op_payload(op):
+    if len(op) > 2 and op[2] != "":
+        return bytes.fromhex(op[2])
+    return b""
+
+
+def op_attrs(op):
+    """Op tails that are not a payload are an attribute spec.
+
+    `None` means "do not mention it at all" -- an absent flag, which is a
+    different request from mentioning it with a value of zero.
+    """
+    spec = {}
+    for part in op[2:]:
+        if not isinstance(part, dict):
+            continue
+        spec.update(part)
+    return encode_attrs(**spec)
 
 
 def expected_results(ops, replies):

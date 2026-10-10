@@ -474,6 +474,29 @@ fn shell_mode(argv : Array[String]) -> (String, Int, Int, (Int, Int)?) {
   ("", 80, 24, None)
 }
 
+///|
+/// 一串十进制数字 -> Int;没有数字就 0。
+///
+/// `Int::from_string` is not usable here: it does not raise on a bad string,
+/// so the `try`/`unwrap_or` around it is dead code, and on a backend where it
+/// did raise the failure would be a crash rather than a default. Scanning
+/// digits is what `int_flag` already does, and one rule for the whole driver
+/// is worth more than a second, subtly different one.
+fn parse_uint(s : String) -> Int {
+  let mut v = 0
+  let mut k = 0
+  let mut any = false
+  while k < s.length() {
+    let d = s[k].to_int()
+    if d >= 48 && d <= 57 {
+      v = v * 10 + (d - 48)
+      any = true
+    }
+    k = k + 1
+  }
+  if any { v } else { 0 }
+}
+
 ///| 扫一个 `--flag <n>` 形式的数值参数
 fn int_flag(argv : Array[String], name : String, fallback : Int) -> Int {
   let mut i = 1
@@ -682,14 +705,75 @@ fn run_proposal() -> Unit {
 /// `--subsystem <name>` 故意传一个不存在的子系统名。这时必须报
 /// `SubsystemRejected`,而不是「发了 INIT 之后莫名其妙没反应」:want_reply=TRUE
 /// 的 CHANNEL_FAILURE 是「没有这个子系统」的唯一信号(session.c:1945-1948)。
+///|
+/// The payload a `--sftp-write` produces, from its length alone.
+///
+/// Written as a rule rather than read from a file because the browser path
+/// cannot read one: `cmd/wt_ssh` runs in a Worker, where there is no
+/// filesystem. Duplicating a literal blob in three places would be a way to
+/// make the three disagree; a three-line arithmetic rule that the gate
+/// re-derives in Python and compares by SHA-256 makes disagreement *visible*
+/// instead. There is no SHA-256, no RNG and no encoding step here precisely
+/// so that native, js, wasm and wasm-gc cannot produce different bytes.
+fn payload_of(n : Int) -> FixedArray[Byte] {
+  let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    out[i] = ((i * 31 + 7) % 256).to_byte()
+  }
+  out
+}
+
+///| 最后一个 `@` 的下标;没有就 -1。
+///
+/// 手写而不是用 `last_index_of`:那个方法在本仓这版 moon 上不存在,而为一个
+/// 只用一次的查找去引新依赖不值得。
+fn last_at(s : String) -> Int {
+  let mut k = s.length()
+  while k > 0 {
+    k = k - 1
+    if s[k].to_int() == 64 {
+      return k
+    }
+  }
+  -1
+}
+
+///|
+/// `<path>@<size>` 一整个 token,而不是 `<path> <size>` 两个槽。
+///
+/// 原因不是偷懒:这个驱动的端口是**裸数字**参数(`cmd/ssh_live ... 18781`),
+/// `find_port` 扫的就是第一个能解析成端口的参数。size 若单独占一个槽,在端口
+/// 之前就会被当成端口,然后连 127.0.0.1:40000 也连不上——报出来的是
+/// CONNECT_FAILED,看起来像客户端坏了,其实是一个自造的参数冲突。
+///
+/// 分隔符用 `@` 而不是 `:`:Windows 路径 `C:/...` 里本来就有冒号。
+fn split_at_last(spec : String) -> (String, Int) {
+  let at = last_at(spec)
+  if at < 0 {
+    return (spec, 0)
+  }
+  (spec.unsafe_substring(start=0, end=at),
+   parse_uint(spec.unsafe_substring(start=at + 1, end=spec.length())))
+}
+
 fn sftp_mode(argv : Array[String], port : Int) -> Bool {
   let mut dir : String? = None
   // 可以给多次:`--sftp-read a --sftp-read b` 就是脚本里的两个 ReadFile。
   // 只保留最后一个的话,验证脚本就没法在一次会话里同时读小文件和大文件,而
   // 「大文件要跨很多次 READ」正是这一轮要证明的事。
-  let reads : Array[String] = []
   let mut missing = false
   let mut subsystem = "sftp"
+  // 写侧:`--sftp-write <path>@<size>` / `--sftp-mkdir <p>` / `--sftp-rmdir <p>`
+  // / `--sftp-remove <p>` / `--sftp-rename <from>@<to>`。
+  //
+  // 这些**在扫描 argv 的当下就进 `ops`**,而不是先分门别类收进几个数组、事后
+  // 再拼回去。早先那版是分组入队的,于是 `--sftp-mkdir d --sftp-write d/f`
+  // 实际发成「先写再建目录」,写必然失败,而命令行的读法完全相反。更糟的是
+  // 当时函数上的注释写着「按命令行顺序」——注释和行为分叉,比任一个单独存在
+  // 都更容易让人相信那个错的顺序。顺序在这里是有语义的:`mkdir` 必须排在
+  // 往里面写的 `write` 前面。
+  let ops : Array[@sftp.SftpOp] = []
+  let mut saw_any = false
   let mut i = 1
   while i < argv.length() {
     if argv[i] == "--sftp" && i + 1 < argv.length() {
@@ -698,7 +782,50 @@ fn sftp_mode(argv : Array[String], port : Int) -> Bool {
       continue
     }
     if argv[i] == "--sftp-read" && i + 1 < argv.length() {
-      reads.push(argv[i + 1])
+      ops.push(@sftp.SftpOp::ReadFile(argv[i + 1]))
+      saw_any = true
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-write" && i + 1 < argv.length() {
+      let (p, n) = split_at_last(argv[i + 1])
+      ops.push(@sftp.SftpOp::WriteFile(p, payload_of(n)))
+      saw_any = true
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-mkdir" && i + 1 < argv.length() {
+      ops.push(@sftp.SftpOp::MakeDir(argv[i + 1], @sftp.SftpAttrs::none()))
+      saw_any = true
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-rmdir" && i + 1 < argv.length() {
+      ops.push(@sftp.SftpOp::RemoveDir(argv[i + 1]))
+      saw_any = true
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-remove" && i + 1 < argv.length() {
+      ops.push(@sftp.SftpOp::RemovePath(argv[i + 1]))
+      saw_any = true
+      i = i + 2
+      continue
+    }
+    if argv[i] == "--sftp-rename" && i + 1 < argv.length() {
+      let at = last_at(argv[i + 1])
+      if at >= 0 {
+        ops.push(
+          @sftp.SftpOp::Rename(
+            argv[i + 1].unsafe_substring(start=0, end=at),
+            argv[i + 1].unsafe_substring(
+              start=at + 1,
+              end=argv[i + 1].length(),
+            ),
+          ),
+        )
+        saw_any = true
+      }
       i = i + 2
       continue
     }
@@ -714,26 +841,27 @@ fn sftp_mode(argv : Array[String], port : Int) -> Bool {
     }
     i = i + 1
   }
-  if dir is None && reads.length() == 0 && !missing {
+  if dir is None && !missing && !saw_any {
     return false
   }
   let user = find_user(@env.args())
-  println("=== Loop #39 SFTP vs real sshd ===")
+  println("=== Loop #40 SFTP write side vs real sshd ===")
   println("port: " + port.to_string())
   println("user: " + user)
   println("subsystem: " + subsystem)
-  let ops : Array[@sftp.SftpOp] = []
-  ops.push(@sftp.SftpOp::Realpath("."))
+  // REALPATH 打头,其余按命令行顺序接在后面。
+  let script : Array[@sftp.SftpOp] = [@sftp.SftpOp::Realpath(".")]
   match dir {
-    Some(d) => ops.push(@sftp.SftpOp::ListDir(d))
+    Some(d) => script.push(@sftp.SftpOp::ListDir(d))
     None => ()
   }
-  for j = 0; j < reads.length(); j = j + 1 {
-    ops.push(@sftp.SftpOp::ReadFile(reads[j]))
+  for j = 0; j < ops.length(); j = j + 1 {
+    script.push(ops[j])
   }
   if missing {
-    ops.push(@sftp.SftpOp::Stat(no_such_path()))
+    script.push(@sftp.SftpOp::Stat(no_such_path()))
   }
+  let ops = script
   match @tcp.TcpConn::connect("127.0.0.1", port) {
     None => {
       println("result: CONNECT_FAILED")
@@ -814,6 +942,13 @@ fn print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
       println(tag + "_len: " + b.length().to_string())
       println(tag + "_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(b)))
       println(tag + "_hex: " + dump_prefix(b))
+    }
+    @sftp.SftpOpResult::Wrote(n) => {
+      println(tag + ": WROTE")
+      println(tag + "_bytes: " + n.to_string())
+    }
+    @sftp.SftpOpResult::Changed => {
+      println(tag + ": CHANGED")
     }
     @sftp.SftpOpResult::Failed(code, msg) => {
       println(tag + ": FAILED")

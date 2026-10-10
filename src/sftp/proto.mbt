@@ -51,6 +51,22 @@ pub const FXP_HANDLE : Int = 102
 pub const FXP_DATA : Int = 103
 pub const FXP_NAME : Int = 104
 pub const FXP_ATTRS : Int = 105
+///| SSH2_FXP_EXTENDED / SSH2_FXP_EXTENDED_REPLY (sftp.h:65-66).
+///|
+///| Left out of the first version of this package, on the grounds that a v3
+///| client never needs them -- true until the moment you want to *overwrite* a
+///| file: `FXP_RENAME` is specified to fail when the target exists, and
+///| `posix-rename@openssh.com` is what actually replaces it. A missing constant
+///| here reads as "not implemented" and turns into "I can only create files".
+pub const FXP_EXTENDED : Int = 200
+pub const FXP_EXTENDED_REPLY : Int = 201
+
+///| The extension name OpenSSH advertises in VERSION for an atomic replace.
+///|
+///| Not a constant from the draft -- it is an OpenSSH extension, so it exists
+///| only because a particular server said so in its VERSION reply. Which is why
+///| the driver checks `SftpSession::has_extension` rather than assuming.
+pub const EXT_POSIX_RENAME : String = "posix-rename@openssh.com"
 
 // ---- attribute flags (sftp.h:68-72) ---------------------------------------
 

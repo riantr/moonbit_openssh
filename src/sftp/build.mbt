@@ -134,6 +134,173 @@ pub fn sftp_read(
 }
 
 ///|
+/// SSH2_FXP_WRITE (sftp.h:38, `process_write` sftp-server.c:846-856).
+///
+/// Same offset discipline as READ, and the same reason it is load-bearing:
+/// `process_write` does `lseek(fd, off, SEEK_SET)` unless the handle was opened
+/// O_APPEND (`:865-866`), so a wrong offset is not a rejected request -- it is
+/// bytes written somewhere else in the file.
+///
+/// There is no clamp on the server side for writes the way there is for reads,
+/// but the length still travels inside a `string` in a packet bounded by
+/// `SFTP_MAX_MSG_LENGTH`, so `sftp_write_length` keeps one packet's worth of
+/// data comfortably under that.
+pub fn sftp_write(
+  id : Int,
+  handle : FixedArray[Byte],
+  offset : UInt64,
+  data : FixedArray[Byte],
+) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(FXP_WRITE), put_u32i(id),
+    @sshwire.write_ssh_string(handle),
+    @sshwire.write_u64(offset),
+    @sshwire.write_ssh_string(data),
+  ])
+}
+
+///|
+/// SSH2_FXP_SETSTAT (sftp.h:47, `process_setstat` sftp-server.c:979-982).
+///
+/// Setting nothing is not a no-op request that succeeds quietly: the server
+/// still answers, and `decode_attrib` runs over whatever the flags say, so the
+/// encoding of "I want to change nothing" is `SftpAttrs::none()` -- four zero
+/// bytes -- and it is a complete, legal request.
+pub fn sftp_setstat(
+  id : Int,
+  path : String,
+  attrs : SftpAttrs,
+) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(FXP_SETSTAT), put_u32i(id),
+    @sshwire.write_ssh_string(sftp_ascii(path)),
+    attrs.encode(),
+  ])
+}
+
+///|
+/// SSH2_FXP_FSETSTAT (sftp.h:48) -- SETSTAT by handle rather than by path.
+pub fn sftp_fsetstat(
+  id : Int,
+  handle : FixedArray[Byte],
+  attrs : SftpAttrs,
+) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(FXP_FSETSTAT), put_u32i(id),
+    @sshwire.write_ssh_string(handle),
+    attrs.encode(),
+  ])
+}
+
+///|
+/// SSH2_FXP_RENAME (sftp.h:52, `process_rename` sftp-server.c:1261-1264).
+///
+/// Two paths, both length-prefixed strings, and both required: a trailing
+/// field the server does not read would not be noticed here, but a missing one
+/// is a `fatal_fr`, i.e. the session is torn down rather than answered.
+pub fn sftp_rename(
+  id : Int,
+  old_path : String,
+  new_path : String,
+) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(FXP_RENAME), put_u32i(id),
+    @sshwire.write_ssh_string(sftp_ascii(old_path)),
+    @sshwire.write_ssh_string(sftp_ascii(new_path)),
+  ])
+}
+
+///|
+/// The single-argument filesystem operations.
+///
+/// They differ only in the message number, and every one of them answers with
+/// a STATUS, so they are one function rather than four: a reader looking for
+/// "what does REMOVE send" should find the list, not three near-identical
+/// bodies that could drift apart in the details.
+pub fn sftp_path_only(id : Int, typ : Int, path : String) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(typ), put_u32i(id),
+    @sshwire.write_ssh_string(sftp_ascii(path)),
+  ])
+}
+
+pub fn sftp_remove(id : Int, path : String) -> FixedArray[Byte] {
+  sftp_path_only(id, FXP_REMOVE, path)
+}
+
+pub fn sftp_rmdir(id : Int, path : String) -> FixedArray[Byte] {
+  sftp_path_only(id, FXP_RMDIR, path)
+}
+
+///|
+/// SSH2_FXP_MKDIR (sftp.h:42, `process_mkdir` sftp-server.c:1196-1199).
+///
+/// Unlike REMOVE and RMDIR, MKDIR carries attributes after the path -- the
+/// mode comes from them when the PERMISSIONS bit is set, and 0777 otherwise
+/// (`:1201-1203`). Sending zero bytes there is a parse failure, not a default.
+pub fn sftp_mkdir(
+  id : Int,
+  path : String,
+  attrs : SftpAttrs,
+) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(FXP_MKDIR), put_u32i(id),
+    @sshwire.write_ssh_string(sftp_ascii(path)),
+    attrs.encode(),
+  ])
+}
+
+///|
+/// SSH2_FXP_EXTENDED (sftp.h:65), and the shape every OpenSSH extension uses:
+/// the extension name, then whatever that extension defines.
+///
+/// `posix-rename@openssh.com` takes two paths and nothing else
+/// (`process_extended_posix_rename` sftp-server.c), which is the point of
+/// choosing it over FXP_RENAME: the v3 rename is specified to fail if the
+/// target exists, while `posix(2)` replaces it. A client that only knows
+/// FXP_RENAME cannot overwrite, and one that only knows the extension cannot
+/// work against a server that does not advertise it -- so the driver checks
+/// what VERSION said.
+pub fn sftp_extended(
+  id : Int,
+  name : String,
+  body : FixedArray[Byte],
+) -> FixedArray[Byte] {
+  sftp_cat([
+    put_type(FXP_EXTENDED), put_u32i(id),
+    @sshwire.write_ssh_string(sftp_ascii(name)),
+    body,
+  ])
+}
+
+///|
+/// `posix-rename@openssh.com`: the two paths, nothing more.
+pub fn sftp_posix_rename_body(
+  old_path : String,
+  new_path : String,
+) -> FixedArray[Byte] {
+  sftp_cat([
+    @sshwire.write_ssh_string(sftp_ascii(old_path)),
+    @sshwire.write_ssh_string(sftp_ascii(new_path)),
+  ])
+}
+
+///|
+/// The WRITE chunk size this client asks for.
+///
+/// There is no server-side clamp for writes, so this is our own choice, and it
+/// is worth stating why it is not "as large as possible": a 256 KiB write
+/// becomes one SSH packet, which the channel layer then has to split across
+/// several CHANNEL_DATA messages and reassemble, so a larger chunk buys
+/// nothing and makes the window arithmetic harder to reason about.
+pub fn sftp_write_length(want : Int) -> Int {
+  if want > 32768 {
+    return 32768
+  }
+  want
+}
+
+///|
 /// SSH2_FXP_CLOSE (sftp.h:36).
 pub fn sftp_close(id : Int, handle : FixedArray[Byte]) -> FixedArray[Byte] {
   sftp_cat([

@@ -67,10 +67,10 @@ MUTATIONS = [
     # ---- VERSION ---------------------------------------------------------
     (
         "demand end-of-packet right after the version number",
-        "  Parsed(SftpReply::Version({ version: v, extensions: n }))",
+        "  Parsed(SftpReply::Version({ version: v, extensions: n, ext_names: names }))",
         "  match c.err {\n    Some(_) => return Rejected(SftpError::TrailingData)\n"
         "    None => ()\n  }\n"
-        "  Parsed(SftpReply::Version({ version: v, extensions: 0 }))",
+        "  Parsed(SftpReply::Version({ version: v, extensions: 0, ext_names: names }))",
         "live_realpath_stat",
     ),
 
@@ -188,6 +188,83 @@ MUTATIONS = [
         "    next_id: 1,",
         "    next_id: 0,",
         "live_realpath_stat",
+    ),
+
+    # ---- the write side --------------------------------------------------
+
+    (
+        "never advance the WRITE offset, so every chunk rewrites the first",
+        "  self.written = self.written + n",
+        "  let _ = n",
+        "live_writefile_two_chunks",
+    ),
+    (
+        "send the remaining byte count where the file offset belongs",
+        "  self.queue(sftp_write(id, self.handle, self.written.to_uint64(), chunk))",
+        "  self.queue(sftp_write(id, self.handle,\n"
+        "    (self.pending_write.length() - self.written).to_uint64(), chunk))",
+        "live_writefile_two_chunks",
+    ),
+    (
+        "open without TRUNC, so writing appends to whatever was there",
+        "        sftp_open(id, p, FXF_WRITE | FXF_CREAT | FXF_TRUNC, SftpAttrs::none()),",
+        "        sftp_open(id, p, FXF_WRITE | FXF_CREAT, SftpAttrs::none()),",
+        "live_writefile_single_chunk",
+    ),
+    (
+        "drop the payload, so every write writes nothing and says it did",
+        "      self.pending_write = data",
+        "      self.pending_write = FixedArray::make(0, b'\\x00')",
+        "live_writefile_single_chunk",
+    ),
+    (
+        "report zero bytes written whatever actually went out",
+        "    self.results.push(Wrote(self.written))",
+        "    self.results.push(Wrote(0))",
+        "live_writefile_single_chunk",
+    ),
+    (
+        "keep the extension count but throw the names away, so Rename can "
+        "never discover what the server supports",
+        "          self.ext_names = v.ext_names",
+        "          let _ = v.ext_names",
+        "live_posix_rename_extension",
+    ),
+    (
+        "always use the v3 RENAME, which cannot overwrite an existing target",
+        "      if self.has_extension(EXT_POSIX_RENAME) {",
+        "      if false {",
+        "live_posix_rename_extension",
+    ),
+    (
+        "leave the handle open after a failed WRITE, leaking the descriptor",
+        "            // Still close the handle: the OPEN succeeded, so the server is\n"
+        "            // holding a descriptor, and leaving it open leaks it until the\n"
+        "            // channel goes away.\n"
+        "            self.send_close()",
+        "            let _ = 0",
+        "negative_write_failure_still_closes",
+    ),
+    (
+        "swap REMOVE and RMDIR, which are 13 and 15",
+        "pub const FXP_REMOVE : Int = 13",
+        "pub const FXP_REMOVE : Int = 15",
+        "live_mkdir_then_remove",
+    ),
+    (
+        "send MKDIR without the attribute block the server requires",
+        "    put_type(FXP_MKDIR), put_u32i(id),\n"
+        "    @sshwire.write_ssh_string(sftp_ascii(path)),\n"
+        "    attrs.encode(),",
+        "    put_type(FXP_MKDIR), put_u32i(id),\n"
+        "    @sshwire.write_ssh_string(sftp_ascii(path)),",
+        "live_mkdir_then_remove",
+    ),
+    (
+        "swap the reply numbers the other way: STATUS where HANDLE belongs",
+        "pub const FXP_HANDLE : Int = 102",
+        "pub const FXP_HANDLE : Int = 101",
+        "live_writefile_single_chunk",
     ),
 ]
 

@@ -40,10 +40,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sftp_oracle import (  # noqa: E402
-    ATTR_SIZE, FX_EOF, FXP_ATTRS, FXP_DATA, FXP_HANDLE, FXP_NAME, FXP_STATUS,
-    FX_NO_SUCH_FILE, Buf, attrs_summary, f_close, f_init, f_open, f_opendir,
-    f_read, f_readdir, f_realpath, f_stat, parse_attrs, parse_reply, retag,
-    script_requests, split_stream, u32,
+    ATTR_ACMODTIME, ATTR_PERMISSIONS, ATTR_SIZE, FX_EOF, FXP_ATTRS,
+    FXP_DATA, FXP_EXTENDED, FXP_HANDLE, FXP_NAME, FXP_STATUS, FX_NO_SUCH_FILE,
+    FX_OP_UNSUPPORTED, FXF_CREAT, FXF_TRUNC, FXF_WRITE, Buf, attrs_summary,
+    encode_attrs, f_attrs_none, f_close, f_init, f_mkdir, f_open, f_opendir,
+    f_posix_rename, f_read, f_readdir, f_realpath, f_remove, f_rename, f_rmdir,
+    f_setstat, f_stat, f_write, parse_attrs, parse_reply, retag,
+    script_requests, split_stream, u32, write_chunks,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +69,31 @@ def load_capture(path):
     for p in cap["_c2s"] + cap["_s2c"]:
         if "raw" in p:
             p["rawb"] = bytes.fromhex(p["raw"])
+    return cap
+
+
+def load_write_capture(path):
+    """The write capture, indexed the same way -- plus the raw EXTENDED
+    session, which is a *separate* connection and therefore a separate pair
+    of streams."""
+    cap = json.load(open(path, encoding="utf-8"))
+    cap["_c2s"] = split_stream(bytes.fromhex(cap["c2s"]))
+    cap["_s2c"] = split_stream(bytes.fromhex(cap["s2c"]))
+    for p in cap["_c2s"] + cap["_s2c"]:
+        if "raw" in p:
+            p["rawb"] = bytes.fromhex(p["raw"])
+    ext = split_stream(bytes.fromhex(cap["ext_s2c"]))
+    cap["_ext_s2c_raw"] = [bytes.fromhex(p["raw"]) for p in ext
+                           if "raw" in p]
+    rm = split_stream(bytes.fromhex(cap["rm_c2s"]))
+    cap["_rm_c2s"] = rm
+    for p in rm:
+        if "raw" in p:
+            p["rawb"] = bytes.fromhex(p["raw"])
+    ver = [p for p in cap["_s2c"] if "rawb" in p and p["rawb"][0] == 2]
+    if not ver:
+        raise SelfCheck("no VERSION in the write capture")
+    cap["_ver_raw"] = ver[0]["rawb"]
     return cap
 
 
@@ -212,12 +240,19 @@ def render_status(st):
     return "failed=code=%d:msg=%s" % (st["code"], st["message"].encode("utf-8").hex())
 
 
-def case(name, ops, chunks, results, note=""):
+def case(name, ops, chunks, results, note="", requests=None):
+    # `requests` may be overridden where the scripted stream depends on how
+    # the server answered.  `script_requests` is the right answer for every
+    # case that succeeds; a case whose OPEN is refused has no handle, so it
+    # must not be expected to emit the WRITE and CLOSE that a successful OPEN
+    # would lead to.
     return {
         "name": name,
         "ops": ops,
         "chunks": [c.hex() for c in chunks],
-        "requests": [r.hex() for r in script_requests(ops)],
+        "requests": [r.hex() for r in
+                     (requests if requests is not None
+                      else script_requests(ops))],
         "results": results,
         "done": len(results) == len(ops),
         "note": note,
@@ -421,11 +456,308 @@ def framed(raw):
 
 
 # ---------------------------------------------------------------------------
+# the write side
+# ---------------------------------------------------------------------------
+
+def write_offsets(wcap):
+    """Every WRITE offset on the wire, in order."""
+    out = []
+    for p in wcap["_c2s"]:
+        if "rawb" in p and p["rawb"][0] == 6:
+            # type(1) + id(4) + handle string(4 len + 4 data) + offset(8)
+            out.append(struct.unpack(">Q", p["rawb"][13:21])[0])
+    return out
+
+
+def selfcheck_write(wcap):
+    """The write side against what paramiko actually framed.
+
+    The load-bearing claim here is the offset.  Everything else about a WRITE
+    is a length and a type byte; the offset is the one field where a plausible
+    wrong value produces a file that looks right.
+    """
+    problems = []
+
+    offs = write_offsets(wcap)
+    if not offs:
+        problems.append("no WRITE in the capture at all")
+        return problems
+    # Offsets are per *file*, not per session: re-opening the same path with
+    # TRUNC starts a fresh file and the offset goes back to 0.  So the
+    # invariant is not "always increasing" -- it is "equals the running total
+    # of the payloads written so far, resetting at the start of each file".
+    # An implementation that used a session-global counter would fail here,
+    # and one that never reset would overwrite its own output.
+    sizes = []
+    for p in wcap["_c2s"]:
+        if "rawb" in p and p["rawb"][0] == 6:
+            sizes.append(struct.unpack(">I", p["rawb"][21:25])[0])
+    running = 0
+    resets = 0
+    for i, (off, sz) in enumerate(zip(offs, sizes)):
+        if off == 0:
+            if i != 0:
+                resets += 1
+            running = 0
+        elif off != running:
+            problems.append("WRITE #%d has offset %d, expected %d -- offsets "
+                            "are not accumulating payload lengths"
+                            % (i, off, running))
+            break
+        running += sz
+    if resets == 0:
+        problems.append("no offset ever returned to 0, so the per-file reset "
+                        "is untested")
+    if offs[0] != 0:
+        problems.append("first WRITE offset is %d, not 0" % offs[0])
+
+    # Our framing of one of paramiko's own WRITEs, byte for byte.
+    first = None
+    for p in wcap["_c2s"]:
+        if "rawb" in p and p["rawb"][0] == 6:
+            first = p["rawb"]
+            break
+    rid = struct.unpack(">I", first[1:5])[0]
+    # first[5:9] is the handle's *length prefix*; `s()` adds its own, so
+    # slicing it in as well would frame the handle twice.
+    handle = first[9:13]
+    off = struct.unpack(">Q", first[13:21])[0]
+    data = first[25:]
+    # `f_write` returns a framed packet; the capture entry is the payload with
+    # the length prefix already stripped, so strip ours the same way.
+    ours = f_write(rid, handle, off, data)
+    if ours[4:] != first:
+        problems.append("our WRITE framing differs:\n    ours   %s\n    theirs %s"
+                        % (ours[:44].hex(), first[:40].hex()))
+
+    # The message numbers, cross-checked against the capture rather than
+    # against sftp.h alone -- 13 and 15 are adjacent and swapping them still
+    # produces a well-formed packet the server simply rejects.
+    seen = {}
+    for p in wcap["_c2s"] + wcap["_rm_c2s"]:
+        if "rawb" in p:
+            seen.setdefault(p["rawb"][0], 0)
+            seen[p["rawb"][0]] += 1
+    for typ, name, expect in ((13, "REMOVE", 1), (14, "MKDIR", 1),
+                              (9, "SETSTAT", 2), (18, "RENAME", 1),
+                              (6, "WRITE", 1), (4, "CLOSE", 1),
+                              (15, "RMDIR", 1)):
+        if seen.get(typ, 0) < expect:
+            problems.append("capture has %d %s(%d) packets, expected >= %d"
+                            % (seen.get(typ, 0), name, typ, expect))
+
+    # REMOVE(13) and RMDIR(15) are adjacent and swap without producing a
+    # malformed packet -- the server just refuses the operation.  Compare the
+    # bytes rather than trusting the constant.
+    rm_stream = wcap["_rm_c2s"]
+    rm_types = [p["rawb"][0] for p in rm_stream if "rawb" in p]
+    if 13 in rm_types and 15 in rm_types:
+        # the recorder drove `remove(child.txt)` then `rmdir(nested)`
+        i13 = rm_types.index(13)
+        i15 = rm_types.index(15)
+        if not i13 < i15:
+            problems.append("REMOVE and RMDIR arrived in the capture in an "
+                            "order that does not match the operations driven")
+        rm_path = rm_stream[i13]["rawb"][9:]
+        rd_path = rm_stream[i15]["rawb"][9:]
+        if rm_path == rd_path:
+            problems.append("REMOVE and RMDIR carry the same path, so the two "
+                            "messages cannot be told apart by their payload")
+
+    # OPEN flags for a write: our WRITE|CREAT|TRUNC is the same triple
+    # OpenSSH's own client uses when it renames a file into place
+    # (sftp-client.c:2502).
+    ours_flags = FXF_WRITE | FXF_CREAT | FXF_TRUNC
+    theirs_flags = None
+    for p in wcap["_c2s"]:
+        if "rawb" in p and p["rawb"][0] == 3:
+            # type(1)+id(4)+path string(4+n)+pflags(4)
+            n = struct.unpack(">I", p["rawb"][5:9])[0]
+            theirs_flags = struct.unpack(">I", p["rawb"][9 + n:13 + n])[0]
+            break
+    if theirs_flags is not None and theirs_flags != ours_flags:
+        problems.append("write OPEN pflags %08x != ours %08x"
+                        % (theirs_flags, ours_flags))
+
+    # The three EXTENDED outcomes, verbatim off the wire.
+    ext = wcap["_ext_s2c_raw"]
+    codes = [struct.unpack(">I", r[5:9])[0] for r in ext[1:]]
+    if codes != [0, 0, FX_OP_UNSUPPORTED]:
+        problems.append("EXTENDED status codes %r != [0, 0, %d]"
+                        % (codes, FX_OP_UNSUPPORTED))
+
+    print("  WRITE offsets (first 8): %s" % (offs[:8],))
+    print("  WRITE payload sizes     : %s" % (sizes[:8],))
+    print("  EXTENDED status codes   : %s" % (codes,))
+    print("  version extensions      : %s"
+          % (" ".join(wcap["version_ext_names"]),))
+    return problems
+
+
+def build_write_cases(wcap, cap):
+    """Scripted write-side cases, with real server bytes as the replies."""
+    cases = []
+    ver = wcap["_ver_raw"]
+    # Real STATUS replies from the write capture: HANDLE for an OPEN, and the
+    # STATUS that answers a WRITE and one that answers a CLOSE.
+    handle = find_reply(wcap, FXP_HANDLE, 2)
+    write_ok = find_reply(wcap, FXP_STATUS, 3)
+    close_ok = find_reply(wcap, FXP_STATUS, 16)
+    mkdir_ok = find_reply(wcap, FXP_STATUS, 1)
+    # the EXTENDED session's three statuses
+    ext_status = wcap["_ext_s2c_raw"][1:]
+    posix_ok = ext_status[0]
+    overwrite_ok = ext_status[1]
+    unsupported = ext_status[2]
+
+    w_dir = wcap["fixture"].replace("\\", "/") + "/w"
+    p_main = w_dir + "/main.bin"
+
+    # --- 1. a single-chunk write -----------------------------------------
+    payload = bytes(range(64)) * 4          # 256 bytes, more than one packet
+    cases.append(case(
+        "live_writefile_single_chunk",
+        [("writefile", p_main, payload.hex())],
+        [framed(ver), framed(retag(handle, 1)),
+         framed(retag(write_ok, 2)), framed(retag(close_ok, 3))],
+        ["wrote=%d" % len(payload)],
+        "OPEN(WRITE|CREAT|TRUNC), one WRITE at offset 0, CLOSE -- %d bytes"
+        % len(payload)))
+
+    # --- 2. a write that crosses the chunk boundary ----------------------
+    # Two WRITEs, and the second one's offset is the first one's length.
+    # That offset is the whole point: sent as "bytes still to send" the file
+    # ends the right length with the first chunk written twice.
+    big = bytes((i * 7) & 0xFF for i in range(32768 + 24))
+    reqs = script_requests([("writefile", p_main, big.hex())])
+    writes = [r for r in reqs if r[4] == 6]
+    if len(writes) != 2:
+        raise SelfCheck("expected 2 WRITEs for %d bytes, script made %d"
+                         % (len(big), len(writes)))
+    cases.append(case(
+        "live_writefile_two_chunks",
+        [("writefile", p_main, big.hex())],
+        [framed(ver), framed(retag(handle, 1)),
+         framed(retag(write_ok, 2)), framed(retag(write_ok, 3)),
+         framed(retag(close_ok, 4))],
+        ["wrote=%d" % len(big)],
+        "two WRITEs at offsets 0 and %d -- the second is the *file* offset, "
+        "not a remaining-byte count" % len(big[:32768])))
+
+    # --- 3. an empty payload sends no WRITE at all ------------------------
+    cases.append(case(
+        "live_writefile_empty_sends_no_write",
+        [("writefile", p_main, "")],
+        [framed(ver), framed(retag(handle, 1)), framed(retag(close_ok, 2))],
+        ["wrote=0"],
+        "OPEN with TRUNC already emptied the file, so a WRITE would have "
+        "nothing to do -- and one empty WRITE would look on the wire exactly "
+        "like having written the file"))
+
+    # --- 4. MKDIR then REMOVE ---------------------------------------------
+    cases.append(case(
+        "live_mkdir_then_remove",
+        [("mkdir", w_dir + "/k"), ("remove", w_dir + "/k")],
+        [framed(ver), framed(retag(mkdir_ok, 1)), framed(retag(mkdir_ok, 2))],
+        ["changed", "changed"],
+        "MKDIR carries an attribute block and REMOVE does not -- both answer "
+        "with a STATUS(OK)"))
+
+    # --- 5. SETSTAT, permissions and times -------------------------------
+    cases.append(case(
+        "live_setstat_perms_times",
+        [("setattrs", p_main, {"permissions": 0o640,
+                               "atime": 1700000000, "mtime": 1700000123})],
+        [framed(ver), framed(retag(mkdir_ok, 1))],
+        ["changed"],
+        "one SETSTAT carrying both a permissions field and an atime/mtime "
+        "pair, in that order"))
+
+    # --- 6. SETSTAT with nothing to change --------------------------------
+    cases.append(case(
+        "live_setstat_none",
+        [("setattrs", p_main, {})],
+        [framed(ver), framed(retag(mkdir_ok, 1))],
+        ["changed"],
+        "four zero bytes is 'change nothing' and is a complete request -- an "
+        "empty attribute block would be a parse failure, not a default"))
+
+    # --- 7. posix-rename, the extension path ------------------------------
+    cases.append(case(
+        "live_posix_rename_extension",
+        [("rename", p_main, w_dir + "/renamed.bin")],
+        [framed(ver), framed(retag(posix_ok, 1))],
+        ["changed"],
+        "FXP_EXTENDED with posix-rename@openssh.com, because VERSION "
+        "advertised it -- this is what can replace an existing target"))
+
+    # --- 8. an extension the server does not implement --------------------
+    cases.append(case(
+        "negative_rename_op_unsupported",
+        [("rename", p_main, w_dir + "/nope.bin")],
+        [framed(ver), framed(retag(unsupported, 1))],
+        [render_status(parse_reply(unsupported)[1])],
+        "STATUS(SSH2_FX_OP_UNSUPPORTED) is a completed exchange: reported as "
+        "a failure, session still finishes"))
+
+    # --- 9. a failed WRITE must still close the handle --------------------
+    fail = bytes([FXP_STATUS]) + u32(2) + u32(4) + u32(7) + b"failure" + u32(0)
+    cases.append(case(
+        "negative_write_failure_still_closes",
+        [("writefile", p_main, "00112233")],
+        [framed(ver), framed(retag(handle, 1)),
+         framed(retag(fail, 2)), framed(retag(close_ok, 3))],
+        [render_status({"code": 4, "message": "failure"})],
+        "the OPEN succeeded, so the server is holding a descriptor: a failed "
+        "WRITE has to be followed by CLOSE or the handle leaks"))
+    cases[-1]["requests_note"] = "OPEN, WRITE, CLOSE"
+
+    # --- 10. an OPEN that is refused --------------------------------------
+    # Every OPEN in the write capture succeeded, so there is no "OPEN denied"
+    # status to lift from this session.  The read capture has a real
+    # STATUS(SSH2_FX_NO_SUCH_FILE), which is exactly the shape an OPEN on a
+    # missing path produces, and it is the server's own bytes either way.
+    openfail = find_reply(cap, FXP_STATUS, 44)
+    cases.append(case(
+        "negative_open_refused",
+        [("writefile", w_dir + "/never-created", "00")],
+        [framed(ver), framed(retag(openfail, 1))],
+        [render_status(parse_reply(openfail)[1])],
+        "the server refused the OPEN, so there is no handle and nothing to "
+        "close -- and no WRITE may be sent",
+        requests=[f_init(), f_open(1, w_dir + "/never-created",
+                                   FXF_WRITE | FXF_CREAT | FXF_TRUNC)]))
+    return cases
+
+
+def wcase_wrap(cases):
+    return cases
+
+
+# ---------------------------------------------------------------------------
 # emit
 # ---------------------------------------------------------------------------
 
 def mstr(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def mlong(s, width=480):
+    """A long literal, emitted as concatenated pieces.
+
+    A 32 KiB payload is 65536 hex characters on one line, and the compiler
+    rightly complains that the text segment is about to exceed the column
+    limit -- while also printing the whole thing, which buries any real
+    diagnostic underneath it.  Concatenating literals produces the identical
+    string, so nothing downstream can tell the difference.
+    """
+    if len(s) <= width:
+        return mstr(s)
+    parts = [s[i:i + width] for i in range(0, len(s), width)]
+    out = mstr(parts[0])
+    for p in parts[1:]:
+        out += " +\n      " + mstr(p)
+    return out
 
 
 def emit(cases, cap):
@@ -453,6 +785,15 @@ def emit(cases, cap):
     a("pub(all) struct Op {")
     a("  kind : Int")
     a("  path : String")
+    a("  ///| the second path of a rename; empty when the op has none")
+    a("  path2 : String")
+    a("  ///| the payload of a writefile, as hex")
+    a("  payload : String")
+    a("  ///| attribute fields.  -1 means *not mentioned*, which is a")
+    a("  ///| different request from mentioning it with the value 0.")
+    a("  perms : Int")
+    a("  atime : Int")
+    a("  mtime : Int")
     a("}")
     a("")
     a("pub(all) struct Case {")
@@ -471,16 +812,20 @@ def emit(cases, cap):
         a("  {")
         a("    name: %s," % mstr(c["name"]))
         a("    ops: [")
-        for kind, path in c["ops"]:
-            a("      { kind: %d, path: %s }," % (KIND[kind], mstr(path)))
+        for op in c["ops"]:
+            f = op_fields(op)
+            a("      { kind: %d, path: %s, path2: %s, payload: %s, "
+              "perms: %d, atime: %d, mtime: %d },"
+              % (f["kind"], mstr(f["path"]), mstr(f["path2"]),
+                 mlong(f["payload"]), f["perms"], f["atime"], f["mtime"]))
         a("    ],")
         a("    chunks: [")
         for ch in c["chunks"]:
-            a("      %s," % mstr(ch))
+            a("      %s," % mlong(ch))
         a("    ],")
         a("    requests: [")
         for r in c["requests"]:
-            a("      %s," % mstr(r))
+            a("      %s," % mlong(r))
         a("    ],")
         a("    results: [")
         for r in c["results"]:
@@ -500,12 +845,44 @@ def emit(cases, cap):
     return "\n".join(out) + "\n"
 
 
-KIND = {"realpath": 0, "stat": 1, "listdir": 2, "readfile": 3}
+KIND = {"realpath": 0, "stat": 1, "listdir": 2, "readfile": 3,
+        "writefile": 4, "setattrs": 5, "mkdir": 6, "remove": 7,
+        "rmdir": 8, "rename": 9}
+
+# -1 rather than 0 for "not mentioned".  A permissions word of 0 is a real
+# value (`chmod 000`), and collapsing the two would make the generator and the
+# client disagree about a request that is legal and occasionally intended.
+ABSENT = -1
+
+
+def op_fields(op):
+    """Flatten an op tuple into the fields `vectors.mbt` carries.
+
+    Kept in one place so the generated struct and the Python that fills it
+    cannot disagree about what "absent" means.
+    """
+    kind, path = op[0], op[1]
+    rest = op[2:]
+    path2 = ""
+    payload = ""
+    perms, atime, mtime = ABSENT, ABSENT, ABSENT
+    for part in rest:
+        if isinstance(part, str) and payload == "" and kind == "writefile":
+            payload = part
+        elif isinstance(part, str):
+            path2 = part
+        elif isinstance(part, dict):
+            perms = part.get("permissions", ABSENT)
+            atime = part.get("atime", ABSENT)
+            mtime = part.get("mtime", ABSENT)
+    return {"kind": KIND[kind], "path": path, "path2": path2,
+            "payload": payload, "perms": perms, "atime": atime, "mtime": mtime}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--capture", default=".loop39/capture.json")
+    ap.add_argument("--write-capture", default=".loop40/write_capture.json")
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
@@ -519,9 +896,15 @@ def main():
     ver = [p for p in cap["_s2c"] if "rawb" in p and p["rawb"][0] == 2][0]["rawb"]
     cap["_ext_count"] = len(parse_reply(ver)[1]["extensions"])
 
+    wcap = load_write_capture(args.write_capture)
+    wcap["fixture"] = cap["fixture"]
+    print("leg 4: the write side vs paramiko's framing")
+    problems += selfcheck_write(wcap)
+
     print("leg 3: scripted cases")
     try:
         cases = build_cases(cap)
+        cases += build_write_cases(wcap, cap)
     except SelfCheck as e:
         print("  SELFCHECK FAILED: %s" % e)
         return 1

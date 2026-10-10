@@ -131,6 +131,8 @@ fn render_result(r : @sftp.SftpOpResult) -> String {
       sb.to_string()
     }
     Contents(b) => "contents=" + to_hex(b)
+    Wrote(n) => "wrote=" + n.to_string()
+    Changed => "changed"
     Failed(code, msg) => {
       "failed=code=" + code.to_string() + ":msg=" + to_hex(bytes_of(msg))
     }
@@ -146,6 +148,22 @@ fn render_result(r : @sftp.SftpOpResult) -> String {
 ///| `pump` 在 `take_out` **之后**、下一轮 `feed` 之前都调,是因为应答可能已经
 ///| 躺在重组缓冲里,而通道已经没有东西可读了。少这一次 pump,客户端就会去等一个
 ///| 它自己已经收到的包。
+///| Vector 的属性字段。`-1` 表示**不提这个字段**,和「提到但值是 0」是两种
+///| 不同的请求:`chmod 000` 是合法且偶尔想要的,所以不能把它们合并。
+fn attrs_of(o : Op) -> @sftp.SftpAttrs {
+  let a = @sftp.SftpAttrs::none()
+  if o.perms != -1 {
+    a.permissions = Some(o.perms)
+  }
+  if o.atime != -1 {
+    a.atime = Some(o.atime)
+  }
+  if o.mtime != -1 {
+    a.mtime = Some(o.mtime)
+  }
+  a
+}
+
 fn run_case(
   c : Case,
 ) -> (Array[String], Array[String], Bool, Bool, Int, Int, String) {
@@ -156,7 +174,13 @@ fn run_case(
       0 => @sftp.SftpOp::Realpath(o.path)
       1 => @sftp.SftpOp::Stat(o.path)
       2 => @sftp.SftpOp::ListDir(o.path)
-      _ => @sftp.SftpOp::ReadFile(o.path)
+      3 => @sftp.SftpOp::ReadFile(o.path)
+      4 => @sftp.SftpOp::WriteFile(o.path, hex_to_bytes(o.payload))
+      5 => @sftp.SftpOp::SetAttrs(o.path, attrs_of(o))
+      6 => @sftp.SftpOp::MakeDir(o.path, attrs_of(o))
+      7 => @sftp.SftpOp::RemovePath(o.path)
+      8 => @sftp.SftpOp::RemoveDir(o.path)
+      _ => @sftp.SftpOp::Rename(o.path, o.path2)
     }
     ops.push(op)
   }

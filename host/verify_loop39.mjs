@@ -34,6 +34,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
+import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { readFile, stat, writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -183,6 +184,45 @@ async function runInWorker(browser, cfg, timeoutMs) {
 
 // ---------------------------------------------------------------------------
 
+///| 起一个 sshd 并**等到它真的在监听**。
+///|
+///| 固定 sleep 是一个会在冷编译时咬人的做法:变异检查刚把 `_build` 打冷,
+///| 前面那一步比平时慢好几秒,2.5 秒之后 sshd 还没 listen,于是 G3 整段
+///| 报 CONNECT_FAILED ——而报告看起来像客户端坏了。探测端口把「等到了服务」
+///| 变成一个事实,而不是一个猜测。
+async function startSshd(port) {
+  /// 这里**必须**是异步 `spawn` 而不是 `spawnSync`:sshd_setup.mjs 起的是
+  // `sshd -D`,前台永驻,收尾是 `await new Promise(() => {})`,自己永不返回。
+  // spawnSync 会一直等它退出,于是整条门禁停在那里、CPU 为零、没有任何输出——
+  // 看起来像在跑,其实已经死了(实测卡了 27 分钟)。异步 spawn 把收尾留给 --stop。
+  const child = spawn(
+    'cmd',
+    ['/c', 'node', 'host/sshd_setup.mjs', '--port', String(port)],
+    { cwd: ROOT, stdio: 'ignore', detached: false },
+  );
+  child.unref();
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const up = await new Promise(resolve => {
+      const sock = net.connect({ host: '127.0.0.1', port });
+      sock.once('connect', () => {
+        sock.destroy();
+        resolve(true);
+      });
+      sock.once('error', () => resolve(false));
+      sock.setTimeout(500, () => {
+        sock.destroy();
+        resolve(false);
+      });
+    });
+    if (up) return true;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return false;
+}
+
+const SSH_DIR = join(ROOT, '.loop31', 'sshd');
+
 async function main() {
   console.log('=== Loop #39: SFTP / subsystem ===\n');
   console.log('A note on why the KAT is built from a capture rather than from the');
@@ -217,11 +257,8 @@ async function main() {
   // from our own encoder would be testing our encoder against itself.
   const capturePath = join(ROOT, '.loop39', 'capture.json');
   if (!existsSync(capturePath)) {
-    const sshdUp = spawnSync('cmd', ['/c', 'node', 'host/sshd_setup.mjs', '--port', String(SSHD_PORT)], {
-      cwd: ROOT,
-      encoding: 'utf8',
-    });
-    await new Promise(r => setTimeout(r, 2500));
+    const sshdUp = await startSshd(SSHD_PORT);
+    check('sshd came up for the capture', sshdUp, 'port ' + SSHD_PORT);
     const cap = spawnSync('python', ['host/sftp_capture.py', String(SSHD_PORT), capturePath, fixtureAbs], {
       cwd: ROOT,
       encoding: 'utf8',
@@ -284,12 +321,8 @@ async function main() {
 
   // ---- G3: a real internal-sftp ---------------------------------------
   console.log('\n--- G3: real sshd, real internal-sftp ---');
-  const sshd = spawn('cmd', ['/c', 'node', 'host/sshd_setup.mjs', '--port', String(SSHD_PORT)], {
-    cwd: ROOT,
-    stdio: 'ignore',
-    detached: true,
-  });
-  await new Promise(r => setTimeout(r, 2500));
+  const sshdUp = await startSshd(SSHD_PORT);
+  check('sshd came up before the live run', sshdUp, 'port ' + SSHD_PORT);
 
   const native = moon([
     'run', 'cmd/ssh_live', '--target', 'native', String(SSHD_PORT),
@@ -371,6 +404,12 @@ async function main() {
       runText(jsBuild).slice(-300));
 
     const server = await serve(ROOT, HTTP_PORT);
+    // The Worker talks WebSocket, the server speaks TCP, and nothing in this
+    // file bridged them: G5 pointed the Worker at ws://...:8782/ssh with no
+    // listener behind it.  The Worker then simply never finished, which looks
+    // exactly like a browser-side bug.  Loop #40 fixes this properly; the same
+    // relay belongs here too so the section is not decorative.
+    let relay = null;
     // The browser is a prerequisite, not a verdict.  If Playwright's Chromium
     // was never downloaded, say so and keep going -- silently passing a
     // section that never ran would be the one outcome worse than a failure,
@@ -380,8 +419,35 @@ async function main() {
       browser = await chromium.launch({ headless: !HEADED });
     } catch (e) {
       console.log(`  SKIP  the Worker run: ${String(e).split('\n')[0]}`);
-      console.log('        (install it with: npx playwright install chromium)');
+      console.log('        (install it with: node node_modules/playwright/cli.js install chromium)');
       skipped.push('G5 browser Worker (chromium not installed)');
+    }
+    if (browser) {
+      relay = spawn('python',
+        ['host/wt/ws_relay.py', '--listen-port', String(WS_PORT), '--target-port', String(SSHD_PORT)],
+        { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+      let relayText = '';
+      const relayUp = await new Promise(resolve => {
+        const t = setTimeout(() => resolve(false), 20000);
+        relay.stdout.on('data', d => {
+          relayText += d.toString();
+          if (relayText.includes('websocket on ws://')) {
+            clearTimeout(t);
+            resolve(true);
+          }
+        });
+        relay.on('exit', () => { clearTimeout(t); resolve(false); });
+      });
+      check('the websocket relay to sshd came up', relayUp, relayText.slice(-200));
+      if (!relayUp) {
+        // Without the relay the Worker would start, never connect and never
+        // finish -- reported as a browser failure.  Say what actually failed.
+        skipped.push('G5 browser Worker (relay never came up)');
+        await browser.close();
+        relay.kill();
+        server.close();
+        browser = null;
+      }
     }
     if (browser) {
     const cfg = {
@@ -431,6 +497,7 @@ async function main() {
 
     await browser.close();
     }
+    if (relay) relay.kill();
     server.close();
   }
 
@@ -456,8 +523,10 @@ async function main() {
   }
 
   // ---- stop the server ---------------------------------------------------
+  // `sshd_setup.mjs --stop` owns the pid file and the teardown; the gate used
+  // to keep its own handle and kill it here, which was a second way to stop
+  // the same process and could only ever disagree with the pid file.
   spawnSync('cmd', ['/c', 'node', 'host/sshd_setup.mjs', '--stop'], { cwd: ROOT, stdio: 'ignore' });
-  try { process.kill(sshd.pid); } catch { /* already gone */ }
 
   console.log('');
   if (failures.length === 0) {

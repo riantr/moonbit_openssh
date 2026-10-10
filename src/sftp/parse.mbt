@@ -40,6 +40,14 @@ pub(all) struct SftpNameEntry {
 pub(all) struct SftpVersionReply {
   version : Int
   extensions : Int
+  /// The extension names, in the order the server sent them.
+  ///
+  /// Kept because "the count" and "which names" are different facts and only
+  /// the second one is actionable. `posix-rename@openssh.com` is what makes
+  /// overwriting a file possible at all -- v3's RENAME is specified to fail
+  /// when the target exists -- so a client that recorded only a number could
+  /// never tell whether it may overwrite.
+  ext_names : Array[String]
 }
 
 ///|
@@ -124,15 +132,27 @@ pub fn sftp_parse_version(body : FixedArray[Byte]) -> SftpParse {
   // termination, and a server that sent an odd number of pairs ends up
   // Truncated here rather than silently dropping the last one.
   let mut n = 0
+  let names : Array[String] = []
   while c.remaining() > 0 {
-    let _name = c.string()
+    let name = c.string()
     let _value = c.string()
     if checked(c.err) {
       return Rejected(c.err.unwrap())
     }
+    names.push(bytes_text_of(name))
     n = n + 1
   }
-  Parsed(SftpReply::Version({ version: v, extensions: n }))
+  Parsed(SftpReply::Version({ version: v, extensions: n, ext_names: names }))
+}
+
+///| 应答里的原始字节按 latin-1 变成文本——扩展名都是 ASCII,而 SFTP 的 string
+///| 是字节串,不是「某个编码的字符串」。
+fn bytes_text_of(b : FixedArray[Byte]) -> String {
+  let sb = StringBuilder()
+  for i = 0; i < b.length(); i = i + 1 {
+    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+  }
+  sb.to_string()
 }
 
 pub fn sftp_parse_status(body : FixedArray[Byte]) -> SftpParse {

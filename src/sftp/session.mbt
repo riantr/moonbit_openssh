@@ -32,6 +32,27 @@ pub(all) enum SftpOp {
   ListDir(String)
   /// OPEN + READ until EOF, then CLOSE; returns the bytes
   ReadFile(String)
+  /// OPEN for writing, WRITE the whole payload in chunks, then CLOSE.
+  ///
+  /// The chunk size is ours to choose and is deliberately not "as large as
+  /// possible": one packet has to survive the channel's window and
+  /// max_packet splitting either way, and a smaller chunk makes the offset
+  /// arithmetic visible in the byte transcript instead of hidden inside one
+  /// enormous frame.
+  WriteFile(String, FixedArray[Byte])
+  /// SETSTAT on a path -- size, permissions and/or times, whichever the
+  /// attributes carry.
+  SetAttrs(String, SftpAttrs)
+  /// The single-path operations that all answer with a STATUS.
+  MakeDir(String, SftpAttrs)
+  RemovePath(String)
+  RemoveDir(String)
+  /// RENAME. Prefers `posix-rename@openssh.com` when the server advertised it
+  /// in VERSION, because v3's RENAME is specified to fail when the target
+  /// already exists and that makes "overwrite" impossible without an
+  /// extension. A server that did not advertise it gets the v3 form, and
+  /// reports the refusal as a refusal rather than silently doing nothing.
+  Rename(String, String)
 }
 
 ///| What one operation produced.
@@ -49,6 +70,13 @@ pub(all) enum SftpOpResult {
   Contents(FixedArray[Byte])
   /// SFTP status code, and its message
   Failed(Int, String)
+  /// A mutating operation that the server accepted: how many bytes it wrote,
+  /// or 0 for the ones with nothing to report.
+  ///
+  /// Separate from `Failed` for the same reason the read side is: a STATUS
+  /// with a non-zero code is an answer, not a broken exchange.
+  Wrote(Int)
+  Changed
 }
 
 const PH_VERSION : Int = 0
@@ -66,6 +94,10 @@ enum Step {
   WantOpenFile(Int)
   WantRead(Int)
   WantClose(Int)
+  WantOpenWrite(Int)
+  WantWrite(Int)
+  /// SETSTAT / MKDIR / REMOVE / RMDIR: one request, one STATUS, no handle.
+  WantSimple(Int)
 }
 
 ///|
@@ -89,6 +121,16 @@ pub(all) struct SftpSession {
   mut listing_failed : SftpOpResult?
   /// the Contents the current ReadFile assembled
   mut contents : SftpOpResult?
+  /// the payload the current WriteFile still has to send
+  mut pending_write : FixedArray[Byte]
+  /// how many bytes of it the server has accepted so far, which is also the
+  /// offset of the next WRITE
+  mut written : Int
+  /// the extension names the server listed in VERSION, in the order it sent
+  /// them. Kept as names rather than as a count: the count is already
+  /// reported, and a client that decides behaviour from a number has to know
+  /// which number means which thing.
+  mut ext_names : Array[String]
   mut version : Int
   mut extensions : Int
   mut requests_sent : Int
@@ -117,6 +159,9 @@ pub fn SftpSession::new(ops : Array[SftpOp]) -> SftpSession {
     listing: [],
     listing_failed: None,
     contents: None,
+    pending_write: FixedArray::make(0, b'\x00'),
+    written: 0,
+    ext_names: [],
     version: 0,
     extensions: 0,
     requests_sent: 0,
@@ -241,6 +286,10 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
         Version(v) => {
           self.version = v.version
           self.extensions = v.extensions
+          // Keep the names, not just the count: which extensions exist is the
+          // only part that can be acted on, and `Rename` below decides between
+          // the v3 message and the extension by looking at this.
+          self.ext_names = v.ext_names
           self.phase = PH_RUNNING
           self.begin_op()
         }
@@ -400,6 +449,74 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
       self.flush_contents()
       self.next_op()
     }
+    WantOpenWrite(id) => {
+      if reply_id(r) != id {
+        return
+      }
+      match r {
+        Handle(h) => {
+          self.handle = h.handle
+          self.written = 0
+          self.send_write()
+        }
+        Status(st) => {
+          self.results.push(Failed(st.code, bytes_text(st.message)))
+          self.pending_write = FixedArray::make(0, b'\x00')
+          self.next_op()
+        }
+        _ => {
+          self.results.push(Failed(-1, "unexpected " + reply_kind(r)))
+          self.pending_write = FixedArray::make(0, b'\x00')
+          self.next_op()
+        }
+      }
+    }
+    WantWrite(id) => {
+      if reply_id(r) != id {
+        return
+      }
+      match r {
+        Status(st) => {
+          if st.code == FX_OK {
+            self.send_write()
+          } else {
+            self.results.push(Failed(st.code, bytes_text(st.message)))
+            // Still close the handle: the OPEN succeeded, so the server is
+            // holding a descriptor, and leaving it open leaks it until the
+            // channel goes away.
+            self.send_close()
+          }
+        }
+        _ => {
+          self.results.push(Failed(-1, "unexpected " + reply_kind(r)))
+          self.send_close()
+        }
+      }
+    }
+    WantSimple(id) => {
+      if reply_id(r) != id {
+        return
+      }
+      match r {
+        Status(st) => {
+          if st.code == FX_OK {
+            self.results.push(Changed)
+          } else {
+            self.results.push(Failed(st.code, bytes_text(st.message)))
+          }
+          self.next_op()
+        }
+        // An EXTENDED reply answers with its own message type when the
+        // extension defines a payload. None of the extensions used here do,
+        // so anything else is genuinely unexpected rather than merely
+        // unrecognised -- and silently accepting it would let an operation
+        // report success for a reply that proved nothing.
+        _ => {
+          self.results.push(Failed(-1, "unexpected " + reply_kind(r)))
+          self.next_op()
+        }
+      }
+    }
   }
 }
 
@@ -444,6 +561,52 @@ fn SftpSession::begin_op(self : SftpSession) -> Unit {
       self.step = WantOpenFile(id)
       self.queue(sftp_open(id, p, FXF_READ, SftpAttrs::none()))
     }
+    SftpOp::WriteFile(p, data) => {
+      let id = self.take_id()
+      self.step = WantOpenWrite(id)
+      // The payload is stashed **before** the OPEN is queued, even though
+      // `queue` only appends to a buffer and nothing reads it yet.  The HANDLE
+      // that comes back sends the first WRITE, and that path reads
+      // `pending_write`; assigning after the queue works today by accident and
+      // breaks the day `queue` grows a flush.
+      self.pending_write = data
+      self.written = 0
+      // TRUNC + CREAT so the result is the payload and not the payload appended
+      // to whatever was there. Both bits are required: CREAT alone leaves an
+      // existing file's contents in front of what we write.
+      self.queue(
+        sftp_open(id, p, FXF_WRITE | FXF_CREAT | FXF_TRUNC, SftpAttrs::none()),
+      )
+    }
+    SftpOp::SetAttrs(p, attrs) => {
+      let id = self.take_id()
+      self.step = WantSimple(id)
+      self.queue(sftp_setstat(id, p, attrs))
+    }
+    SftpOp::MakeDir(p, attrs) => {
+      let id = self.take_id()
+      self.step = WantSimple(id)
+      self.queue(sftp_mkdir(id, p, attrs))
+    }
+    SftpOp::RemovePath(p) => {
+      let id = self.take_id()
+      self.step = WantSimple(id)
+      self.queue(sftp_remove(id, p))
+    }
+    SftpOp::RemoveDir(p) => {
+      let id = self.take_id()
+      self.step = WantSimple(id)
+      self.queue(sftp_rmdir(id, p))
+    }
+    SftpOp::Rename(from, to) => {
+      let id = self.take_id()
+      self.step = WantSimple(id)
+      if self.has_extension(EXT_POSIX_RENAME) {
+        self.queue(sftp_extended(id, EXT_POSIX_RENAME, sftp_posix_rename_body(from, to)))
+      } else {
+        self.queue(sftp_rename(id, from, to))
+      }
+    }
   }
 }
 
@@ -468,6 +631,69 @@ fn SftpSession::send_close(self : SftpSession) -> Unit {
   let id = self.take_id()
   self.step = WantClose(id)
   self.queue(sftp_close(id, self.handle))
+}
+
+///|
+/// 发出下一块 WRITE,或者在整份数据写完后收尾。
+///
+/// 三件事都是 load-bearing,而且三件都和 offset 有关:
+///
+///  1. `written` is a **file** offset, not "bytes still to send". The server
+///     does `lseek(fd, off, SEEK_SET)` before every write
+///     (`process_write`, sftp-server.c:865-866), so sending the same offset
+///     twice overwrites instead of appends, and the file ends up with a
+///     correct-looking length and wrong contents.
+///  2. An empty payload is sent as **zero** WRITE requests, not one empty
+///     one. A client that sends an empty WRITE gets STATUS(OK) for a write of
+///     nothing, which looks identical to having written the file -- and then
+///     TRUNC has already destroyed the old contents, so "create an empty
+///     file" and "write a file" become indistinguishable at the wire.
+///  3. A write that fails still closes the handle, because the OPEN
+///     succeeded and the server is holding a descriptor.
+///
+/// `written` is advanced as each WRITE is **queued**, not when it is
+/// acknowledged. It is therefore "bytes handed to the channel so far", which
+/// is the same number as the offset of the next WRITE -- and the number a
+/// partial write would have to resume from. Waiting for the STATUS to advance
+/// it looks more cautious and is not: it re-sends the same chunk at the same
+/// offset forever, because nothing else moves it.
+fn SftpSession::send_write(self : SftpSession) -> Unit {
+  if self.written >= self.pending_write.length() {
+    self.results.push(Wrote(self.written))
+    self.pending_write = FixedArray::make(0, b'\x00')
+    self.send_close()
+    return
+  }
+  let id = self.take_id()
+  self.step = WantWrite(id)
+  let want = sftp_write_length(32768)
+  let left = self.pending_write.length() - self.written
+  let n = if left < want { left } else { want }
+  let chunk : FixedArray[Byte] = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    chunk[i] = self.pending_write[self.written + i]
+  }
+  self.queue(sftp_write(id, self.handle, self.written.to_uint64(), chunk))
+  self.written = self.written + n
+}
+
+///|
+/// 版本协商里服务器报过的扩展名里有没有它。
+///
+/// 名字比对而不是「扩展数量 >= N」:数量是服务器的属性,和「哪些名字」没有
+/// 映射关系,用数量去推断能力,等于把两个不同的事实当成一个。
+pub fn SftpSession::has_extension(self : SftpSession, name : String) -> Bool {
+  for i = 0; i < self.ext_names.length(); i = i + 1 {
+    if self.ext_names[i] == name {
+      return true
+    }
+  }
+  false
+}
+
+///| 版本协商里服务器报过的扩展名,原序。
+pub fn SftpSession::extension_names(self : SftpSession) -> Array[String] {
+  self.ext_names
 }
 
 // ---------------------------------------------------------------------------

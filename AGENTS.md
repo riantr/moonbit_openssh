@@ -252,9 +252,112 @@ never downloaded (`npx playwright install chromium`). It is a *skip*, printed
 in the summary -- silently reporting the browser path as verified is the one
 outcome worse than a failure.
 
+### Loop #40: the SFTP write side
+
+Loop #39 could read. It could not write, which for an SFTP client is roughly
+half the protocol -- a tool that only downloads is a different tool from one
+that syncs.
+
+**No new architecture.** Everything went into the existing `src/sftp` state
+machine, because the split Loop #39 paid for is exactly the split this side
+needs: `WRITE` / `SETSTAT` / `FSETSTAT` / `MKDIR` / `REMOVE` / `RMDIR` /
+`RENAME` / `EXTENDED` are protocol, not transport, and `src/sshclient` and
+`src/wtlive` stayed thin. `Rename` checks
+`SftpSession::has_extension("posix-rename@openssh.com")` rather than counting
+extensions, because the count is a property of the server and has no mapping to
+"which capabilities".
+
+**The offset is the whole loop.** `process_write` does
+`lseek(fd, off, SEEK_SET)` before every write (`sftp-server.c:865-866`), so a
+wrong offset is *not* a rejected request -- the server writes the bytes
+somewhere else and answers `STATUS(OK)`. The file ends up with a plausible
+length and the wrong contents, and every status code on the wire says it
+worked. `written` is therefore a file offset advanced as each WRITE is
+**queued**, not when it is acknowledged; waiting for the STATUS looks more
+cautious and is not, because it re-sends the same chunk at the same offset
+forever. The capture shows paramiko's offsets walking `0, 8192, 16384, ...`
+and then **returning to 0** for the second file -- offsets are per file, so a
+session-global counter is also wrong.
+
+**Three things the C does not say, and the capture did.**
+
+1. `FXP_RENAME` and `posix-rename@openssh.com` are different requests. The
+   draft's RENAME is specified to fail when the target exists; the extension is
+   `rename(2)` and replaces it. Confirmed against a target that was known to
+   exist.
+2. An unknown extension name is a clean `STATUS(SSH2_FX_OP_UNSUPPORTED=8)`,
+   not a dropped channel. A client that treats it as fatal hangs against any
+   server lacking the extension.
+3. `SSH2_FXP_REMOVE` is 13 and `SSH2_FXP_RMDIR` is 15. Adjacent, and swapping
+   them still produces a well-formed packet the server simply refuses.
+
+**An empty payload sends zero WRITE requests**, not one empty WRITE. `TRUNC`
+has already destroyed the old contents, and an empty WRITE comes back
+`STATUS(OK)` -- so "create an empty file" and "write a file" would be
+indistinguishable on the wire. A WRITE that *fails* still sends CLOSE: the OPEN
+succeeded, so the server is holding a descriptor.
+
+**Three bugs the KAT caught, all of them in code that looked finished.**
+
+- `SftpVersionReply` gained `ext_names`, the field was added to the session --
+  and nothing ever assigned it. Every `Rename` therefore took the v3 path and
+  could not overwrite. It compiled, and it was wrong in the one way that only
+  shows up against a real file.
+- `send_write` never advanced `written`, so every chunk re-wrote offset 0.
+- The driver grouped operations by flag rather than by command-line order, so
+  `--sftp-mkdir d --sftp-write d/f` sent the write first. The comment above
+  that code said "in command-line order" -- a comment/behavior split is worse
+  than either one alone, because it makes the wrong order look intentional.
+  `--sftp` now builds the op list while scanning argv.
+
+**`--sftp-write` takes `<path>@<size>`, not two argv slots.** The port in this
+driver is a *bare numeric* argument and `find_port` scans for the first thing
+that parses as one, so a size in its own slot became the port and the run
+reported `CONNECT_FAILED` -- which reads as a broken client. `@` rather than
+`:` because Windows paths already contain colons.
+
+**Two harness defects that made Loop #39's browser section vacuous.** It never
+ran: the gate hung first (see below), and when forced through, G5 pointed the
+Worker at a WebSocket port with **no relay behind it**. The Worker started,
+never connected, and the symptom was a browser-shaped failure. `verify_loop39.mjs`
+now starts `host/wt/ws_relay.py` like loop38 does; with that fixed, the browser
+read path works too, and Loop #40's Worker writes 40000 bytes and reads the
+same digest back as the native path.
+
+**`startSshd` must not use `spawnSync`.** `sshd_setup.mjs` runs `sshd -D` in the
+foreground and ends with `await new Promise(() => {})`, so it never returns.
+`spawnSync` waits for that forever: the gate sat with no output and zero CPU
+for 27 minutes, which looks like a slow run rather than a dead one. Async
+`spawn` plus a port probe is the fix, and the probe is not optional either --
+a fixed sleep is what made the sshd miss its window after the mutation pass
+warmed `_build` back up cold.
+
+**Windows has no POSIX permissions**, so `chmod` is recorded but never asserted
+there: the capture shows mode `0o607` after a `chmod 0640`. Asserting it would
+be theatre. Times *do* round-trip (`1700000000` / `1700000123`) and are.
+
+**Verification.** 24 session cases + 7 buffer cases, 4 backends x 2 modes,
+byte-identical. 30 mutations, all caught (11 new). The live run creates a
+directory, writes 40000 bytes across several WRITEs, reads them back and
+compares the SHA-256 against the same bytes computed independently in the gate,
+renames, then **overwrites the renamed file through the extension and reads
+that back** -- 11 bytes where 40000 used to be, which is what makes "accepted"
+mean something. The Worker's 40000-byte digest matches the native one, which is
+what the duplicated three-line payload rule is for: a Worker has no filesystem,
+so the rule is repeated and the digest is the thing that would catch a drift.
+
 ### Build commands
 
 ```bash
+# Loop #40: the SFTP write side (WRITE / SETSTAT / MKDIR / REMOVE / RMDIR /
+# RENAME + posix-rename@openssh.com).  Starts its own sshd (18783), recaptures
+# the write session, replays both KATs on 4 backends x 2 modes, runs the 30
+# mutations, then drives the write script natively and in a Worker against the
+# real server -- including the overwrite, which is proved by reading the
+# replaced file back.
+node host/verify_loop40.mjs
+node host/verify_loop40.mjs --skip-regression
+
 # Loop #39: SFTP over a subsystem channel. Starts its own sshd (18781),
 # replays a captured internal-sftp through cmd/sftp_test on 4 backends x 2
 # modes, runs the 19 mutations, then the same script natively and in a Worker
