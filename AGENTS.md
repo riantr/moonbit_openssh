@@ -1139,12 +1139,131 @@ third-party check ran clean: `.mooncakes` populated, `moon tree` shows all six
 packages at 0.3.4, and `src/sftp` checks green on all four targets with the KAT
 still passing -- the native-only dependency pollutes nothing.
 
-**Milestone 2 (next):** the command bridge. `.commands(...)` /
-`CommandRegistrar::bind` from `proton_contract`, handlers calling
-`src/sftp.SftpSession` directly, and the JS side invoking them through
-`window.__MoonBit__.core.invokeOp`. The API signatures come from
-`pkg.generated.mbti`, not from the README -- the same rule as every other
-third-party surface in this repo.
+**Milestone 2 (done):** the command bridge. See below.
+
+### Loop #41-M2: the fault-injection console
+
+Milestone 1 proved a window opens. Milestone 2 gives it something to do: three
+application commands bound through `.commands(...)` / `CommandRegistrar::bind`,
+each driving `src/sftp`'s `SftpSession` over replies a well-behaved
+`internal-sftp` never sends.
+
+**Why a GUI and not another `cmd/sftp_test` case.** The Loop #39 KAT and the
+Loop #40 live round trip both prove the happy path against real OpenSSH bytes.
+Neither can reach "STATUS before VERSION", "a reply carrying someone else's
+request id", "a length prefix over `SFTP_MAX_MSG_LENGTH`", or "an extension
+advertised and then refused" -- OpenSSH does not emit those, so no capture
+contains them. A fault injector is the only way to hold those branches, and
+holding a branch by hand is a console's job. The console is a third *driver*
+of the one `src/sftp` implementation, not a second implementation: no byte
+assembly of its own, no parse rules of its own.
+
+**The three commands** (`cmd/proton_gui/main.mbt`), each named by
+`@proton_contract.command(...)`, each reachable as
+`window.__MoonBit__.app.<name>(payload)`:
+
+- `sftp_fault_list` -- the catalogue the page renders its buttons from
+- `sftp_fault_run`  -- one scenario, full transcript
+- `sftp_fault_all`  -- the whole suite verdict
+
+**The signatures came from `pkg.generated.mbti`, never the README**, same rule
+as every other third-party surface here:
+
+```
+pub fn[Request, Response] command(String) -> Command[Request, Response]
+pub fn[Request : @json.FromJson, Response : ToJson]
+    CommandRegistrar::bind(Self, Command[Request, Response],
+        async (CommandContext, Request) -> Response) -> Unit raise
+```
+
+So a request type derives `FromJson`, a response type derives `ToJson`, and the
+handler is `async` and takes the request context first. `moon check` reports
+`unused_async` on all three handlers (none awaits; MoonBit would promote a
+plain `fn` implicitly) -- the annotation is kept so the declared type still
+says what the registrar asks for, with the reasoning in a comment at the
+definitions.
+
+**The transport name is derived, never written down.** An application route is
+`app:<name>` (`ContractRoute::operation_name`), and the injected bridge
+(`bridge_bootstrap.js`) exposes one property per granted op as
+`__MoonBit__.app.<name>` -- so neither side assembles the string by hand.
+
+**Ten scenarios, each aimed at a named branch of `src/sftp/session.mbt`:**
+STATUS-before-VERSION ignored; wrong request id dropped, session still usable;
+DATA where a WRITE expects STATUS (unexpected, handle still closed); EOF as a
+WRITE answer (failure, never success); EXTENDED-vs-RENAME chosen by extension
+*name* with six extensions advertised and the rename one absent; EXTENDED sent
+when it *is* advertised; advertised-then-refused = `OP_UNSUPPORTED` result not a
+dead session; over-max length prefix refused before anything is sized from it;
+truncated ATTRS fatal; STATUS trailing byte fatal.
+
+**The expectations come from a second implementation.**
+`host/sftp_fault_oracle.py` is an independent SFTP client written from the draft
+and OpenSSH's error branches with no reference to `src/sftp`. It refuses to
+emit the vectors unless its own run of each scenario agrees with a hand-written
+expectation. `host/gen_fault_vectors.py` transcribes that JSON into
+`cmd/proton_gui/fault_vectors.mbt` (a generated file). This is the repo's
+multiple-blind rule applied to fault injection: without it a scenario passes
+the moment it agrees with itself.
+
+**The blind check immediately paid for itself:** the oracle's first draft
+called an over-max length prefix `framing: BadLength`; `src/sftp` reports
+`framing: Unexpected`. The oracle was wrong -- in `src/sftp` `BadLength` is the
+*cursor's* "a length field pointed past the end of the buffer" (`proto.mbt`),
+a different failure with a different cause, while the framing check rejects a
+length that is out of range before any buffer is sized from it. The oracle was
+corrected and the distinction documented at both sites.
+
+**The gate drives the real bridge, not the functions.**
+`node host/verify_loop41.mjs` runs the oracle, builds, stages CEF, then opens a
+**real window** with a CDP endpoint and evaluates
+`window.__MoonBit__.app.sftp_fault_all({})` and
+`...sftp_fault_run({name: ...})` *in the page*. Calling the MoonBit handler
+directly would prove the scenarios and prove nothing about the bridge. The
+two environment variables are the ones the source actually reads
+(`facade_manifest.mbt`): `PROTON_MODE=dev` (which is what turns debug on) and
+`PROTON_REMOTE_DEBUGGING_PORT` -- the port alone is not enough, because
+`resolve_remote_debugging` returns Disabled unless debug > 0.
+
+**Verified:** `ALL PASS (22 checks)` -- oracle self-consistency, build+stage,
+CDP attach to the real document, `core.invokeOp` present, three granted ops,
+both command shapes round-tripping JSON, and all ten scenarios byte-identical
+to the oracle (requests, results, done/failed/reason). The extension *names*
+are asserted, not just the count, since the names are what decide EXTENDED vs
+RENAME.
+
+**Three harness lessons from building it, all "impossible" verdicts:**
+
+1. **`{}` not `null` for a fieldless request.** The registry decodes the
+   payload with `@json.from_json(payload_json)` straight into the Request type
+   (`core/op_registry.mbt`), and `EmptyRequest` is a fieldless *struct* -- it
+   wants an object. `null` is valid JSON and still fails the struct decode, so
+   the bridge reported "invalid payload for op app:sftp_fault_all". The page
+   and the gate now send `{}`.
+
+2. **Do not filter the CDP target by a guessed URL.** Two versions of the
+   readiness check failed as a *timeout*, not as a wrong answer: one attached
+   to CEF's `about:blank` placeholder (the bootstrap only runs on the real
+   document, so there is no bridge on it), the next matched
+   `url.startsWith("proton")` -- and the real URL is `https://proton.localhost/`.
+   The wait condition is now the actual precondition: "a page where
+   `__MoonBit__` exists and all three ops are functions".
+
+3. **Compare rendered-to-rendered.** The JSON holds a result as a raw tuple
+   (`["realpath", "/C:/Users/hp"]`); the bridge returns the rendered form
+   `cmd/sftp_test` prints. Comparing them directly produced seven failures
+   that looked like protocol disagreements -- `["changed"]` versus `["changed"]`
+   is the same answer in two shapes. The gate now renders the JSON with the
+   same rules, and -- because that makes a second port of one rule set, which
+   is how ports drift -- cross-checks the port against the *generated*
+   `fault_vectors.mbt`, so the duplication is an assertion rather than a fork.
+
+5-step third-party check after adding `moonbit-community/proton_contract`:
+`.mooncakes` populated; `moon tree` shows it at 0.3.4 in lockstep with the
+other five; **`moon.mod` needed the direct edge** -- "the module is in the
+global environment" is not "this module may import it", and moon says so
+explicitly; `src/sftp` checks green on all four targets; the KAT still prints
+`ALL PASS (24 session cases, 7 inbuf cases)`.
 
 ### Loop #42: three harness defects behind one impossible verdict
 

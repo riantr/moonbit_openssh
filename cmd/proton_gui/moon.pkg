@@ -1,14 +1,28 @@
 ///| cmd/proton_gui -- Loop #41: a native desktop shell for debugging the
-///| client by hand.
+///| client by hand, and Loop #41-M2's fault-injection console on top of it.
 ///|
 ///| Native-only by construction: Proton's manifest pins `preferred_target:
 ///| native` / `supported-targets: "+native"`, and the CEF runtime it drives
 ///| has no wasm story.  This package is the ONLY place in the module that
 ///| imports `@proton` -- `src/` must stay free of it so the 4-target KAT
 ///| gates never depend on a 0.x GUI framework.
+///|
+///| Everything protocol-shaped comes from `src/sftp`, the same package the
+///| native TCP transport and the browser Worker transport drive.  The
+///| console is a third *driver* of the one implementation, not a second
+///| implementation: no byte assembly of its own, no parse rules of its own.
+///|
+///| `proton_contract` is imported for the command descriptors themselves.
+///| It is not a GUI framework -- it is the transport-neutral
+///| `Command[Request, Response]` value that `CommandRegistrar::bind`
+/// registers, and it is what makes the route name (`app:<name>`) something
+///| both sides derive rather than something either side hardcodes.
 import {
   "moonbit-community/proton",
+  "moonbit-community/proton_contract",
   "moonbitlang/async",
+  "moonbitlang/core/json",
+  "openssh/openssh_moonbit/src/sftp",
 }
 
 pkgtype(kind: "executable")
@@ -17,7 +31,7 @@ pkgtype(kind: "executable")
 // and the compiler wants that stated here rather than inferred from the
 // dependency -- which keeps a wasm check of this package a *declared*
 // impossibility instead of a surprise.
+
 options(
   supported_targets: "+native",
 )
-
