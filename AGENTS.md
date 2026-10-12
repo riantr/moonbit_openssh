@@ -1265,6 +1265,86 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #47: a peer that lies about its host key
+
+Every handshake test in this repo had talked to a peer that told the truth.
+Loop #38 pinned the host key algorithms against a real sshd; Loops #34-#40 and
+#43-#46 all completed handshakes against a man in the middle whose host key was
+correct. So `HostkeyInvalid` and `SignatureInvalid` were **defined in both
+transport adapters and driven by nothing** -- reachable only by a peer whose key
+exchange does not hold up. That is the most security-relevant gap left in the
+client, and it took a wrapper object to close.
+
+**One wrapper, no cryptography of our own.** paramiko builds both halves of
+`KEXDH_REPLY` from a single object -- `kex_ecdh_nist.py` reads
+`get_server_key().asbytes()` for the blob and `get_server_key().sign_ssh_data()`
+for the signature -- so `LyingHostKey` splits them: `asbytes()` returns key A,
+`sign_ssh_data()` signs with key B. Both keys are real paramiko keys and both
+signatures are made by paramiko; the only thing invented is *which* of them
+answers which half.
+
+**Two forgeries, because they are different rules on different branches:**
+
+| MITM flag | the lie | the branch it must reach |
+|---|---|---|
+| `--lie-hostkey` | blob A, signed by B | `SignatureInvalid` |
+| `--lie-hostkey-type NAME` | a real blob announced as another type | `HostkeyInvalid` |
+
+Driving only one leaves the other untested, and they are not interchangeable:
+the client checks the type *before* the signature, so `--lie-hostkey-type` never
+reaches the signature check at all.
+
+**The assertion is not "the client reports an error" -- it is that no
+credentials left.** An implementation that logs an error and authenticates
+anyway has leaked the thing the error was about. So the man in the middle counts
+the authentication attempts it is asked to approve, and the gate asserts that
+count is zero, along with zero channel requests. It approves everything by
+design (Loop #45's decision), so it cannot notice a client that should not have
+arrived -- it has to be told. The counts are written into the transcript before
+anything can fail, so "zero" is a measured `0` and never a missing key.
+
+**`--auth` is the mode to drive on purpose**: its success condition *is* reaching
+authentication, so a verification hole shows up as the run succeeding where it
+must fail.
+
+**A control run is not optional.** Three clients that refused everything would
+satisfy every check above, so each client also runs against an honest man in
+the middle and must authenticate. The refusals and the control are one
+measurement from two ends.
+
+**Three clients answer the same question, and the third is not ours:** paramiko
+(`host/hostkey_witness.py`, a real client that was written by somebody else, so
+the expectation is not "whatever MoonBit does"), `cmd/ssh_live --auth` over TCP,
+and `cmd/wt_ssh` (`auth: 1`) in a browser Worker over WebSocket. The error name
+is compared by its **leaf** -- `cmd/ssh_live` renders
+`transport:handshake:SignatureInvalid` and `cmd/wt_ssh` renders
+`handshake:SignatureInvalid`; the prefixes are two renderings of where it
+surfaced, and the leaf is the part the rule produced. Both transports must agree
+on the leaf.
+
+**Two mutations, and the second one found a defect in the gate itself.**
+Never rejecting a bad ECDSA signature, and always agreeing with the negotiated
+algorithm name, both fail the gate -- and the second fails as a *branch
+fall-through* (`HostkeyInvalid` becomes `SignatureInvalid`) while the security
+property still holds, which is the argument for asserting both.
+
+The first mutation also exposed the reason this loop needed its own gate rather
+than an extension of `verify_loop45.mjs`: `verify_loop47.mjs` originally built
+only `cmd/ssh_live --target native`, so the browser half ran a `wt_ssh.js` left
+over from whenever it was last built and **kept passing** against mutated
+source. A gate that can report PASS for a tree it did not compile converts a
+caught regression into a silent one -- and the browser half is the half this loop
+exists to cover. Both halves are now rebuilt on every run.
+
+**The browser plumbing is shared, not copied.** `host/wt_browser.mjs` holds the
+HTTP server, the page, the Worker driver and the Worker's `Event` rendering that
+`verify_loop46.mjs` and `verify_loop47.mjs` both need. Two copies of a *rule*
+is the duplication this repo keeps paying for (see Loops #41/#45); there is no
+reason to start paying for it in the plumbing too.
+
+**Verified:** `ALL PASS (19 checks)`. `verify_loop46` 53, `verify_loop41` 29,
+`verify_loop45` 51, no regression.
+
 ### Loop #46: the same vectors, in a browser Worker
 
 Loop #45 left exactly one adapter undriven. `src/sshclient` had a man in the

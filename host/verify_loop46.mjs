@@ -31,12 +31,26 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
-import net from "node:net";
 import path from "node:path";
-import { extname, join, normalize, resolve } from "node:path";
-import { stat, readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// The browser plumbing is shared with `host/verify_loop47.mjs`: serving the
+// directory, opening a page, driving the Worker and rendering a Worker's
+// Event. Two copies of that is the kind of duplication this repo keeps paying
+// for in the *rule* layer, and there is no reason to start paying for it in the
+// plumbing as well.
+import {
+  exitedWithin,
+  freePort,
+  grab,
+  norm,
+  openPage,
+  runWorker,
+  serve,
+  sleep,
+  wtCfg,
+} from "./wt_browser.mjs";
 
 let chromium = null;
 try {
@@ -48,7 +62,6 @@ try {
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ORACLE = join(root, ".loop41", "fault_vectors.json");
 const WORK = join(root, ".loop46");
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
 
 const failures = [];
 let checks = 0;
@@ -62,116 +75,6 @@ function bad(label, detail) {
   checks += 1;
   failures.push(`${label}${detail ? "  " + detail : ""}`);
   console.log(`  FAIL  ${label}${detail ? "  " + detail : ""}`);
-}
-function freePort() {
-  return new Promise((res, rej) => {
-    const s = net.createServer();
-    s.on("error", rej);
-    s.listen(0, "127.0.0.1", () => {
-      const p = s.address().port;
-      s.close(() => res(p));
-    });
-  });
-}
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// Whether a child is gone, or will be gone within `ms`. The gate needs this for
-// the man in the middle: it only writes its transcript when the session thread
-// returns, so killing it the instant the Worker's result arrives races the
-// write and the transcript is simply missing. Three scenarios did exactly that
-// here and reported "the man in the middle recorded nothing" -- which reads as
-// a protocol failure and was a gate that hung up too early.
-function exitedWithin(proc, ms) {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve(true);
-  return new Promise((res) => {
-    const t = setTimeout(
-      () => res(proc.exitCode !== null || proc.signalCode !== null),
-      ms,
-    );
-    proc.once("exit", () => {
-      clearTimeout(t);
-      res(true);
-    });
-  });
-}
-
-// Windows line endings, normalized before anything line-anchored runs. In a
-// JavaScript regex `.` does not match `\r` -- it is a line terminator -- so an
-// un-normalized CRLF line produces *no match*, which reads as "the scenario
-// produced nothing". verify_loop45 learned this the hard way.
-const norm = (s) => String(s).replace(/\r\n/g, "\n");
-const grab = (t, k) => (norm(t).match(new RegExp(`^${k}: (.*)$`, "m")) || [])[1];
-
-// A Worker's `onerror` hands the page an ErrorEvent that may carry nothing
-// beyond its type: message, filename and lineno are all empty for a failure
-// that is not a parse or a throw, and `String(ev)` is then the useless
-// "[object Event]". Every field it *does* carry is worth printing, because the
-// alternative hides the whole event. `snap` is the plain object the browser
-// side copied the Event into -- see `snapshotEvent` in the page.evaluate below.
-function describeEvent(snap) {
-  if (!snap || typeof snap !== "object") return String(snap);
-  const bits = [];
-  for (const k of ["type", "message", "filename", "lineno"]) {
-    if (snap[k] !== undefined && snap[k] !== null && snap[k] !== "") {
-      bits.push(`${k}=${JSON.stringify(snap[k])}`);
-    }
-  }
-  if (snap.errorText) bits.push(`error=${snap.errorText}`);
-  if (snap.own) bits.push(`own=[${snap.own}]`);
-  return bits.length ? bits.join(" ") : `bare Event (${snap.str || "?"})`;
-}
-
-// Every static request the Worker makes goes through here, so when a scenario
-// fails with an opaque Worker error, `LOOP46_TRACE=1` turns on a per-request log
-// and the 404 (or the unexpected status) becomes visible instead of inferred.
-// It is opt-in because a full run is fifty scenarios and the log is noise.
-const TRACE = !!process.env.LOOP46_TRACE;
-
-function serve(dir, port) {
-  return new Promise((res, rej) => {
-    const s = createServer(async (req, resp) => {
-      // Every exit path has to leave the response in one piece. A `catch`
-      // that fires *after* `writeHead(200)` -- the read or the write threw
-      // once headers were already on the wire -- and then writes a 404, is
-      // `ERR_HTTP_HEADERS_SENT`, and it kills the whole gate with a stack
-      // instead of one scenario failing. So the body is assembled first and
-      // the response is written exactly once.
-      let status = 404;
-      let body = null;
-      let type = "text/plain";
-      if (TRACE) {
-        console.log(`  serve ${req.url} dir=${dir}`);
-      }
-      try {
-        const p = normalize(decodeURIComponent(new URL(req.url, "http://x").pathname))
-          .replace(/^[/\\]+/, "");
-        const f = join(dir, p);
-        if (!f.startsWith(dir)) {
-          status = 403;
-        } else {
-          const st = await stat(f);
-          if (st.isFile()) {
-            status = 200;
-            type = MIME[extname(f)] || "application/octet-stream";
-            body = await readFile(f);
-          }
-        }
-      } catch (e) {
-        if (TRACE) console.log(`  serve ${req.url} -> threw ${e && e.code}`);
-        status = 404;
-        body = null;
-      }
-      if (body === null) {
-        resp.writeHead(status, { "Content-Type": "text/plain" });
-        resp.end(`not found: ${req.url}\n`);
-        return;
-      }
-      resp.writeHead(status, { "Content-Type": type });
-      resp.end(body);
-    });
-    s.on("error", rej);
-    s.listen(port, "127.0.0.1", () => res(s));
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -292,111 +195,23 @@ async function runScenario(browser, httpPort, vector, chop) {
     return { tag, ok: false, why: "bridge never came up: " + bridgeText.slice(0, 300) };
   }
 
-  // The Worker. The config is posted flat, because `cfg()` reads
-  // `globalThis.__wt_cfg[name]` and a nested object would silently read empty.
-  let workerOut = { lines: [], done: false, ok: false };
-  // Absolute URLs for everything the Worker imports. A Worker resolves a
-  // relative URL against the *Worker's* script URL, not the page's, and the
-  // failure mode is `worker error: [object Event]` -- the Worker's `onerror`
-  // receives a DOM Event with no `.message`, so the real cause ("404 on the
-  // shim") never appears anywhere. Absolute URLs make the page's origin
-  // explicit and turn that silent error into a visible 404 in the server log.
+  // The Worker. Absolute URLs for everything it imports (a Worker resolves a
+  // relative URL against the *Worker script* URL, not the page's) and a flat
+  // config: `cfg()` reads `globalThis.__wt_cfg[name]`, so a nested object
+  // would silently read empty. The driving itself is shared with
+  // host/verify_loop47.mjs -- see host/wt_browser.mjs.
   const base = `http://127.0.0.1:${httpPort}`;
-  const cfg = {
-    workerUrl: `${base}/host/wt/worker.js`,
-    shimUrl: `${base}/host/wt/moonbit_wt.js`,
-    moduleUrl: `${base}/_build/js/debug/build/cmd/wt_ssh/wt_ssh.js`,
-    url: `ws://127.0.0.1:${wsPort}/ssh`,
+  const cfg = wtCfg(base, httpPort, wsPort, {
     nonce: "loop46",
     user: "hp",
     sftp_fault: vector.name,
-    timeoutMs: 60000,
-  };
-  // One page per scenario. A Worker outlives the promise that started it, and
-  // a shared page means the previous scenario's Worker is still attached when
-  // the next one constructs its own -- so its late `onerror` resolves the new
-  // promise with `[object Event]`. Isolating the page makes each scenario's
-  // Worker the only one on the document.
-  const page = await browser.newPage();
-  const pageErrors = [];
-  page.on("pageerror", (e) => pageErrors.push(String(e)));
-  // The browser's own view of what the Worker fetched. A shim or module that
-  // never arrived is a 404 here; without this the only evidence is the
-  // Worker's opaque Event, which cannot tell a 404 from anything else.
-  const pageNet = [];
-  page.on("response", (r) => {
-    if (r.status() >= 400) pageNet.push(`${r.status()} ${r.url()}`);
   });
-  page.on("requestfailed", (r) =>
-    pageNet.push(`failed ${r.failure() && r.failure().errorText} ${r.url()}`),
-  );
-  await page.goto(`http://127.0.0.1:${httpPort}/host/wt/probe.html`);
+  const { page, state } = await openPage(browser, httpPort);
+  const pageErrors = state.pageErrors;
+  const pageNet = state.net;
+  let workerOut = { lines: [], done: false, ok: false };
   try {
-    workerOut = await Promise.race([
-      page.evaluate(
-        (c) => {
-          // `page.evaluate` serializes the function it is given and runs it in
-          // the page: it carries no Node scope. A helper defined out here --
-          // `describeEvent`, which is why the first run of this gate printed
-          // `ReferenceError: describeEvent is not defined` -- is simply absent
-          // in the browser. So the browser copies the Event's fields into a
-          // plain object and this side formats them: one description, and no
-          // eval of a stringified function.
-          const snapshotEvent = (ev) => ({
-            __event: {
-              type: (ev && ev.type) || "",
-              message: (ev && ev.message) || "",
-              filename: (ev && ev.filename) || "",
-              lineno: (ev && ev.lineno) || 0,
-              colno: (ev && ev.colno) || 0,
-              errorText:
-                ev && ev.error
-                  ? String(ev.error && ev.error.stack ? ev.error.stack : ev.error)
-                  : "",
-              own:
-                ev && typeof ev === "object"
-                  ? Object.getOwnPropertyNames(ev).join(",")
-                  : "",
-              str: String(ev),
-            },
-          });
-          return new Promise((resolve) => {
-            const w = new Worker(c.workerUrl);
-            let latest = { done: false, lines: [] };
-            w.onmessage = (ev) => {
-              latest =
-                ev.data && ev.data.done
-                  ? ev.data
-                  : { done: false, lines: (ev.data && ev.data.lines) || [] };
-              if (ev.data && ev.data.done) resolve(ev.data);
-            };
-            // `worker error: [object Event]` is the shape of a Worker's
-            // `onerror` when the Event carries nothing worth printing, so the
-            // whole event is described rather than stringified -- otherwise a
-            // script that never loaded and an uncaught throw look identical.
-            w.onerror = (ev) =>
-              resolve({ ...snapshotEvent(ev), done: true, ok: false, lines: [] });
-            w.onmessageerror = (ev) =>
-              resolve({ ...snapshotEvent(ev), done: true, ok: false, lines: [] });
-            // The Worker is **postMessage**-driven: it reads its config in
-            // `onmessage`, not at construction. Setting `globalThis.__wt_cfg`
-            // from the page does nothing -- the Worker has its own global --
-            // so a missing postMessage leaves `cfg()` returning empty for
-            // every key, and the run then reports a connect failure rather
-            // than "you never sent me anything".
-            w.postMessage(c);
-            setTimeout(
-              () => resolve({ ...latest, done: true, ok: false, error: "timeout" }),
-              c.timeoutMs - 5000,
-            );
-          });
-        },
-        cfg,
-      ),
-      sleep(70000).then(() => ({
-        done: true, ok: false, lines: [], error: "harness timeout",
-      })),
-    ]);
+    workerOut = await runWorker(page, cfg);
   } finally {
     await page.close();
     // Order matters, and it is the order the dependency runs in. Closing the
@@ -407,14 +222,8 @@ async function runScenario(browser, httpPort, vector, chop) {
     if (!(await exitedWithin(mitm, 20000))) mitm.kill();
   }
 
-  // A Worker event arrives as a snapshot, not as a message from `wt_ssh`.
-  // Rendering it here keeps the browser side free of Node scope and gives the
-  // failure one readable line instead of "[object Event]".
-  if (workerOut.__event) {
-    workerOut.error = `worker error: ${describeEvent(workerOut.__event)}`;
-    workerOut.lines = [];
-  }
-
+  // A Worker event was already turned into `workerOut.error` by `runWorker`,
+// with the Event's fields named rather than stringified.
   const text = (workerOut.lines || []).join("\n");
   if (/worker error|timeout/.test(text) || workerOut.error) {
     return {
