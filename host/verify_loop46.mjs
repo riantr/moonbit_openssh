@@ -205,6 +205,14 @@ async function runScenario(browser, httpPort, vector, chop) {
     nonce: "loop46",
     user: "hp",
     sftp_fault: vector.name,
+    // Loop #50: the default is now to refuse an unpinned host, so this gate says
+    // so explicitly. It is asking about the SFTP layer's reaction to malformed
+    // replies, not about host key pinning -- leaving it on the old default would
+    // mean every one of its fifty scenarios died in the handshake, and a gate
+    // that cannot reach the layer it tests is worse than no gate. The pinning
+    // policy has its own gate (`verify_loop48.mjs`).
+    kh_tofu: "1",
+    kh_host: "127.0.0.1",
   });
   const { page, state } = await openPage(browser, httpPort);
   const pageErrors = state.pageErrors;

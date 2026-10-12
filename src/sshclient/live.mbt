@@ -712,17 +712,20 @@ fn handshake_to_session(
   // 在两条传输层驱动里各抄一份)。这里只把它翻译成本包自己的错误类型。
   //
   // `Unknown` 在非 strict 下放行,那是 TOFU:**没有**固定过的主机名仍然会被
-  // 接受。这是本项目当前的策略,不是疏忽,但它意味着第一次连接、以及对端换过
-  // 密钥之后的连接仍然可被中间人接管。见 AGENTS.md Loop #48。
-  match kh.verify(ks) {
-    @knownhosts.Skip => ()
-    @knownhosts.Accept => ()
-    @knownhosts.Unknown =>
-      if kh.strict {
-        return (Failed(HostkeyUnknown(kh.host_str)), None)
-      }
-    @knownhosts.Mismatch => return (Failed(HostkeyMismatch(kh.host_str)), None)
-    @knownhosts.InvalidEntry => return (Failed(HostkeyInvalid), None)
+  // 接受。这是 OpenSSH `StrictHostKeyChecking=accept-new` 的等价物,而
+  // **Loop #50 起它不再是默认值**——默认是拒绝,接受新钥匙要明写
+  // `--kh-tofu`。即便如此,第一次连接仍然 susceptible:见 AGENTS.md
+  // Loop #50,并注意 `kh_report_tofu` 写回的才是「记住」的那一步。
+  //
+  // Loop #50:这里只调 `decide`,不再自己写一遍 match。两条适配器此前各有一份
+  // `Skip/Accept/Unknown/Mismatch` 的翻译,而 `KnownHostsPolicy::allows` 就躺在
+  // 那里没有任何调用方——规则抄了两份、其中一份还是死的。改默认(Loop #50)
+  // 时这种形状几乎必然只改一处。
+  match kh.decide(ks) {
+    None => ()
+    Some(@knownhosts.PinFailure::Mismatch(h)) => return (Failed(HostkeyMismatch(h)), None)
+    Some(@knownhosts.PinFailure::Unknown(h)) => return (Failed(HostkeyUnknown(h)), None)
+    Some(@knownhosts.PinFailure::InvalidEntry) => return (Failed(HostkeyInvalid), None)
   }
   // ---- 8. NEWKEYS ----
   if !send_packet(

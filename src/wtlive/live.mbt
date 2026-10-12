@@ -487,17 +487,18 @@ async fn wt_handshake_into(
   // 而那正是签名校验挡不住的一半。判定住 `src/knownhosts`,和 `src/sshclient`
   // 用的是同一份——这条规则在两条传输层驱动里各抄一份的话,迟早只有一边改。
   //
-  // `Unknown` 在非 strict 下放行是 TOFU,策略上的选择,不是疏忽:第一次连接
-  // 仍然 susceptible,真正防重放要写回 known_hosts(见 AGENTS.md Loop #48)。
-  match kh.verify(ks) {
-    @knownhosts.Skip => ()
-    @knownhosts.Accept => ()
-    @knownhosts.Unknown =>
-      if kh.strict {
-        return Failed(HostkeyUnknown(kh.host_str))
-      }
-    @knownhosts.Mismatch => return Failed(HostkeyMismatch(kh.host_str))
-    @knownhosts.InvalidEntry => return Failed(HostkeyInvalid)
+  // `Unknown` 在非 strict 下放行是 TOFU,等于 OpenSSH 的
+  // `StrictHostKeyChecking=accept-new`;**Loop #50 起它不是默认值**,默认是拒绝,
+  // 接受新钥匙要明写 `kh_tofu`。即便如此第一次连接仍然 susceptible,真正把它
+  // 变可信的是写回(见 AGENTS.md Loop #49 / #50)。
+  //
+  // Loop #50:只调 `decide`,不自己写一遍 match——两条适配器此前各有一份判定,
+  // 规则因此散在两处,而 `allows` 无人调用。规则只有一份,才谈得上改默认。
+  match kh.decide(ks) {
+    None => ()
+    Some(@knownhosts.PinFailure::Mismatch(h)) => return Failed(HostkeyMismatch(h))
+    Some(@knownhosts.PinFailure::Unknown(h)) => return Failed(HostkeyUnknown(h))
+    Some(@knownhosts.PinFailure::InvalidEntry) => return Failed(HostkeyInvalid)
   }
   // ---- 8. NEWKEYS ----
   if !wt_send_plain_packet(

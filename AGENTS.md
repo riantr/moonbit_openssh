@@ -1265,6 +1265,135 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #50: the default is the refusal
+
+Loop #48 made pinning real. Loop #49 made it write back. Neither changed the
+**default**, which stayed where #48 left it: pin nothing, connect anyway. That is
+the shape OpenSSH has spent twenty years defaulting away from, and it is where
+every forgotten configuration file lands silently. This loop puts the default on
+the safe side: **nothing configured means refuse**, and accepting a new key
+becomes something you have to type (`--kh-tofu` / `kh_tofu`, the equivalent of
+`StrictHostKeyChecking=accept-new`).
+
+The shape is half the argument. In the safe default the unsafe thing costs one
+flag; in the old one, the safe thing cost a file **and** a flag. One fewer
+configuration item is one fewer thing to get wrong. For the same reason
+`--kh-strict` was **deleted** rather than flipped: once refusing is the default,
+a switch named "strict" points the opposite way from every other switch, and of
+two oppositely-named switches one will never be read.
+
+**What actually went wrong, three times over.** The first three attempts at this
+were correct code. `moon check` passed. And a client with nothing configured kept
+authenticating. The cause was one line in `KnownHostsPolicy::verify`:
+
+```moonbit
+if self.entries.length() == 0 { return Skip }
+```
+
+`Skip` was a verdict meaning "nothing was configured, so nothing was compared",
+and `decide` read it as *no objection*. So under `strict`, "you configured
+nothing" was reported as "everything checked out". `check_host_key` already
+returns `Unknown` for an empty entry list -- that early return was swallowing it.
+Fixing it was to **delete the state**: `Skip` is gone from `PinVerdict`, because
+"forgot to configure" and "configured, nothing matched" are the same behaviour
+with opposite answers under strict, and a field that conflates them is a field a
+default can fall into. The only way to not pin is now `skip()` (`strict = false`),
+which reaches the same verdict through the **same code** rather than a bypass.
+
+**A fail-open default is structurally invisible to end-to-end tests.** The peer
+does not care what our default is; it will happily accept userauth from a client
+that should never have sent it. Nothing in a gate that only checks "did the right
+thing happen" can see the difference. So `host/verify_loop50.mjs` is built around
+*differences*, not absolute outcomes:
+
+| case | flags | expected |
+|---|---|---|
+| a | none at all | refuse `HostkeyUnknown`, 0 auth attempts |
+| b | a + exactly one switch | authenticate, report a line to write back |
+| c | b's written-back line, **no** switch | authenticate |
+| d | `--kh-strict` (deleted in #50) | still refuse |
+
+`c` is the payoff: once the key is written back, the unsafe switch is not needed
+again. If it were, `accept-new` would be a permanent downgrade rather than a
+one-time decision and "remember it" would be a lie. `d` is there because a deleted
+flag is not automatically an inert one, and "we removed it" is a claim rather than
+a measurement.
+
+**The refusal is asserted three ways, and only the third is new.** The error name
+could be anything, and `auth_attempts == 0` could hold for an unrelated reason
+(peer hung, wrong port, dead bridge). What makes it *this* layer's doing is that
+the man in the middle still recorded a host key blob: the exchange completed
+signature verification and we refused a peer whose key we had just proven it
+holds. A peer that never presented a key also shows zero auth attempts -- and
+would be refusing for a reason that has nothing to do with pinning.
+
+**Both the rule and the call sites collapsed to one copy.** `allows` (the Bool
+version) had no callers at all while both adapters hand-rolled the same decision;
+that is three copies of one rule, and a default changed in one of them. Loop #50
+deletes `allows` and leaves `decide` as the only entry point -- adapters now only
+translate the failure into their own error type. The stale anchor in
+`host/loop48_mutations.py` had to move with it, which is itself the lesson: an
+anchor that no longer matches reports `SKIP`, and a `SKIP` is indistinguishable
+from a gate with nothing left to catch.
+
+**Harness lessons:**
+
+* **`moon build` reported "no work to do" while the source had changed.** It cost
+  real time, because the resulting binary behaves exactly like a correct build of
+  an older default. `moon clean` fixed it. The mutation driver now cleans before
+  every run: a mutation that fails to show up because nothing was rebuilt reads as
+  `MISSED`, which points at the gate rather than at the tree.
+* `kh_host` now defaults to `127.0.0.1` in both drivers, via one helper each
+  (`kh_host_name` / `cfg_kh_host`). Two call sites asking "which host do we look
+  up" independently is how the write-back ends up writing a name the next
+  connection will not query -- and `HostkeyUnknown("")` is a refusal that says
+  nothing actionable.
+* A unit test, not just a gate, is the right regression net for a default. The
+  assertion `from_text("", host, 0, true).decide(blob) == Some(Unknown(...))` runs
+  in milliseconds and covers precisely the branch that never executes.
+
+**Mutation check: `3 CAUGHT, 0 MISSED`.** `host/loop50_mutations.py` mutates the
+default three ways, all the same bug in different clothes -- the default quietly
+stops refusing:
+
+| | mutated | caught by |
+|---|---|---|
+| A | `cmd/ssh_live`: `strict` no longer derived from `--kh-tofu` | native only |
+| B | `decide` ignores `self.strict` on `Unknown` | both transports **and** the unit test |
+| C | `cmd/wt_ssh`: default policy built non-strict | browser only |
+
+B is the one that matters. A and C are a wrong constant at a call site and read
+as such in a diff; B is the rule itself losing the property while every caller
+still passes the right arguments -- exactly the shape of Loop #50's original bug.
+That the unit test catches it too is the point of having added one: the rule is
+shared, so a rule-level regression has to show up in both transports, and a gate
+that only ran end to end would have paid two browser launches to learn the same
+thing.
+
+**Two real defects in the mutation driver itself, both found by running it.**
+Restoring the tree only in `finally` meant each mutation started from the
+*previous* one's leftovers, so C -- which touches `cmd/wt_ssh` alone -- reported
+the **native** client failing too. Every mutation was still CAUGHT, so the
+tally looked perfect while the attribution was fiction; and a mutation reported
+against a client it never touched invents a dependency edge that sends the next
+person looking for it in `moon.pkg`. The same bug was in
+`host/loop48_mutations.py`. Second, the per-transport breakdown matched
+`"native "` against labels that begin `"FAIL native "`, so it had never printed
+once -- dead reporting that looked like "nothing was caught by either client".
+
+**Gates adjusted rather than re-tuned:** `verify_loop47` now passes `--kh-tofu`,
+which makes it *stronger* -- willing to accept any self-consistent key, the only
+thing left stopping a forgery is signature verification. `verify_loop48`'s
+`no-policy` case became `unpinned` and now expects a refusal: the case used to be
+written down as a **passing** case precisely so the gap stayed visible, and
+flipping it is how the gap's closure gets re-checked every run instead of claimed
+once. `verify_loop45` (`cmd/sftp_mitm` passes `skip()` explicitly at a call site)
+and `verify_loop46`/`verify_loop49` were unaffected.
+
+**Verified:** `ALL PASS (13 checks)` on `verify_loop50` plus 32 known_hosts unit
+tests, `verify_loop48` 15, `verify_loop47` 19, `verify_loop45` 51, `verify_loop46`
+53, `verify_loop41` 29, no regression.
+
 ### Loop #49: TOFU has to actually remember
 
 Loop #48 added the comparison. This closes the half that makes the policy TOFU

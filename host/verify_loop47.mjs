@@ -169,7 +169,13 @@ async function runParamiko(port, tag) {
 }
 
 async function runNative(port) {
-  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", "hp"], {
+  // Loop #50: pinning defaults to refusing, so an honest peer would be turned
+  // away and every case here would read as "the client noticed something". That
+  // is the wrong reason to pass. `--kh-tofu` says the client will accept *any*
+  // self-consistent key -- which makes the forgery harder to stop, not easier:
+  // with pinning effectively disabled, the only thing left between a forged
+  // signature and a credential is signature verification itself.
+  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", "hp", "--kh-tofu", "--kh-host", "127.0.0.1"], {
     cwd: root,
     encoding: "utf-8",
     errors: "replace",
@@ -207,7 +213,7 @@ async function startBridge(tcpPort) {
 
 async function runWorker_(browser, httpPort, wsPort, tag) {
   const base = `http://127.0.0.1:${httpPort}`;
-  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1" });
+  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", kh_tofu: "1", kh_host: "127.0.0.1" });
   const { page, state } = await openPage(browser, httpPort);
   let out;
   try {

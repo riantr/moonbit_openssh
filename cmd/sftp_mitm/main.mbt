@@ -210,9 +210,13 @@ fn run_one(port : Int, c : FaultCase) -> Unit {
     "probe",
     test_auth_key(),
     ops_of(c),
-    // Loop #48: 固定是可选的,这里不传 known_hosts。这个门禁测的是 SFTP 层对
-    // 畸形应答的反应,不是主机密钥固定;把策略换成 strict 会让十个场景全在握手
-    // 阶段就失败,而那与被测的东西无关。
+    // Loop #50: 主机密钥固定**在这里显式关闭**(`skip()`),不是因为它可选。
+    // Loop #50 之后默认值已经是拒绝,而这个门禁测的是 SFTP 层对畸形应答的反应,
+    // 不是主机密钥固定——换成默认的 strict,十个场景会全在握手阶段就失败,
+    // 失败原因与被测的东西无关,于是这个门禁不再测任何东西。
+    //
+    // 写 `skip()` 而不是「什么都不给」正是要点:前者是这一行代码的显式选择,
+    // 后者是 Loop #50 之前所有驱动的默认形状。
     @knownhosts.KnownHostsPolicy::skip(),
   )
   match outcome {

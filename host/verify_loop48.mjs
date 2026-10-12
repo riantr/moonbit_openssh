@@ -16,14 +16,16 @@
 //   match          pin the key the peer actually sent   -> authenticate
 //   mismatch       pin a different key                  -> refuse, send nothing
 //   unknown-strict pin another host, strict             -> refuse, send nothing
-//   unknown-tofu   pin another host, non-strict         -> authenticate (TOFU)
-//   no-policy      no known_hosts at all                -> authenticate
+//   unknown-tofu   pin another host, accept-new         -> authenticate (TOFU)
+//   unpinned       pin nothing at all                   -> refuse, send nothing
 //
-// `unknown-tofu` and `no-policy` are the ones that look like failures and are
-// not. They are here to pin down the policy that is actually in force: pinning
-// is opt-in, and an unpinned host is accepted. OpenSSH's default is the
-// opposite. Writing that down as a *passing* case is what keeps the gap visible
-// instead of quietly closed by someone assuming it was handled.
+// `unknown-tofu` is the one that looks like a failure and is not: it exists to
+// pin down that accepting a new key is something you have to ask for.
+// `unpinned` used to be the mirror image -- it authenticated, and it was written
+// down as a *passing* case to keep the gap visible. Loop #50 closed that gap, so
+// the same case now refuses; keeping it here rather than deleting it is the point,
+// because "the default changed" should be something a gate re-checks every run
+// instead of a claim in a changelog.
 //
 // The matching case's known_hosts line is built from the blob the man in the
 // middle reports in its transcript, not from a file checked into the repo. A
@@ -265,17 +267,22 @@ async function main() {
   // ---- discovery ------------------------------------------------------
   // One connection whose only job is to make the man in the middle write its
   // transcript, so the known_hosts lines below can be built from the key the
-  // peer actually presents. It doubles as the `no-policy` case, which is the
-  // one that documents the policy actually in force: no pinning configured, and
-  // the client authenticates anyway.
+  // peer actually presents. It doubles as the `unpinned` case, which is the one
+  // that documents the policy actually in force: Loop #50 made it refuse, and a
+  // client that pins nothing must be turned away without sending a credential.
   let m = await startMitm("pin", []);
   const discovery = await runNative(m.port, []);
   await stopMitm(m);
-  if (!discovery.authed) {
-    bad("discovery", "an unpinned client failed to authenticate: " + JSON.stringify(discovery.error));
-    return finish();
+  const discoveryData = readJson(join(WORK, "pin.json")) || {};
+  if (discovery.authed) {
+    bad("native unpinned", "a client with no pin at all authenticated");
+  } else if (discovery.leaf !== "HostkeyUnknown") {
+    bad("native unpinned", "refused, but not for the pin: " + JSON.stringify(discovery.error));
+  } else if (discoveryData.auth_attempts > 0) {
+    bad("native unpinned", `${discoveryData.auth_attempts} authentication attempt(s) reached an unpinned peer`);
+  } else {
+    ok("native unpinned", "refused with HostkeyUnknown, 0 auth attempts");
   }
-  ok("native no-policy", "authenticated -- pinning is opt-in, not the default");
 
   const mitmData = readJson(join(WORK, "pin.json"));
   if (!mitmData || !mitmData.hostkey_blob_b64) {
@@ -301,22 +308,24 @@ async function main() {
   // the client is told different things about what to expect. Every difference
   // between the answers is therefore the policy, not the peer.
   const cases = [
-    { name: "match", line: matchLine, host: hostField, strict: false, auth: true, leaf: null },
-    { name: "mismatch", line: mismatchLine, host: hostField, strict: false, auth: false, leaf: "HostkeyMismatch" },
-    { name: "unknown-strict", line: otherHostLine, host: hostField, strict: true, auth: false, leaf: "HostkeyUnknown" },
-    { name: "unknown-tofu", line: otherHostLine, host: hostField, strict: false, auth: true, leaf: null },
+    { name: "match", line: matchLine, host: hostField, tofu: false, auth: true, leaf: null },
+    { name: "mismatch", line: mismatchLine, host: hostField, tofu: false, auth: false, leaf: "HostkeyMismatch" },
+    { name: "unknown-strict", line: otherHostLine, host: hostField, tofu: false, auth: false, leaf: "HostkeyUnknown" },
+    { name: "unknown-tofu", line: otherHostLine, host: hostField, tofu: true, auth: true, leaf: null },
   ];
 
   function nativeArgs(c) {
     if (!c.line) return [];
     const args = ["--known-hosts-text", c.line, "--kh-host", c.host];
-    if (c.strict) args.push("--kh-strict");
+    // Loop #50 deleted `--kh-strict`: refusing is the default, so the only flag
+    // left is the one that turns it off.
+    if (c.tofu) args.push("--kh-tofu");
     return args;
   }
   function workerCfg(c) {
     if (!c.line) return {};
     const extra = { known_hosts: c.line, kh_host: c.host };
-    if (c.strict) extra.kh_strict = "1";
+    if (c.tofu) extra.kh_tofu = "1";
     return extra;
   }
 
@@ -360,18 +369,21 @@ async function main() {
       }
     }
 
-    // The browser half's own `no-policy` case: a browser client that skipped
-    // the check must still get in, for the same reason the native one must.
-    const mitm = await startMitm("pin-browser-nopolicy", []);
+    // The browser half's own unpinned case: a browser client that pinned nothing
+    // must be turned away for the same reason the native one was.
+    const mitm = await startMitm("pin-browser-unpinned", []);
     const br = await startBridge(mitm.port);
     let got = { authed: false, error: "the bridge never came up: " + br.text().slice(0, 200), leaf: "" };
     if (br.up) {
-      got = await runWorkerAuth(browser, httpPort, br.wsPort, "pin-nopolicy", {});
+      got = await runWorkerAuth(browser, httpPort, br.wsPort, "pin-unpinned", {});
       br.bridge.kill();
     }
     await stopMitm(mitm);
-    if (got.authed) ok("browser no-policy", "authenticated -- pinning is opt-in, not the default");
-    else bad("browser no-policy", "an unpinned client failed to authenticate: " + JSON.stringify(got.error));
+    const here = readJson(mitm.json);
+    const label = "browser unpinned";
+    if (judge(label, got, false, "HostkeyUnknown", here)) {
+      ok(label, `refused with ${got.leaf}, 0 auth attempts`);
+    }
   }
 
   // ---- the reference implementation ------------------------------------

@@ -83,29 +83,44 @@ fn wt_hex_nibble(c : UInt16) -> Int {
 /// Loop #48: 主机密钥固定策略。配置键 `known_hosts` 给的是 known_hosts 的
 /// **文本**(不是路径):浏览器里没有文件系统,而 `src/wt` 是 js-only,所以两条
 /// 传输层驱动都只接受文本,判定也只有一个实现(`src/knownhosts`)。
-/// `kh_host` / `kh_port` / `kh_strict` 与 `cmd/ssh_live` 的同名开关一一对应。
+/// `kh_host` / `kh_port` / `kh_tofu` 与 `cmd/ssh_live` 的同名开关一一对应。
 ///
-/// 不给 `known_hosts` 时是 skip 而不是拒绝——这是本项目当前的策略,不安全,
-/// 理由见 AGENTS.md Loop #48。
+/// **Loop #50:默认是拒绝。** 不给 `known_hosts` 也不给 `kh_tofu`,这个主机就是
+/// 「没被固定过」,而答案是否定。`kh_tofu` 是那个需要明写的例外,等于
+/// `StrictHostKeyChecking=accept-new`。`kh_strict` 已删:默认反过来之后它就成了
+/// 一个方向相反的开关,而两个名字相反的开关里总有一个没人会去读。
+fn cfg_kh_host() -> String {
+  let given = cfg("kh_host")
+  if given == "" { "127.0.0.1" } else { given }
+}
+
 fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   let text = cfg("known_hosts")
+  let host = cfg_kh_host()
+  let tofu = cfg("kh_tofu") == "1" || cfg("kh_tofu") == "true"
   if text == "" {
-    return @knownhosts.KnownHostsPolicy::skip()
+    // 和 `cmd/ssh_live` 一样:走一条真的 strict 路径而不是 `skip()`,让这个
+    // 拒绝由固定规则本身产生,而不是一条绕过它的旁路。
+    return @knownhosts.KnownHostsPolicy::from_text("", host, 0, !tofu)
   }
   let p = @knownhosts.KnownHostsPolicy::from_text(
     text,
-    cfg("kh_host"),
+    cfg_kh_host(),
     // 0 = 「端口从 kh_host 的 `[host]:port` 形式里读」,和 `cmd/ssh_live`
     // 的 `--kh-port` 缺省值一致。两条驱动的默认值必须相同,否则同一份
     // known_hosts 在两边会落到不同的条目上——而那种差异只有在连接失败时
     // 才显形。
     cfg_int("kh_port", 0),
-    cfg("kh_strict") == "1" || cfg("kh_strict") == "true",
+    !tofu,
   )
-  // 「给了文本却一条都没解析出来」必须报错,不能安静退化成 skip——见
-  // `cmd/ssh_live` 里同一处的注释。
+  // 「给了文本却一条都没解析出来」必须报错:它有「文件坏了」和「这个主机没被固定
+  // 过」两种读法,而处置不同。放过去的话,一个空文件会被报告成后者,而真正的
+  // 原因永远不会被看见。见 `cmd/ssh_live` 里同一处的注释。
   if p.entries.length() == 0 {
-    println("known_hosts: parsed 0 entries -- refusing instead of silently skipping")
+    println(
+      "known_hosts: parsed 0 entries -- refusing instead of reading it as " +
+      "'this host was never pinned'",
+    )
     abort("known_hosts parsed to nothing")
   }
   p
@@ -128,11 +143,7 @@ fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
   if cfg("kh_tofu") != "1" && cfg("kh_tofu") != "true" {
     return
   }
-  let host = cfg("kh_host")
-  if host == "" {
-    println("tofu: skipped (no kh_host)")
-    return
-  }
+  let host = cfg_kh_host()
   let written = @knownhosts.append_line(
     cfg("known_hosts"),
     host,

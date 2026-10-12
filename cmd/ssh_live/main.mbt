@@ -211,16 +211,15 @@ fn find_user(argv : Array[String]) -> String {
 ///
 /// 附带的效果是:调用方必须自己已经拿着这份文本,这恰好是浏览器应用的真实处境。
 ///
-/// `--kh-host <name>` 指明比哪个主机名,`--kh-port` 指明端口(默认沿用连接端口),
-/// `--kh-strict` 让「这个主机压根没被固定过」也算失败。
+/// `--kh-host <name>` 指明比哪个主机名,`--kh-port` 指明端口(缺省 0 = 从
+/// kh_host 的 `[host]:port` 形式里读),`--kh-tofu` 显式表示「接受并写回新钥匙」
+/// (=`StrictHostKeyChecking=accept-new`)。
 ///
-/// **不带 `--known-hosts-text` 时是 skip,不是拒绝。** 这是本项目当前的策略,写
-/// 在这里是因为它不安全:跳过固定意味着第一次连接、以及对端换过密钥之后的连接,
-/// 都仍然可被中间人接管。OpenSSH 的默认是「比」,不是「跳」。
+/// **Loop #50:默认是拒绝。** 不给 `--kh-tofu`,就没有任何办法让一个没被固定过的
+/// 主机通过,而那正是 Loop #48 留下的缺口。
 ///
-/// 没有把默认直接改成拒绝,是因为那会一次性改掉所有现有门禁的语义;「提供
-/// 固定能力」和「默认拒绝」是两件事,混在一次改动里做,失败时无法判断是哪一半
-/// 出了问题。
+/// `--kh-strict` 已删:它是 Loop #48 的显式 strict 开关,默认反过来之后它就成了
+/// 一个方向相反的开关。少一个配置项就少一个能配错的地方。
 fn argv_value(argv : Array[String], name : String) -> String {
   let mut i = 1
   while i < argv.length() {
@@ -279,11 +278,7 @@ fn parse_port_arg(s : String, fallback : Int) -> Int {
 /// 连接到底有没有凭据出去。
 fn kh_report_tofu(argv : Array[String], port : Int, r : @sshclient.AuthReport) -> Unit {
   if has_switch(argv, "--kh-tofu") {
-    let host = argv_value(argv, "--kh-host")
-    if host == "" {
-      println("tofu: skipped (no --kh-host)")
-      return
-    }
+    let host = kh_host_name(argv)
     let existing = argv_value(argv, "--known-hosts-text")
     let written = @knownhosts.append_line(
       existing,
@@ -299,24 +294,66 @@ fn kh_report_tofu(argv : Array[String], port : Int, r : @sshclient.AuthReport) -
   }
 }
 
+///| Loop #50:主机密钥固定的**默认**,以及为什么它住在这一层。
+///
+/// Loop #48 把固定接了进来,但默认是「不给 known_hosts 就跳过」——一个不安全的
+/// 默认,而每一次忘记配置都静默地落到它上面。这一轮把默认反过来:**不给任何
+/// known_hosts,拒绝连接**。接受新钥匙变成一个必须明写的开关,也就是
+/// `StrictHostKeyChecking=accept-new` 的等价物。
+///
+/// 这个形状本身是论点的一半:在安全的默认里,「不安全」需要**敲一个字**;而在
+/// 旧形状里,「安全」需要一个文件**并且**需要一个开关。少一个配置项就掉回不安全
+/// ——这正是要把默认值放在安全那一侧的原因,也是为什么 kh-strict 被删掉了:它是
+/// Loop #48 的显式 strict 开关,默认反过来之后它就成了一个方向相反的开关,而两个
+/// 名字相反的开关里总有一个没人会去读。
+///
+/// 与 OpenSSH 的差别只有一处,而且是刻意的:accept-new 在这里既表示「接受新
+/// 钥匙」也表示「写回」,而 OpenSSH 要另外给 UserKnownHostsFile 一个可写的路径。
+/// 这个 moon 版本没有文件 IO(见 Loop #48),所以驱动只能把写回打印出来,由调用方
+/// 落盘。浏览器那一侧的答案是 localStorage,不是文件。
+///| 要在 known_hosts 里查的主机名。`--kh-host` 没给就退回实际拨号的那个。
+///
+///|
+///
+/// 判定(`kh_policy`)和写回(`kh_report_tofu`)必须问同一个问题:如果写回写的是
+/// 「另一个」主机名,下一次连接查的就不是刚写进去的那一条,而拒绝信息也会指向
+/// 一个我们从没提过的名字。两个调用点各自 `argv_value` 的形状,就是这类漂移的
+/// 起点。
+fn kh_host_name(argv : Array[String]) -> String {
+  let given = argv_value(argv, "--kh-host")
+  if given == "" { "127.0.0.1" } else { given }
+}
+
+///|
 fn kh_policy(argv : Array[String], port : Int) -> @knownhosts.KnownHostsPolicy {
   let text = argv_value(argv, "--known-hosts-text")
+  let host = kh_host_name(argv)
+  // 默认 strict;accept-new 是那个需要明写的例外。
+  let strict = !has_switch(argv, "--kh-tofu")
   if text == "" {
-    return @knownhosts.KnownHostsPolicy::skip()
+    // 什么都没给。strict 下的答案是拒绝,而且这个拒绝是由**固定规则本身**产生的:
+    // 这个主机「没被固定过」。走一条真的 strict 路径而不是 `skip()`,这样拒绝
+    // 走的是和「钉住的钥匙对不上」同一条代码,不会有一条例外路径悄悄绕过它。
+    return @knownhosts.KnownHostsPolicy::from_text("", host, 0, strict)
   }
   let p = @knownhosts.KnownHostsPolicy::from_text(
     text,
-    argv_value(argv, "--kh-host"),
+    host,
     parse_port_arg(argv_value(argv, "--kh-port"), 0),
-    has_switch(argv, "--kh-strict"),
+    strict,
   )
   // 「给了文本但一条都没解析出来」必须报错,不能安静地变成 skip。
   // `verify` 看到空条目就返回 Skip,而调用方「要求固定」和「忘了固定」在那一层
   // 完全一样——一个看起来跑过的检查比没跑过的检查更危险。
+  //
+  // 「给了文本但一条都没解析出来」在这里分掉,因为它有**两种**读法而处置不同:
+  // 「你的 known_hosts 坏了」(该报错)和「这个主机没被固定过」(该走 Unknown)。
+  // 放它过去的话,一个语法错误或空文件会被报告成后者——一个看起来像配置还没做的
+  // 理由,而真正的原因永远不会被看见。
   if p.entries.length() == 0 {
     println(
-      "known_hosts: --known-hosts-text 解析出 0 条 -- 拒绝继续,而不是悄悄" +
-      "跳过固定",
+      "known_hosts: --known-hosts-text 解析出 0 条 -- 拒绝继续,而不是把它读成" +
+      "「这个主机没被固定过」",
     )
     abort("known_hosts parsed to nothing")
   }

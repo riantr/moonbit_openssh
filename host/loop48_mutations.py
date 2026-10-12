@@ -13,6 +13,12 @@ comparison itself, and the adapters' refusal to act on its answer.
     leaving one of the two standing is what makes the next mutation say
     something about the other.
 
+    The anchor moved in Loop #50.  The adapters used to pattern-match
+    `kh.verify`'s verdict themselves; they now call `kh.decide` and match on
+    `PinFailure`.  Same decision, one place instead of two -- but an anchor that
+    names the old shape would have reported SKIP, and a SKIP looks exactly like a
+    gate that has nothing left to catch.
+
 Only the pinning comparison is mutated, never the signature check above it: a
 self-consistent peer passes that check by construction, so mutating it would
 only re-test Loop #47.
@@ -71,8 +77,8 @@ MUTATIONS = [
     (
         "B: src/sshclient discards the pinning verdict",
         os.path.join(ROOT, "src", "sshclient", "live.mbt"),
-        "    @knownhosts.Mismatch => return (Failed(HostkeyMismatch(kh.host_str)), None)",
-        "    @knownhosts.Mismatch => ()",
+        "    Some(@knownhosts.PinFailure::Mismatch(h)) => return (Failed(HostkeyMismatch(h)), None)",
+        "    Some(@knownhosts.PinFailure::Mismatch(h)) => ()",
     ),
 ]
 
@@ -140,6 +146,16 @@ def main():
     counts = {"CAUGHT": 0, "MISSED": 0, "NOBUILD": 0, "CRASH": 0}
     try:
         for label, path, frm, to in MUTATIONS:
+            # Restore the whole tree before each mutation, not just the file this
+            # one touches.  Mutation A edits `src/knownhosts/policy.mbt` and
+            # mutation B edits `src/sshclient/live.mbt`, so without this B ran on
+            # top of A -- and the per-client breakdown then attributed a policy
+            # mutation to the adapter.  The summary below already warns about
+            # inventing dependency edges between the two clients; leaving the
+            # mutations stacked is how that mistake gets made for real.
+            for p in FILES:
+                write(p, originals[p])
+
             src = originals[path]
             if frm not in src:
                 print("SKIP  %s -- anchor not found in %s" % (label, path))
@@ -175,10 +191,10 @@ def main():
             # looking for a dependency edge that does not exist -- `moon clean`
             # was run first, so it is not a stale artifact either.
             for client in ("native", "browser"):
-                caught_here = [f for f in fails if f.startswith(client + " ")]
+                caught_here = [f for f in fails if f.startswith("FAIL " + client + " ")]
                 if caught_here:
                     print("        %-8s %s" % (client + ":", ", ".join(
-                        f[len(client) + 1:].split()[0] for f in caught_here
+                        f.split()[2] for f in caught_here
                     )))
             for f in fails:
                 print("          " + f[:170])
