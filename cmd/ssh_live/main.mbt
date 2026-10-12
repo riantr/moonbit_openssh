@@ -47,6 +47,9 @@ fn live_error_name(e : @sshclient.LiveError) -> String {
     // indistinguishable from a network fault.
     HostkeyMismatch(h) => "HostkeyMismatch"
     HostkeyUnknown(h) => "HostkeyUnknown"
+    // Loop #51: 不叫 HostkeyMismatch,也不叫 HostkeyUnknown。前者会让人去查中间人
+    // (没有),后者会让人去找一条直接条目(这个客户端给不了)。见 policy.mbt。
+    HostkeyCertAuthority(h) => "HostkeyCertAuthority"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
     BadPacket => "BadPacket"
@@ -80,6 +83,43 @@ fn auth_error_name(e : @sshclient.AuthError) -> String {
 }
 
 ///|
+///|
+/// 固定类失败的一句话说明。**打印在 `error:` 之后**,因为 `error:` 是机器读的那
+/// 一行,人话跟在后面。
+///
+/// Loop #51 的全部论点就是「名字决定用户下一步做什么」,而一个没人认识的错误名
+/// 不改变任何行为——它只会让人继续走熟悉的老路:看到 HOST_CHANGED 就把钥匙加上。
+/// 对 `HostkeyCertAuthority` 来说那条老路恰好是最坏的一条,所以这里必须说清楚。
+fn print_pin_hint(e : @sshclient.AuthError) -> Unit {
+  // 固定类失败住在 `LiveError` 里,握手期的那个经 `Transport`/`HandshakeFailed`
+  // 到达这里——这也正是 `error:` 那一行会打成 `transport:handshake:...` 的原因。
+  let inner = match e {
+    @sshclient.Transport(@sshclient.HandshakeFailed(h)) => h
+    _ => return
+  }
+  match inner {
+    @sshclient.HostkeyCertAuthority(h) =>
+      println(
+        "hint: " + h + " is pinned via a @cert-authority entry, and this client does " +
+        "not validate host certificates. This is not a man in the middle: pin the " +
+        "host key directly (ssh-keyscan -t ecdsa " + h + "), or use --kh-tofu and " +
+        "know that the pin will break when the host renews its certificate.",
+      )
+    @sshclient.HostkeyMismatch(h) =>
+      println(
+        "hint: the key " + h + " presented does not match the pinned one. Treat this " +
+        "as a man in the middle until you have checked otherwise; --kh-tofu is the " +
+        "way to accept the new key and stop asking.",
+      )
+    @sshclient.HostkeyUnknown(h) =>
+      println(
+        "hint: " + h + " has no key pinned at all. Add one, or pass --kh-tofu to " +
+        "accept and write back the key you are being shown now.",
+      )
+    _ => ()
+  }
+}
+
 fn print_auth_rejection(e : @sshclient.AuthError) -> Unit {
   match e {
     @sshclient.AuthRejected(r, sb, sg) => {
@@ -461,6 +501,7 @@ fn run_exec(
           println("result: AUTH_FAILED")
           print_auth_rejection(e)
           println("error: " + auth_error_name(e))
+          print_pin_hint(e)
         }
         @sshclient.ChannelFailed(e) => {
           println("result: CHANNEL_FAILED")
@@ -815,6 +856,7 @@ fn run_shell(
           println("result: AUTH_FAILED")
           print_auth_rejection(e)
           println("error: " + auth_error_name(e))
+          print_pin_hint(e)
         }
         @sshclient.ChannelFailed(e) => {
           println("result: CHANNEL_FAILED")
@@ -1259,6 +1301,7 @@ fn main {
             println("result: FAILED")
             print_auth_rejection(e)
             println("error: " + auth_error_name(e))
+            print_pin_hint(e)
           }
         }
       }

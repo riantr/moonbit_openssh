@@ -183,6 +183,8 @@ fn error_name(e : @wtlive.WtLiveError) -> String {
     // 需要不同的处置，塌成一个标签就分不出来了。
     HostkeyMismatch(_) => "HostkeyMismatch"
     HostkeyUnknown(_) => "HostkeyUnknown"
+    // Loop #51: 与原生路径同名同义,理由见 `cmd/ssh_live` 里同一处。
+    HostkeyCertAuthority(_) => "HostkeyCertAuthority"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
     BadPacket(w) => "BadPacket:" + w
@@ -217,6 +219,41 @@ fn test_auth_key() -> @bigint.BigNat {
 ///|
 /// AuthRejected 携带的三样证据原样打印,理由字段不在这一层被拼进字符串里,
 /// 它得能被单独解析。
+///|
+/// 固定类失败的一句话说明,与 `cmd/ssh_live` 的同名函数逐字一致。
+///
+/// 两条驱动的文案必须一样:用户先在浏览器里遇到,再在终端里复现,文案不同就会
+/// 变成「浏览器复现不了」这种猜测。理由见 `cmd/ssh_live` 里同一处。
+fn print_pin_hint(e : @wtlive.WtAuthError) -> Unit {
+  // 同 `cmd/ssh_live`:固定类失败住在 `WtLiveError` 里,握手期的那个经
+  // `HandshakeFailed` 到达这里(这一侧没有 `Transport` 那一层,直接就是它)。
+  let inner = match e {
+    @wtlive.HandshakeFailed(h) => h
+    _ => return
+  }
+  match inner {
+    @wtlive.HostkeyCertAuthority(h) =>
+      println(
+        "hint: " + h + " is pinned via a @cert-authority entry, and this client does " +
+        "not validate host certificates. This is not a man in the middle: pin the " +
+        "host key directly (ssh-keyscan -t ecdsa " + h + "), or use kh_tofu and " +
+        "know that the pin will break when the host renews its certificate.",
+      )
+    @wtlive.HostkeyMismatch(h) =>
+      println(
+        "hint: the key " + h + " presented does not match the pinned one. Treat this " +
+        "as a man in the middle until you have checked otherwise; kh_tofu is the " +
+        "way to accept the new key and stop asking.",
+      )
+    @wtlive.HostkeyUnknown(h) =>
+      println(
+        "hint: " + h + " has no key pinned at all. Add one, or pass kh_tofu to " +
+        "accept and write back the key you are being shown now.",
+      )
+    _ => ()
+  }
+}
+
 fn print_auth_rejection(e : @wtlive.WtAuthError) -> Unit {
   match e {
     @wtlive.AuthRejected(r, sb, sg) => {
@@ -782,6 +819,7 @@ async fn main {
         println("result: AUTH_FAILED")
         print_auth_rejection(e)
         println("error: " + auth_error_name(e))
+        print_pin_hint(e)
       }
       @wtlive.ChannelFailed(e) => {
         println("result: CHANNEL_FAILED")
@@ -847,6 +885,7 @@ async fn main {
         println("result: AUTH_FAILED")
         print_auth_rejection(e)
         println("error: " + auth_error_name(e))
+        print_pin_hint(e)
       }
       @wtlive.ChannelFailed(e) => {
         println("result: CHANNEL_FAILED")
@@ -909,6 +948,7 @@ async fn main {
         if auth_error_name(e) != "AuthRejected" {
           println("result: FAILED")
           println("error: " + auth_error_name(e))
+          print_pin_hint(e)
         }
       }
     }

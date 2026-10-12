@@ -40,6 +40,12 @@ pub(all) enum FlowError {
   HostKeyMismatch(String)
   /// strict_kex 涓?hostname 鏈湪 known_hosts(Loop #13 鎺ュ叆)
   HostKeyUnknown(String)
+  /// Loop #51: hostname 只被 `@cert-authority` 命中,而本客户端不验证主机证书。
+  ///
+  /// 和 `HostKeyMismatch` 分开:后者是「有人在中间」的真指控,而这一条是
+  /// 「这个客户端答不上来」。报成前者会让用户照着 HOST_CHANGED 的流程去加
+  /// `--kh-tofu`,那正好是在关掉保护。
+  HostKeyCertAuthority(String)
 }
 
 ///|
@@ -228,6 +234,7 @@ pub fn flow_on_reply(
         if cfg.strict_kex {
           return Failed(HostKeyUnknown(cfg.hostname))
         }
+      @knownhosts.CertAuthority => return Failed(HostKeyCertAuthority(cfg.hostname))
       @knownhosts.InvalidEntry => return Failed(ProtocolError)
     }
   }

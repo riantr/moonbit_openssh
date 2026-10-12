@@ -42,8 +42,19 @@ fn entry_matches_spec(
 }
 
 ///|
-/// 在 entries 中查找最后一个 hostname 命中的条目 (Loop #14: port-aware)
-fn find_last_match_v2(
+/// 在 entries 中查找最后一个 hostname 命中的**直接**条目 (Loop #14: port-aware)
+///
+/// Loop #51: `@cert-authority` 条目在这里被排除。
+///
+/// 它必须被排除,因为它不是一把主机密钥的 pin:它是「只有出示这张 CA 签的
+/// 证书才信任」的信任锚。把它的 blob 和出示的主机密钥比相等,是一个没有意义
+/// 的比较——**而且相等时是 fail-open**:对端出示 CA 的公钥当主机密钥,我们就
+/// 认了。之前 `entry_matches_spec` 不看 marker,于是这一行和一条普通条目
+/// 完全等价,实测确实会放行并把凭据发出去。
+///
+/// last-match-wins 保留在直接条目内部。一个主机上既有直接条目又有 CA 条目时,
+/// 拿直接条目说话:那才是「我们钉过这把钥匙,而它变了」,是真指控。
+fn find_last_direct_match_v2(
   entries : Array[KnownHostEntry],
   host_only : String,
   port_caller : Int,
@@ -51,11 +62,30 @@ fn find_last_match_v2(
   let mut found : KnownHostEntry? = None
   for i = 0; i < entries.length(); i = i + 1 {
     let e = entries[i]
-    if entry_matches_spec(e, host_only, port_caller) {
+    if e.marker != Marker::CertAuthority && entry_matches_spec(e, host_only, port_caller) {
       found = Some(e)
     }
   }
   found
+}
+
+///|
+/// 这个主机名是否被任何 `@cert-authority` 条目覆盖。
+///
+/// 用来区分两件都「拒绝」但原因完全不同的事:这台主机压根没人 pin 过,和这台
+/// 主机是用 CA pin 的、而我们不验证证书。
+fn has_cert_authority_match(
+  entries : Array[KnownHostEntry],
+  host_only : String,
+  port_caller : Int,
+) -> Bool {
+  for i = 0; i < entries.length(); i = i + 1 {
+    let e = entries[i]
+    if e.marker == Marker::CertAuthority && entry_matches_spec(e, host_only, port_caller) {
+      return true
+    }
+  }
+  false
 }
 
 ///| 字节级 blob 比较
@@ -80,6 +110,7 @@ fn blob_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
 ///   Ok          — hostname 命中 + key 字节匹配 + 未被 @revoked 拒绝
 ///   Mismatch    — hostname 命中但 key 不匹配,或 @revoked 全局扫命中
 ///   Unknown     — entries 为空或 hostname 未命中
+///   CertAuthority — hostname 只被 @cert-authority 命中(Loop #51)
 ///   InvalidEntry — 内部错误(shouldn't happen in normal flow)
 pub fn check_host_key(
   entries : Array[KnownHostEntry],
@@ -105,11 +136,21 @@ pub fn check_host_key(
       return Mismatch  // key 在 @revoked 列表中,无论 host 匹不匹配都拒绝
     }
   }
-  // 3. last-match-wins 找 host+port 命中
-  let found = find_last_match_v2(entries, host_only, port_caller)
+  // 3. last-match-wins 找 host+port 命中的**直接**条目
+  //
+  // 只在直接条目里找,不在 CA 条目里找:CA 条目不是主机密钥的 pin。剩下的 CA
+  // 命中单独用来区分「没人 pin 过」和「用 CA pin 的、而我们不验证证书」。
+  let found = find_last_direct_match_v2(entries, host_only, port_caller)
   // 4. 决定最终 status
   match found {
-    None => Unknown
+    None =>
+      // 没有直接条目。主机名若被 CA 条目覆盖,那是一个我们答不上来的问题,
+      // 而不是「没被 pin 过」,更不是「钥匙变了」。
+      if has_cert_authority_match(entries, host_only, port_caller) {
+        CertAuthority
+      } else {
+        Unknown
+      }
     Some(e) => if blob_eq(e.key_blob, presented_blob) { Ok } else { Mismatch }
   }
 }
@@ -125,6 +166,9 @@ pub fn check_host_key_legacy(
 }
 
 ///| strict-kex 感知:strict_kex=true 时 Unknown 升级为 InvalidEntry(拒绝)
+///
+/// Loop #51: `CertAuthority` **不**升级。它已经是一个拒绝了,而把它变成
+/// InvalidEntry 会把「用 CA pin 的」和「条目坏了」混成一类。
 pub fn check_host_key_strict(
   entries : Array[KnownHostEntry],
   host_str : String,

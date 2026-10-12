@@ -1265,6 +1265,144 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #51: `@cert-authority` is not a host key pin
+
+Loop #50 made refusing the default. This closes a hole that default made
+reachable, and it was found by reading what a marker *means* rather than what it
+parses as -- Loop #49 had just taught `render` to preserve `@cert-authority`, and
+nobody had asked what the matcher did with it.
+
+**It did nothing.** `Marker::Revoked` is consulted in `check.mbt`; `Marker::CertAuthority`
+was never read anywhere in the decision path. `entry_matches_spec` ignores the
+marker, so a `@cert-authority` line was an ordinary trust entry. Measured with a
+throwaway probe before fixing anything:
+
+```
+direct pin (the control)       AUTHENTICATED    auth_attempts=1
+@cert-authority, same blob     AUTHENTICATED    auth_attempts=1   <-- fail-open
+@revoked, same blob            refused  HostkeyMismatch  auth_attempts=0
+```
+
+`@cert-authority host K` says *trust this host only when it presents a certificate
+signed by K*. This client does not validate host certificates. So the entry is a
+question we cannot answer, and **both** obvious ways to answer it are wrong, in
+opposite directions:
+
+- treat it as a direct pin -> fail open when the blobs coincide (the hole above);
+- treat it as a mismatch -> fail closed, but accuse a man in the middle who does
+  not exist. `HOST_CHANGED`'s documented remedy is "add the key" or "type yes",
+  which here means reaching for `--kh-tofu`.
+
+That second one is why this is more than a missing check. **A client that cries
+wolf about an ordinary CA deployment trains its user to disable the protection**,
+and Loop #50's entire argument was that turning protection off should cost a
+deliberate keystroke. The bug was finding a way around the keystroke.
+
+`@cert-authority` is common in real `~/.ssh/known_hosts` -- it is how a Puppet /
+Chef / Ansible CA gets pinned -- so both halves of this are reachable in
+ordinary use.
+
+**The fix is a separate match path, not a special case.** `find_last_match_v2`
+became `find_last_direct_match_v2`, which excludes `@cert-authority` outright,
+plus `has_cert_authority_match` to tell "nobody pinned this" apart from "pinned
+via a CA, which we cannot answer". `HostStatus` / `PinVerdict` / `PinFailure` each
+gain `CertAuthority`, and both adapters plus `src/kexflow` translate it into their
+own error (`HostkeyCertAuthority` / `HostKeyCertAuthority`). Three states that
+must not be confused, each with a different remedy:
+
+| verdict | says | the user's next move |
+|---|---|---|
+| `Mismatch` | someone is lying | rotate the key, investigate |
+| `Unknown` | nobody pinned this host | add a pin |
+| `CertAuthority` | this client cannot answer | use a different tool, or pin the host key directly |
+
+Two precedence rules, both asserted because both directions are wrong:
+
+- **A direct entry wins over a CA entry**, so a *real* key change on a host that
+  has both still screams. If the CA entry won, a genuine compromise would be
+  laundered into "this client doesn't do certificates" -- strictly worse than
+  the reverse.
+- **`@revoked` still bites first**, because its scan is global and by design
+  ignores host matching. A key that is both revoked and CA-referenced reported as
+  `CertAuthority` would turn an unambiguous revocation into a feature gap.
+
+**`--kh-tofu` does not open this one.** It is easy to read "accept what you haven't
+seen" as permission to accept this, and it would restore exactly the downgrade
+being removed -- through a switch that looks entirely reasonable.
+
+**Gate: `ALL PASS (15 checks)` over five cases on both transports**, plus 38
+known_hosts unit tests. `ca-other-blob` is the case that looks like a pass and is
+not: refusing is correct there, but refusing *for the wrong reason* is the whole
+damage, so the leaf name is compared and not just the outcome. A gate that checked
+only yes/no would have shipped the accusation.
+
+**The name is not the whole fix, so the gate checks the sentence too.** Loop
+#51's argument is that the name decides what the user does next, and an
+unfamiliar label in a log changes nothing -- the user still walks the path they
+walked last time. Both drivers therefore print a `hint:` line *after* the
+machine-readable `error:` line, and every refused case in the gate asserts both
+that the hint exists and that it mentions what that case is about: `revoked` must
+say "man in the middle", `ca-*` must say "certificate", `unpinned` must say "no
+key pinned". Without that, deleting `print_pin_hint` turns every gate green again
+while quietly putting the autopilot back, and the three hints could converge into
+one paragraph with every leaf name still correct.
+
+```
+error: transport:handshake:HostkeyCertAuthority
+hint: 127.0.0.1 is pinned via a @cert-authority entry, and this client does not
+      validate host certificates. This is not a man in the middle: pin the host
+      key directly (ssh-keyscan -t ecdsa 127.0.0.1), or use --kh-tofu and know
+      that the pin will break when the host renews its certificate.
+```
+
+**Verified:** `ALL PASS (17 checks)` on `verify_loop51` over six cases on both
+transports, plus 38 known_hosts unit tests. `ca-other-blob` is the case that looks
+like a pass and is not: refusing is correct there, but refusing *for the wrong
+reason* is the whole damage, so the leaf name is compared and not just the
+outcome. A gate that checked only yes/no would have shipped the accusation.
+
+**Two traps in the tree that are not regressions.** Both cost time during this
+loop; neither was introduced by it.
+
+1. **`moon check --target native` at the repo root fails**, and did before this
+   loop. `src/knownhosts_store` is a Loop #19-era host-shim scaffold using
+   `extern "wasm"`, last touched in `3a23d8c`, **imported by nobody**, with no
+   `targets:` gate in its `moon.pkg` to keep it off the native backend (the
+   pattern exists elsewhere -- see Loop #37). Check the packages you touched, or
+   the known-hosts dependents specifically (`src/knownhosts`, `src/kexflow`,
+   `src/sshclient`, `src/wtlive`, `cmd/ssh_live`, `cmd/wt_ssh`, `cmd/sftp_mitm`);
+   do not read a red root-level check as a regression. It is also, incidentally,
+   where a real store would go if the write-back ever stops being a printed line.
+
+2. **The committed `pkg.generated.mbti` files are stale.** `src/knownhosts`'s was
+   last written in `3a23d8c` (Loop #17-#21) and does not contain
+   `KnownHostsPolicy`, `decide`, `PinFailure` or `append_line` -- everything from
+   Loop #48 on. Moon does not regenerate them in place here, and there are no
+   fresh copies under `_build`. Most of them date to the initial commit. So **do
+   not read a `pkg.generated.mbti` in this repo as the package's API surface**;
+   read the `.mbt` files. This bit during this loop: the stale `knownhosts` mbti
+   already contained a `CertAuthority`, which is `Marker::CertAuthority` from
+   Loop #14, and it briefly looked like evidence that Loop #51's new status was
+   already there. The "read the real `pkg.generated.mbti`" rule in the
+   third-party-package checklist is about `.mooncakes`, where moon *does*
+   generate a current one; it does not apply here.
+
+**Mutation check: `host/loop51_mutations.py`** -- A drops the exclusion (the
+fail-open returns), B downgrades the answer to `Unknown` (the accusation
+returns), C makes `src/wtlive` discard the verdict. All three caught.
+
+A is the informative one, because it reproduces **both halves of the original
+bug at once**: `ca-same-blob` and `tofu-ca` go back to `AUTHENTICATED`, and
+`ca-other-blob` goes back to `HostkeyMismatch`. That is the pre-fix behaviour,
+side by side, in one run.
+
+B turned up something the gate's cases had not made explicit: **the TOFU hole
+does not need the marker filter removed.** Downgrading the CA answer to `Unknown`
+is enough, because `Unknown` under `--kh-tofu` is "accept". So
+"accept-new must not re-open this" is a property of the *verdict being distinct*,
+not of the exclusion in `find_last_direct_match_v2` -- two independent mechanisms,
+and asserting only one of them would have left the other untested.
+
 ### Loop #50: the default is the refusal
 
 Loop #48 made pinning real. Loop #49 made it write back. Neither changed the

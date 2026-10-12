@@ -38,6 +38,7 @@ fn decide_as(p : @knownhosts.KnownHostsPolicy, blob : FixedArray[Byte]) -> Strin
       match f {
         Mismatch(h) => "mismatch:" + h
         Unknown(h) => "unknown:" + h
+        CertAuthority(h) => "certauthority:" + h
         InvalidEntry => "invalid"
       }
   }
@@ -135,4 +136,87 @@ test "an_entry_on_another_port_does_not_pin_this_one" {
   assert_eq(decide_as(right_split, blob), "allow")
   let wrong = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 2223, true)
   assert_eq(decide_as(wrong, blob), "unknown:h.example")
+}
+
+// ---------------------------------------------------------------------------
+// Loop #51: `@cert-authority` 不是一把主机密钥的 pin
+// ---------------------------------------------------------------------------
+
+test "a_cert_authority_entry_is_never_a_direct_pin" {
+  // **这一条就是 Loop #51 的回归测试。**
+  //
+  // `@cert-authority h.example <BLOB>` 说的是「只有出示这张 CA 签的证书才信任」,
+  // 不是「这台主机的密钥就是 BLOB」。此前它被当成普通条目比对相等,而
+  // **相等即放行**——实测对端出示这把 key 时客户端会认证并把凭据发出去。
+  //
+  // 构造方式刻意选了「blob 完全相同」:只有这种情况下 fail-open 才会发生,所以
+  // 只有这种情况能证明洞被堵上了。
+  let blob = blob_of(PIN_ED25519_B64)
+  let line = "@cert-authority h.example ssh-ed25519 " + PIN_ED25519_B64
+  let strict = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 0, true)
+  assert_eq(decide_as(strict, blob), "certauthority:h.example")
+}
+
+test "a_cert_authority_entry_does_not_escape_under_tofu" {
+  // **accept-new 也不能把它变成信任。**
+  //
+  // 这一点值得单独断言,因为 `--kh-tofu` 的字面意思就是「接受没见过的」,
+  // 而「用 CA pin 的主机」看起来就很像「没见过的」。但放行它等于把 Loop #51
+  // 关掉的降级原样装回来,而且是从一个看起来正当的开关进来的。
+  let blob = blob_of(PIN_ED25519_B64)
+  let line = "@cert-authority h.example ssh-ed25519 " + PIN_ED25519_B64
+  let tofu = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 0, false)
+  assert_eq(decide_as(tofu, blob), "certauthority:h.example")
+}
+
+test "a_cert_authority_entry_for_another_host_is_still_unknown" {
+  // CA 命中必须真的按主机名算。通配 CA 条目很常见(`@cert-authority
+  // *.internal.example`),所以「命中」这个条件要真的起作用,否则一个覆盖
+  // 半张网段的 CA 会把无关主机也变成 `CertAuthority`,而那个状态会让人
+  // 去找根本不存在的证书问题。
+  let blob = blob_of(PIN_ED25519_B64)
+  let line = "@cert-authority other.example ssh-ed25519 " + PIN_ED25519_B64
+  let p = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 0, true)
+  assert_eq(decide_as(p, blob), "unknown:h.example")
+}
+
+test "a_direct_entry_wins_over_a_cert_authority_entry" {
+  // 同一主机既有直接条目又有 CA 条目时,拿直接条目说话。
+  //
+  // 顺序反过来会怎样:如果 CA 条目压过直接条目,那么一次**真实**的钥匙更换
+  // 会被报成「用 CA pin 的、我不支持」,也就是把一个真指控洗成一条
+  // 无害的说明——比反过来更糟。
+  let blob = blob_of(PIN_ED25519_B64)
+  let other = blob_of(PIN_RSA_B64)
+  // 直接条目在**前**面,CA 条目在后面:后者不能用 last-match-wins 盖掉前者。
+  let ca_then_direct = "@cert-authority h.example ssh-ed25519 " + PIN_ED25519_B64 +
+    "\nh.example ssh-ed25519 " + PIN_ED25519_B64
+  let direct_then_ca = "h.example ssh-ed25519 " + PIN_ED25519_B64 +
+    "\n@cert-authority h.example ssh-ed25519 " + PIN_RSA_B64
+  let a = @knownhosts.KnownHostsPolicy::from_text(ca_then_direct, "h.example", 0, true)
+  let b = @knownhosts.KnownHostsPolicy::from_text(direct_then_ca, "h.example", 0, true)
+  assert_eq(decide_as(a, blob), "allow")
+  // 直接条目仍在,出示的却是别的钥匙 → 真指控,不能被 CA 条目洗掉。
+  assert_eq(decide_as(b, other), "mismatch:h.example")
+}
+
+test "a_revoked_key_still_wins_over_a_cert_authority_entry" {
+  // 吊销是全表扫,不看主机名,所以它必须排在所有事之前。
+  // 一条「既被 @revoked 又被 @cert-authority 引用」的 key,报 CertAuthority
+  // 会把一条明确的吊销记录说成一个功能缺失。
+  let blob = blob_of(PIN_ED25519_B64)
+  let line = "@cert-authority h.example ssh-ed25519 " + PIN_ED25519_B64 +
+    "\n@revoked anywhere.example ssh-ed25519 " + PIN_ED25519_B64
+  let p = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 0, true)
+  assert_eq(decide_as(p, blob), "mismatch:h.example")
+}
+
+test "a_wildcard_cert_authority_entry_covers_the_host" {
+  // 通配 CA 条目是 CA pin 的常见写法,必须真的匹配。这条与
+  // `a_cert_authority_entry_for_another_host_is_still_unknown` 成对:一个证明
+  // 该命中,一个证明不该命中。
+  let blob = blob_of(PIN_ED25519_B64)
+  let line = "@cert-authority *.example.com ssh-ed25519 " + PIN_ED25519_B64
+  let p = @knownhosts.KnownHostsPolicy::from_text(line, "h.example.com", 0, true)
+  assert_eq(decide_as(p, blob), "certauthority:h.example.com")
 }

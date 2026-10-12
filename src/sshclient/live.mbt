@@ -81,6 +81,15 @@ pub(all) enum LiveError {
   /// as its own variant is what lets a caller tell "checked and consistent"
   /// from "never checked".
   HostkeyUnknown(String)
+  /// Loop #51: this host is pinned via an `@cert-authority` entry, and this
+  /// client does not validate host certificates.
+  ///
+  /// Its own variant, because the remediation is nothing like `HostkeyMismatch`'s.
+  /// Mismatch means someone is lying and the key should be rotated and
+  /// investigated. This means the client cannot answer the question -- and
+  /// reporting it as a mismatch teaches the user to reach for `--kh-tofu`, which
+  /// is the opposite of the fix.
+  HostkeyCertAuthority(String)
   NewkeysSendFailed
   NoNewkeys
   /// A packet arrived but could not be framed -- bad length, bad padding, or
@@ -725,6 +734,8 @@ fn handshake_to_session(
     None => ()
     Some(@knownhosts.PinFailure::Mismatch(h)) => return (Failed(HostkeyMismatch(h)), None)
     Some(@knownhosts.PinFailure::Unknown(h)) => return (Failed(HostkeyUnknown(h)), None)
+    Some(@knownhosts.PinFailure::CertAuthority(h)) =>
+      return (Failed(HostkeyCertAuthority(h)), None)
     Some(@knownhosts.PinFailure::InvalidEntry) => return (Failed(HostkeyInvalid), None)
   }
   // ---- 8. NEWKEYS ----

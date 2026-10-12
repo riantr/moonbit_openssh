@@ -17,11 +17,19 @@ pub struct HostSpec {
 ///|
 /// known_hosts 行标记
 pub(all) enum Marker {
-  /// 普通条目（无前缀标记）
+  /// 普通条目（无前缀标记）：主机密钥就是这一把
   None
-  /// @cert-authority 信任锚（本子集不强制 CA 语义）
+  /// `@cert-authority` 信任锚
+  ///
+  /// Loop #51 起**强制**语义,而且是往安全方向强制：这一行**不是**一把主机
+  /// 密钥的 pin。它说的是「只有当该主机出示一张由这把 CA 签发的证书时才信任」,
+  /// 而证书验证不在本子集内——所以这一行永远不能拿它的 blob 去和出示的主机
+  /// 密钥比相等。之前它被当成普通条目比对,等于把「信任这个 CA」悄悄降级成
+  /// 「信任这把钥匙就是这台主机」,见 `check_host_key`。
   CertAuthority
-  /// @revoked 吊销标记（本子集仅识别，不强制语义）
+  /// @revoked 吊销标记
+  ///
+  /// Loop #14 起强制语义:全表扫,不看主机名是否命中,命中即拒。
   Revoked
 } derive(Eq)
 
@@ -34,6 +42,17 @@ pub(all) enum HostStatus {
   Mismatch
   /// hostname 未命中（strict_kex 决定是否升级）
   Unknown
+  /// 主机名只被 `@cert-authority` 条目命中,而本客户端不验证主机证书
+  ///
+  /// Loop #51 新增。它存在的理由是它和另外两个都**不能混用**:
+  ///
+  ///   * 不是 `Ok`   —— 没有比对过任何主机密钥,拿 CA 的公钥去和主机密钥比相等
+  ///                   是没有意义的,而且相等时是 fail-open。
+  ///   * 不是 `Mismatch` —— 我们根本没有一把可信的主机密钥可比,所以「钥匙变了」
+  ///                     这个指控没有依据。而 `HOST_CHANGED` 的标准解法是用户去加
+  ///                     `--kh-tofu`,也就是说把一个「我不懂这个配置」报成
+  ///                     「有人在中间」,是在教用户关掉保护。
+  CertAuthority
   /// entries 中有空指针或格式错误
   InvalidEntry
 } derive(Eq)

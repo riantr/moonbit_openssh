@@ -61,6 +61,11 @@ pub(all) enum WtLiveError {
   /// non-strict policy this is TOFU and is allowed through; carrying it apart
   /// is what lets a caller tell "checked and consistent" from "never checked".
   HostkeyUnknown(String)
+  /// Loop #51: this host is pinned via an `@cert-authority` entry, and this
+  /// client does not validate host certificates. Its own variant, and the same
+  /// reason as the native side: reporting it as a mismatch would tell the user
+  /// to rotate a key nobody forged, and then to reach for `--kh-tofu`.
+  HostkeyCertAuthority(String)
   NewkeysSendFailed
   NoNewkeys
   /// 一整段字节读回来了,但它不是一个合法的包。
@@ -498,6 +503,8 @@ async fn wt_handshake_into(
     None => ()
     Some(@knownhosts.PinFailure::Mismatch(h)) => return Failed(HostkeyMismatch(h))
     Some(@knownhosts.PinFailure::Unknown(h)) => return Failed(HostkeyUnknown(h))
+    Some(@knownhosts.PinFailure::CertAuthority(h)) =>
+      return Failed(HostkeyCertAuthority(h))
     Some(@knownhosts.PinFailure::InvalidEntry) => return Failed(HostkeyInvalid)
   }
   // ---- 8. NEWKEYS ----

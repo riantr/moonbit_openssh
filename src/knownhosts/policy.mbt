@@ -78,6 +78,7 @@ pub(all) enum PinVerdict {
   Accept
   Mismatch
   Unknown
+  CertAuthority
   InvalidEntry
 }
 
@@ -97,6 +98,7 @@ pub fn KnownHostsPolicy::verify(
     Ok => Accept
     Mismatch => Mismatch
     Unknown => Unknown
+    CertAuthority => CertAuthority
     InvalidEntry => InvalidEntry
   }
 }
@@ -108,6 +110,14 @@ pub fn KnownHostsPolicy::verify(
 pub(all) enum PinFailure {
   Mismatch(String)
   Unknown(String)
+  /// Loop #51: 这台主机是用 `@cert-authority` pin 的,而本客户端不验证主机证书。
+  ///
+  /// 和 `Mismatch` 分开不是为了好看,是因为两者的**处置完全不同**:
+  /// `Mismatch` 是「有人在中间」,该报警、该换密钥、该查日志;而这一条是
+  /// 「这个客户端没实现证书验证」,该换工具或改配置。把后者报成前者,用户
+  /// 照着 `HOST_CHANGED` 的标准流程走就会去加 `--kh-tofu`,而那正好是
+  /// Loop #50 刚刚才让需要多敲一个字的选择。
+  CertAuthority(String)
   InvalidEntry
 }
 
@@ -146,6 +156,10 @@ pub fn KnownHostsPolicy::decide(
         None
       }
     Mismatch => Some(Mismatch(self.host_str))
+    // 没有 strict 的例外:我们不验证证书,所以**任何**模式下都没有可接受的
+    // 主机密钥。`--kh-tofu` 也不开这个口子——那会把「用 CA pin 的」悄悄变成
+    // 「信任此刻出示的任何东西」,正是 Loop #51 关掉的那个降级。
+    CertAuthority => Some(CertAuthority(self.host_str))
     InvalidEntry => Some(InvalidEntry)
   }
 }
