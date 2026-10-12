@@ -13,7 +13,7 @@ import sys
 
 HEADER = '''///| GENERATED FILE -- do not edit by hand.
 ///|
-/// Regenerate: python host/gen_fault_vectors.py host/sftp_fault_oracle.py-out.json
+/// Regenerate: python host/gen_fault_vectors.py <oracle.json> <out.mbt> [header]
 ///
 /// Every inbound payload and every expected request below comes from
 /// `host/sftp_fault_oracle.py`, which is an independent implementation
@@ -22,11 +22,12 @@ HEADER = '''///| GENERATED FILE -- do not edit by hand.
 /// own run of each scenario agrees with the hand-written expectation, so a
 /// scenario cannot silently become "whatever the implementation does".
 ///
-/// These are the replies a *well-behaved* server never sends.  The Loop #39
-/// KAT and the live sshd round trip both prove the happy path against real
-/// bytes; nothing in either of them can reach "STATUS before VERSION" or
-/// "a length prefix over the maximum", because OpenSSH does not emit them.
-/// That is the whole reason this console exists.
+/// Two copies of this table are generated from that one JSON:
+/// `cmd/proton_gui/fault_vectors.mbt` (fed straight to `SftpSession`) and
+/// `cmd/sftp_fault/vectors.mbt` (re-sliced through the channel layer).  They
+/// must stay identical -- same scenarios, same expectations -- so that a
+/// difference in what the two layers report is a transport bug and not two
+/// different test sets.
 
 pub(all) struct Op {
   /// 0 realpath, 1 stat, 4 writefile, 9 rename
@@ -49,6 +50,10 @@ pub(all) struct FaultCase {
   expect_done : Bool
   expect_failed : Bool
   expect_reason : String
+  ///| CHANNEL_DATA cut points the channel-layer driver must reproduce this
+  ///| case at. Re-slicing the inbound stream must not change the answer --
+  ///| that is the invariant `src/sftp/stream.mbt` exists to hold.
+  chop_sizes : Array[Int]
 }
 
 pub let fault_cases : Array[FaultCase] = [
@@ -133,6 +138,10 @@ def main():
         )
         out.append(
             "    expect_reason: " + mbt_str(c["failure_reason"]) + ",\n"
+        )
+        chop = c.get("chop_sizes") or []
+        out.append(
+            "    chop_sizes: [" + ", ".join(str(n) for n in chop) + "],\n"
         )
         out.append("  },\n")
     out.append(FOOTER)

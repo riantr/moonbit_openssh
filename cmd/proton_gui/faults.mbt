@@ -373,6 +373,9 @@ pub fn run_named(name : String) -> (Bool, Array[String], Run, FaultCase) {
           expect_done: false,
           expect_failed: false,
           expect_reason: "",
+          // Present for parity with the generated table; the console has no
+          // cut points of its own, it feeds whole payloads.
+          chop_sizes: [],
         },
       )
     }

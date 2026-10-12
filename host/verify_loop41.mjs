@@ -1,22 +1,36 @@
-// host/verify_loop41.mjs -- Loop #41-M2: the fault-injection console, end to end.
+// host/verify_loop41.mjs -- Loop #41-M2 + #43: the fault-injection console,
+// end to end, and the same vectors through the channel layer.
 //
 // What this proves, in order:
 //
 //   1. the oracle is still self-consistent (its own run agrees with the
-//      hand-written expectation for every scenario);
+//      hand-written expectation for every scenario, and re-slicing the
+//      inbound stream at four different CHANNEL_DATA cut points reproduces
+//      the whole-payload answer exactly);
 //   2. `cmd/proton_gui` builds and the CEF runtime stages beside the exe;
-//   3. the three commands are actually *reachable over the bridge* -- this
+//   3. the two generated vector tables -- `cmd/proton_gui` and
+//      `cmd/sftp_fault` -- carry the same scenarios and the same
+//      expectations. They must, or a difference between the two layers'
+//      reports is a transport bug rather than two different test sets;
+//   4. `cmd/sftp_fault` passes on all four backends with the same verdict,
+//      which is where the framing invariant is checked on every backend
+//      rather than just the host one;
+//   5. the three commands are actually *reachable over the bridge* -- this
 //      is the part a headless smoke test cannot see. The app opens a real
 //      window with a real CDP endpoint, we attach to the renderer, and we
-//      evaluate `window.__MoonBit__.app.sftp_fault_all()` in the page. If the
-//      grant never reached the renderer, or the route name were wrong, or the
-//      payload types did not line up, this is where it shows;
-//   4. every scenario's transcript agrees with `host/sftp_fault_oracle.py`,
+//      evaluate `window.__MoonBit__.app.sftp_fault_all({})` in the page. If
+//      the grant never reached the renderer, or the route name were wrong, or
+//      the payload types did not line up, this is where it shows;
+//   6. every scenario's transcript agrees with `host/sftp_fault_oracle.py`,
 //      byte for byte.
 //
-// Point 3 is why this talks CDP instead of calling the MoonBit functions
+// Point 5 is why this talks CDP instead of calling the MoonBit functions
 // directly: calling `fault_all()` in MoonBit would prove the scenarios and
 // prove nothing about the bridge.
+//
+// The payload for a fieldless request is `{}`, not `null` -- see the comment
+// at the call site below, which is the same trap `cmd/proton_gui`'s page
+// fell into.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -85,11 +99,10 @@ function renderResult(r) {
 // scenario name. Deliberately a regex over the file rather than a re-run of
 // the generator: if the generator and this parser were both wrong in the same
 // way, re-running it would agree with itself.
-function readRenderedResultsFromMbt() {
-  const src = readFileSync(
-    path.join(root, "cmd", "proton_gui", "fault_vectors.mbt"),
-    "utf-8",
-  );
+function readRenderedResultsFromMbt(
+  file = path.join(root, "cmd", "proton_gui", "fault_vectors.mbt"),
+) {
+  const src = readFileSync(file, "utf-8");
   const out = new Map();
   const caseRe = /name:\s*"([^"]+)"[\s\S]*?results:\s*\[([^\]]*)\]/g;
   let m;
@@ -235,7 +248,16 @@ const runBuild = () =>
       maxBuffer: 64 * 1024 * 1024,
     });
     if (b.status !== 0) {
-      bad("moon build", (b.stdout + b.stderr).trim().split("\n").slice(-12).join("\n      "));
+      // Warnings are long and errors are short, so the tail of the output is
+      // usually all warning -- which is how a real `Record fields chop_sizes
+      // are undefined` was reported as "3 warnings, 1 errors" with the
+      // warning text as the only detail. Lead with the error lines.
+      const all = (b.stdout + b.stderr).trim().split("\n");
+      const errLines = all.filter((l) => /Error|Record|expected|undefined/.test(l));
+      bad(
+        "moon build",
+        (errLines.length ? errLines : all.slice(-12)).slice(0, 10).join("\n      "),
+      );
       return;
     }
     const st = spawnSync("node", [path.join(root, "host", "proton_stage.mjs")], {
@@ -252,6 +274,62 @@ const runBuild = () =>
       return;
     }
     ok("build + stage", st.stdout.trim());
+  });
+
+// The channel layer sits *below* the state machine the console drives, and
+// the two vector tables have to stay identical or a difference in what they
+// report is a transport bug rather than two different test sets.
+const runVectorsIdentical = () =>
+  step("both vector tables agree", () => {
+    const a = readRenderedResultsFromMbt(path.join(root, "cmd", "proton_gui", "fault_vectors.mbt"));
+    const b = readRenderedResultsFromMbt(path.join(root, "cmd", "sftp_fault", "vectors.mbt"));
+    if (a.size === 0 || b.size === 0) {
+      bad("vector tables", `proton_gui=${a.size} sftp_fault=${b.size}`);
+      return;
+    }
+    if (a.size !== b.size) {
+      bad("vector tables", `${a.size} vs ${b.size} scenarios`);
+      return;
+    }
+    for (const [name, results] of a) {
+      if (!b.has(name)) {
+        bad("vector tables", `${name} missing from cmd/sftp_fault`);
+        return;
+      }
+      if (JSON.stringify(results) !== JSON.stringify(b.get(name))) {
+        bad("vector tables", `${name}: results differ between the two tables`);
+        return;
+      }
+    }
+    ok("vector tables identical", `${a.size} scenarios`);
+  });
+
+// Four backends, and the framing invariant has to hold on all of them: a
+// backend whose `SftpInbuf` reassembles differently would show up here as a
+// cut point that changes the answer on that target only.
+const runBackends = () =>
+  step("four backends", () => {
+    const seen = [];
+    for (const target of ["native", "js", "wasm", "wasm-gc"]) {
+      const r = spawnSync("cmd", ["/c", "moon", "run", "cmd\\sftp_fault", "--target", target], {
+        cwd: root,
+        encoding: "utf-8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      const out = `${r.stdout || ""}${r.stderr || ""}`;
+      const line = (out.match(/^(ALL PASS.*|.*FAILURES.*)$/m) || [])[1] || "(no verdict)";
+      if (!/^ALL PASS/.test(line)) {
+        bad(`sftp_fault ${target}`, line + "\n      " + out.trim().split("\n").slice(-6).join("\n      "));
+        continue;
+      }
+      seen.push(line);
+      ok(`sftp_fault ${target}`, line);
+    }
+    if (seen.length > 1 && seen.some((l) => l !== seen[0])) {
+      bad("backend verdicts differ", [...new Set(seen)].join(" | "));
+    } else if (seen.length === 4) {
+      ok("all four backends report the same verdict");
+    }
   });
 
 // The live one: a real window, a real bridge, a real round trip.
@@ -544,7 +622,13 @@ function cleanup() {
 
 // ---------------------------------------------------------------------------
 
-const steps = [runOracle(), runBuild(), runBridge()];
+const steps = [
+  runOracle(),
+  runBuild(),
+  runVectorsIdentical(),
+  runBackends(),
+  runBridge(),
+];
 try {
   for (const s of steps) {
     await s();

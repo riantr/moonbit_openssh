@@ -677,8 +677,26 @@ SCENARIOS = [
 ]
 
 
-def run(scn):
-    """Drive the reference session and return what it produced."""
+def chop(data, size):
+    """Split one payload into `size`-byte pieces.
+
+    0 means "leave it alone".  Everything here is about CHANNEL_DATA
+    boundaries, which have nothing to do with SFTP packet boundaries -- the
+    whole reason `SftpInbuf` exists.
+    """
+    if size <= 0:
+        return [data]
+    return [data[i : i + size] for i in range(0, len(data), size)]
+
+
+def run(scn, chop_size=0):
+    """Drive the reference session and return what it produced.
+
+    `chop_size` re-slices every inbound payload into pieces of that many
+    bytes before feeding them, one CHANNEL_DATA at a time. It exists to prove
+    the framing claim rather than to produce a second answer: a byte stream
+    layered on a byte stream must give the same result at every boundary.
+    """
     sess = RefSession(scn["ops"])
     sent = []
     ci = 0
@@ -688,7 +706,10 @@ def run(scn):
             break
         if ci >= len(scn["feeds"]):
             break
-        sess.feed(scn["feeds"][ci])
+        for piece in chop(scn["feeds"][ci], chop_size):
+            sess.feed(piece)
+            if sess.phase in ("done", "failed"):
+                break
         ci += 1
     sent.extend(sess.take_out())
     return {
@@ -698,6 +719,15 @@ def run(scn):
         "failed": sess.phase == "failed",
         "failure_reason": sess.failed,
     }
+
+
+# Chop sizes every scenario is re-run at. 1 is the hostile extreme -- a length
+# prefix split three-and-one across a CHANNEL_DATA boundary is the bug this
+# package exists to prevent, and it only shows up if something is fed one byte
+# at a time. 3 and 7 land inside fields (a u32, a length-prefixed string's
+# header) and 64 straddles nothing small, so between them the four cut points
+# cover "inside every kind of field" and "between fields".
+CHOP_SIZES = [1, 3, 7, 64]
 
 
 def main():
@@ -722,6 +752,10 @@ def main():
             "done": scn["done"],
             "failed": scn["failed"],
             "failure_reason": scn.get("failure_reason", ""),
+            # The cut points the MoonBit side must agree at. 0 is omitted: it
+            # is the whole-payload case already carried by `feeds`, and the
+            # invariant is that every other size reproduces it.
+            "chop_sizes": CHOP_SIZES,
         }
         # self-check: the oracle must agree with the hand-written expectation
         if got["requests"] != want_requests:
@@ -745,6 +779,22 @@ def main():
                 f"{scn['name']}: oracle reason={got['failure_reason']!r} "
                 f"expected {scn['failure_reason']!r}"
             )
+
+        # The invariant this whole loop exists for: CHANNEL_DATA boundaries
+        # have nothing to do with SFTP packet boundaries, so re-slicing every
+        # inbound payload must reproduce the answer exactly -- requests, the
+        # results, and which of done/failed/reason the session ended on. A
+        # disagreement here is the framing bug `SftpInbuf` was written to
+        # prevent, and it is invisible at size 0 because a whole payload that
+        # happens to be packet-aligned looks perfect.
+        for size in CHOP_SIZES:
+            re_sliced = run(scn, size)
+            if re_sliced != got:
+                problems.append(
+                    f"{scn['name']}: chop={size} changed the answer\n"
+                    f"      whole  {got}\n"
+                    f"      chopped {re_sliced}"
+                )
         out.append(entry)
 
     if problems:

@@ -1,0 +1,48 @@
+///| cmd/sftp_fault -- Loop #43: the fault vectors through the channel layer
+///|
+///| Loop #41-M2 proved `src/sftp`'s state machine holds ten branches a
+///| well-behaved server never reaches. It fed the malformed bytes straight
+///| into `SftpSession::feed`. That is one layer.
+///
+///| What is still unproven is the layer *below* it. `src/sshclient/sftp.mbt`
+///| and `src/wtlive/sftp.mbt` are two near-identical files -- deliberately,
+///| because they hold no protocol -- but they are still two files, and the one
+///| thing that would catch a quiet divergence between them is driving both
+///| over the same input. Between the socket and the state machine sit:
+///|
+///|   - `ChanState::stdin_take`, which clamps each outbound SFTP packet to
+///|     `min(remote_window, remote_max_packet)` (RFC 4254 §5.2). A request
+///|     can be cut in half here and nothing above notices, because
+///|     `SftpInbuf` reassembles it.
+///|   - `chan_step`, which turns inbound CHANNEL_DATA into `sess.feed(d)` --
+///|     and the CHANNEL_DATA boundary is *not* an SFTP packet boundary.
+///|   - the window, which is finite: a session that emits more than the
+///|     peer's advertised window stalls until a WINDOW_ADJUST arrives, and a
+///:     driver that forgets to wait deadlocks instead of failing.
+///|
+///| None of that is reachable by feeding bytes to `SftpSession` directly. So
+///| this package is a fake peer: it answers CHANNEL_OPEN_CONFIRMATION and
+///| CHANNEL_SUCCESS, then delivers each vector's payload as CHANNEL_DATA
+///| **re-sliced at several cut points**, and it reads our requests back out
+///| of the CHANNEL_DATA the client framed them into -- reassembling them the
+///| way a server would, so the assertion is about the SFTP packet stream and
+///| not about channel framing.
+///|
+///| The invariant under test is the one `src/sftp/stream.mbt` exists to hold:
+///|
+///|     the CHANNEL_DATA cut point must not change the answer
+///|
+///| A driver that concatenated CHANNEL_DATA into one buffer, or fed a packet
+///| straight to `feed` without going through `chan_step`, would pass the
+///| un-sliced case and fail the one-byte case. That is the bug this finds.
+///|
+///| Depends on `src/sftp` and `src/channel` only -- both pure byte state
+///| machines with no socket -- so this runs on all four backends in both
+///| modes, the same reason `cmd/sftp_test` does.
+
+import {
+  "openssh/openssh_moonbit/src/channel",
+  "openssh/openssh_moonbit/src/sftp",
+}
+
+pkgtype(kind: "executable")

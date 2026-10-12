@@ -1265,6 +1265,74 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #43: the same fault vectors through the channel layer
+
+Loop #41-M2 fed malformed bytes straight into `SftpSession::feed`. That proves
+the state machine. It says nothing about the layer below it, and the layer
+below is where the risk actually lives:
+
+- `ChanState::stdin_take` clamps each outbound packet to
+  `min(remote_window, remote_max_packet)` (RFC 4254 §5.2), so a request is
+  routinely split across several CHANNEL_DATA.
+- the CHANNEL_DATA boundary is **not** an SFTP packet boundary -- that is the
+  entire reason `src/sftp/stream.mbt` exists.
+- `src/sshclient/sftp.mbt` and `src/wtlive/sftp.mbt` are two near-identical
+  files. Deliberately (they hold no protocol), but still two files.
+
+**`cmd/sftp_fault` is a fake peer.** It answers CHANNEL_OPEN_CONFIRMATION and
+CHANNEL_SUCCESS, delivers each vector's payload as CHANNEL_DATA **re-sliced at
+four cut points** (1, 3, 7, 64 bytes), and reads our requests back out of the
+CHANNEL_DATA the client framed them into -- reassembled through `SftpInbuf` and
+re-framed with `sftp_frame`, because `drain` hands back bodies while the
+vectors record whole frames.
+
+**The invariant under test is the one `stream.mbt` exists to hold:**
+
+> the CHANNEL_DATA cut point must not change the answer
+
+Each chopped run is asserted against the whole-payload answer *and* the
+expectation, not just the expectation -- comparing a chopped run to the
+chopped expectation would let a shared error pass twice. The oracle
+(`host/sftp_fault_oracle.py`) proves the same invariant independently before
+it will emit the vectors at all.
+
+**Verified:** `ALL PASS (50/50 runs, 10 scenarios x 5 cut points)` on all four
+backends with the same verdict, and byte-identical between js debug and
+release. 5 mutations all caught (`host/sftp_fault_mutations.py`).
+
+**Two driver bugs this found, both of which pass the un-sliced case:**
+
+1. **Never feeding the session.** `chan_step` advances the *channel*; handing
+   the payload to the state machine is the driver's job (`pump_once` does it
+   right after the step). A driver that only steps the channel leaves the
+   session waiting for a reply that arrived. Symptom: every scenario hangs at
+   VERSION with exactly one request emitted -- INIT.
+2. **Comparing bodies to frames.** `SftpInbuf::drain` consumes the length
+   prefix and never returns it, so the peer reported `0100000003` where the
+   expectation said `000000050100000003`. The fix is to re-frame with
+   `sftp_frame`, which is the one function that owns framing.
+
+Both are now mutation cases, so they cannot come back quietly.
+
+**One mutation was deliberately dropped rather than left failing.** "Consume
+the bytes of a refused packet anyway" changes `take()` on a path that returns
+`None` immediately afterwards (`self.failed` latches), so nothing this gate
+observes can move -- dropping four bytes no one reads is not a difference. It
+is not a hole in the gate: `cmd/sftp_test` already asserts it, as
+`length_over_max_refused` with `expect_pending: 13`. Listing it here would
+have produced a MISSED that said nothing about `cmd/sftp_fault`.
+
+**The mutation script distinguishes four verdicts,** because conflating them
+is how a mutation list quietly stops meaning anything: `NOBUILD` (the mutated
+source did not compile -- nothing was proven either way, and calling it
+MISSED would point at the gate), `CRASH` (it compiled and blew up -- caught,
+because a gate that cannot survive the mutation still noticed it), `CAUGHT`
+(a named check went FAIL), and `MISSED` (it ran and everything still passed).
+The first draft had only two, and the "forget `want` after a short feed"
+mutation arrived as `PanicError` -- which under a two-valued scheme is
+indistinguishable from "no output at all", and would have been reported as a
+gate hole.
+
 ### Loop #42: three harness defects behind one impossible verdict
 
 `verify_loop40`'s regression reported `FAIL loop39 still passes` with the
