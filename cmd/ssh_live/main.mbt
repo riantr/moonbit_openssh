@@ -41,6 +41,12 @@ fn live_error_name(e : @sshclient.LiveError) -> String {
     EcdhReplyMalformed => "EcdhReplyMalformed"
     HostkeyInvalid => "HostkeyInvalid"
     SignatureInvalid(h) => "SignatureInvalid"
+    // Loop #48: pinning failures get their own labels because "we refused"
+    // and "we refused *because the key is not the one we pinned*" call for
+    // different responses, and collapsing them would make the second one
+    // indistinguishable from a network fault.
+    HostkeyMismatch(h) => "HostkeyMismatch"
+    HostkeyUnknown(h) => "HostkeyUnknown"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
     BadPacket => "BadPacket"
@@ -195,6 +201,95 @@ fn find_user(argv : Array[String]) -> String {
 }
 
 ///|
+/// Loop #48: 主机密钥固定策略。
+///
+/// `--known-hosts-text <text>` 给的是 known_hosts 的**内容**,不是路径,而这是
+/// 被迫的、也是对的:本项目的 moon 版本 core 里没有读文件的 API(`@env` 只有
+/// argv / env / time),而 `src/wt` 更是 js-only、浏览器里根本没有文件系统。
+/// 一个只在原生下可用的「读 known_hosts 文件」会把两条传输层驱动拆成两种行为,
+/// 那正是这个仓库反复在付代价的漂移。文本两边都能带,判定也只有一个实现。
+///
+/// 附带的效果是:调用方必须自己已经拿着这份文本,这恰好是浏览器应用的真实处境。
+///
+/// `--kh-host <name>` 指明比哪个主机名,`--kh-port` 指明端口(默认沿用连接端口),
+/// `--kh-strict` 让「这个主机压根没被固定过」也算失败。
+///
+/// **不带 `--known-hosts-text` 时是 skip,不是拒绝。** 这是本项目当前的策略,写
+/// 在这里是因为它不安全:跳过固定意味着第一次连接、以及对端换过密钥之后的连接,
+/// 都仍然可被中间人接管。OpenSSH 的默认是「比」,不是「跳」。
+///
+/// 没有把默认直接改成拒绝,是因为那会一次性改掉所有现有门禁的语义;「提供
+/// 固定能力」和「默认拒绝」是两件事,混在一次改动里做,失败时无法判断是哪一半
+/// 出了问题。
+fn argv_value(argv : Array[String], name : String) -> String {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == name && i + 1 < argv.length() {
+      return argv[i + 1]
+    }
+    i = i + 1
+  }
+  ""
+}
+
+fn has_switch(argv : Array[String], name : String) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == name {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+/// 端口只接受十进制数字,其它一律回落到 0。0 的含义是「端口从 `kh_host` 的
+/// `[host]:port` 形式里读」——这是和 `cmd/wt_ssh` 的 `kh_port` 缺省值一样的
+/// 语义,两条驱动必须一致,否则同一份 known_hosts 在两边会落到不同条目上。
+/// 端口写错尤其难查:22 是最常见的那个,一个拼错的端口常常让比对**看起来通过**
+/// 或**看起来是 Unknown**,两种都更像「配置没问题」。
+fn parse_port_arg(s : String, fallback : Int) -> Int {
+  if s.length() == 0 {
+    return fallback
+  }
+  let mut acc = 0
+  let mut i = 0
+  while i < s.length() {
+    let d = s[i].to_int() - 48
+    if d < 0 || d > 9 {
+      return 0
+    }
+    acc = acc * 10 + d
+    i = i + 1
+  }
+  acc
+}
+
+fn kh_policy(argv : Array[String], port : Int) -> @knownhosts.KnownHostsPolicy {
+  let text = argv_value(argv, "--known-hosts-text")
+  if text == "" {
+    return @knownhosts.KnownHostsPolicy::skip()
+  }
+  let p = @knownhosts.KnownHostsPolicy::from_text(
+    text,
+    argv_value(argv, "--kh-host"),
+    parse_port_arg(argv_value(argv, "--kh-port"), 0),
+    has_switch(argv, "--kh-strict"),
+  )
+  // 「给了文本但一条都没解析出来」必须报错,不能安静地变成 skip。
+  // `verify` 看到空条目就返回 Skip,而调用方「要求固定」和「忘了固定」在那一层
+  // 完全一样——一个看起来跑过的检查比没跑过的检查更危险。
+  if p.entries.length() == 0 {
+    println(
+      "known_hosts: --known-hosts-text 解析出 0 条 -- 拒绝继续,而不是悄悄" +
+      "跳过固定",
+    )
+    abort("known_hosts parsed to nothing")
+  }
+  p
+}
+
+///|
 /// `--exec <cmd>` 之后的整段命令行就是远端命令(带空格也不拆)。
 ///
 /// 同样不能假设 argv[1] 是用户参数:native 的 argv[0] 是 exe 路径,js 的
@@ -261,6 +356,7 @@ fn run_exec(
         command,
         stdin_data,
         envs,
+        kh_policy(@env.args(), port),
       )
       conn.close()
       match outcome {
@@ -614,6 +710,7 @@ fn run_shell(
         cols,
         rows,
         resize,
+        kh_policy(@env.args(), port),
       )
       conn.close()
       match outcome {
@@ -875,6 +972,7 @@ fn sftp_mode(argv : Array[String], port : Int) -> Bool {
         test_auth_key(),
         subsystem,
         ops,
+        kh_policy(@env.args(), port),
       )
       conn.close()
       print_sftp_outcome(outcome)
@@ -1029,6 +1127,7 @@ fn main {
           fixed_x(),
           user,
           test_auth_key(),
+          kh_policy(@env.args(), port),
         )
         conn.close()
         match outcome {
@@ -1093,7 +1192,8 @@ fn main {
         return
       }
       Some(conn) => {
-        let outcome = @sshclient.live_session(conn, fixed_x())
+        let outcome =
+          @sshclient.live_session(conn, fixed_x(), kh_policy(@env.args(), port))
         conn.close()
         match outcome {
           @sshclient.ServiceAccepted(r) => {
@@ -1137,7 +1237,8 @@ fn main {
       return
     }
     Some(conn) => {
-      let outcome = @sshclient.live_handshake(conn, fixed_x())
+      let outcome =
+        @sshclient.live_handshake(conn, fixed_x(), kh_policy(@env.args(), port))
       conn.close()
       match outcome {
         @sshclient.Established(r) => {

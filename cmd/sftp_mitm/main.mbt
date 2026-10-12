@@ -210,6 +210,10 @@ fn run_one(port : Int, c : FaultCase) -> Unit {
     "probe",
     test_auth_key(),
     ops_of(c),
+    // Loop #48: 固定是可选的,这里不传 known_hosts。这个门禁测的是 SFTP 层对
+    // 畸形应答的反应,不是主机密钥固定;把策略换成 strict 会让十个场景全在握手
+    // 阶段就失败,而那与被测的东西无关。
+    @knownhosts.KnownHostsPolicy::skip(),
   )
   match outcome {
     Done(r) => {

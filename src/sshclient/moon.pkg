@@ -12,6 +12,7 @@ import {
   "openssh/openssh_moonbit/src/kexc25519",
   "openssh/openssh_moonbit/src/ecdsa",
   "openssh/openssh_moonbit/src/hostkey",
+  "openssh/openssh_moonbit/src/knownhosts",
   "openssh/openssh_moonbit/src/userauth",
   "openssh/openssh_moonbit/src/channel",
   "openssh/openssh_moonbit/src/sftp",

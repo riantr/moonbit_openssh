@@ -52,6 +52,15 @@ pub(all) enum WtLiveError {
   /// The computed hash is carried out so a second implementation can diff it
   /// instead of the failure being merely negative.
   SignatureInvalid(FixedArray[Byte])
+  /// Loop #48: the host key verified (the peer owns it) but is not the one we
+  /// pinned for this host -- the half a signature check cannot do, and the half
+  /// that catches a *consistent* man in the middle. OpenSSH reports
+  /// HOST_CHANGED and exits.
+  HostkeyMismatch(String)
+  /// Loop #48: this host was never pinned, and the policy is strict. With a
+  /// non-strict policy this is TOFU and is allowed through; carrying it apart
+  /// is what lets a caller tell "checked and consistent" from "never checked".
+  HostkeyUnknown(String)
   NewkeysSendFailed
   NoNewkeys
   /// 一整段字节读回来了,但它不是一个合法的包。
@@ -307,6 +316,7 @@ async fn wt_handshake_into(
   conn : @wt.WtConn,
   x : @bigint.BigNat,
   box : WtSessionBox,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtLiveResult {
   let counters = { sent: 0, recv: 0, }
   let s = @bpacket.SendCtx::new()
@@ -471,6 +481,24 @@ async fn wt_handshake_into(
     @hostkey.Accepted => ()
     _ => return Failed(SignatureInvalid(h))
   }
+  // ---- 7b. host key pinning ----
+  // 上面证明的是「对端拥有它出示的那把钥匙」,不是「那是我期待的那把钥匙」。
+  // 一个自洽的中间人(自己的密钥、自己签的 KEXDH_REPLY)完全过得去上一步,
+  // 而那正是签名校验挡不住的一半。判定住 `src/knownhosts`,和 `src/sshclient`
+  // 用的是同一份——这条规则在两条传输层驱动里各抄一份的话,迟早只有一边改。
+  //
+  // `Unknown` 在非 strict 下放行是 TOFU,策略上的选择,不是疏忽:第一次连接
+  // 仍然 susceptible,真正防重放要写回 known_hosts(见 AGENTS.md Loop #48)。
+  match kh.verify(ks) {
+    @knownhosts.Skip => ()
+    @knownhosts.Accept => ()
+    @knownhosts.Unknown =>
+      if kh.strict {
+        return Failed(HostkeyUnknown(kh.host_str))
+      }
+    @knownhosts.Mismatch => return Failed(HostkeyMismatch(kh.host_str))
+    @knownhosts.InvalidEntry => return Failed(HostkeyInvalid)
+  }
   // ---- 8. NEWKEYS ----
   if !wt_send_plain_packet(
       conn,
@@ -571,9 +599,10 @@ fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
 pub async fn wt_live_handshake(
   conn : @wt.WtConn,
   x : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtLiveResult {
   let box = { state: None, }
-  wt_handshake_into(conn, x, box)
+  wt_handshake_into(conn, x, box, kh)
 }
 
 ///|
@@ -586,9 +615,10 @@ pub async fn wt_live_handshake(
 pub async fn wt_live_session(
   conn : @wt.WtConn,
   x : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtSessionResult {
   let box = { state: None, }
-  let res = wt_handshake_into(conn, x, box)
+  let res = wt_handshake_into(conn, x, box, kh)
   let handshake = match res {
     Established(rep) => rep
     Failed(e) => return Failed(WtSessionError::HandshakeFailed(e))
@@ -714,9 +744,10 @@ pub async fn wt_live_auth(
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtAuthResult {
   let box = { state: None, }
-  let res = wt_handshake_into(conn, x, box)
+  let res = wt_handshake_into(conn, x, box, kh)
   let handshake = match res {
     Established(rep) => rep
     Failed(e) => return Failed(WtAuthError::HandshakeFailed(e))
@@ -872,6 +903,7 @@ pub async fn wt_live_exec(
   user : String,
   d : @bigint.BigNat,
   command : String,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtExecOutcome {
   wt_live_exec_io(
     conn,
@@ -881,6 +913,7 @@ pub async fn wt_live_exec(
     command,
     FixedArray::make(0, b'\x00'),
     [],
+    kh,
   )
 }
 
@@ -900,9 +933,10 @@ async fn wt_auth_into(
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> Result[WtSessionState, WtAuthError] {
   let box = { state: None, }
-  let res = wt_handshake_into(conn, x, box)
+  let res = wt_handshake_into(conn, x, box, kh)
   match res {
     Established(_) => ()
     Failed(e) => return Err(WtAuthError::HandshakeFailed(e))
@@ -980,8 +1014,9 @@ pub async fn wt_live_exec_io(
   command : String,
   stdin_data : FixedArray[Byte],
   envs : Array[@sshclient.EnvVar],
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtExecOutcome {
-  let st = match wt_auth_into(conn, x, user, d) {
+  let st = match wt_auth_into(conn, x, user, d, kh) {
     Err(e) => return WtExecOutcome::AuthFailed(e)
     Ok(v) => v
   }
@@ -1214,9 +1249,10 @@ pub async fn wt_live_shell(
   cols : Int,
   rows : Int,
   resize_to : (Int, Int)?,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtShellOutcome {
   let box = { state: None, }
-  let res = wt_handshake_into(conn, x, box)
+  let res = wt_handshake_into(conn, x, box, kh)
   match res {
     Established(_) => ()
     Failed(e) => return WtShellOutcome::AuthFailed(WtAuthError::HandshakeFailed(e))

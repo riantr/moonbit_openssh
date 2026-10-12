@@ -80,6 +80,38 @@ fn wt_hex_nibble(c : UInt16) -> Int {
 }
 
 ///|
+/// Loop #48: 主机密钥固定策略。配置键 `known_hosts` 给的是 known_hosts 的
+/// **文本**(不是路径):浏览器里没有文件系统,而 `src/wt` 是 js-only,所以两条
+/// 传输层驱动都只接受文本,判定也只有一个实现(`src/knownhosts`)。
+/// `kh_host` / `kh_port` / `kh_strict` 与 `cmd/ssh_live` 的同名开关一一对应。
+///
+/// 不给 `known_hosts` 时是 skip 而不是拒绝——这是本项目当前的策略,不安全,
+/// 理由见 AGENTS.md Loop #48。
+fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
+  let text = cfg("known_hosts")
+  if text == "" {
+    return @knownhosts.KnownHostsPolicy::skip()
+  }
+  let p = @knownhosts.KnownHostsPolicy::from_text(
+    text,
+    cfg("kh_host"),
+    // 0 = 「端口从 kh_host 的 `[host]:port` 形式里读」,和 `cmd/ssh_live`
+    // 的 `--kh-port` 缺省值一致。两条驱动的默认值必须相同,否则同一份
+    // known_hosts 在两边会落到不同的条目上——而那种差异只有在连接失败时
+    // 才显形。
+    cfg_int("kh_port", 0),
+    cfg("kh_strict") == "1" || cfg("kh_strict") == "true",
+  )
+  // 「给了文本却一条都没解析出来」必须报错,不能安静退化成 skip——见
+  // `cmd/ssh_live` 里同一处的注释。
+  if p.entries.length() == 0 {
+    println("known_hosts: parsed 0 entries -- refusing instead of silently skipping")
+    abort("known_hosts parsed to nothing")
+  }
+  p
+}
+
+///|
 fn fixed_x() -> @bigint.BigNat {
   let bytes : FixedArray[Byte] = FixedArray::from_array([
     0x5A, 0x17, 0xC3, 0x9E, 0x44, 0xB2, 0x6D, 0xF1, 0x08, 0xA7, 0x35, 0xCC, 0x91,
@@ -103,6 +135,11 @@ fn error_name(e : @wtlive.WtLiveError) -> String {
     EcdhReplyMalformed => "EcdhReplyMalformed"
     HostkeyInvalid => "HostkeyInvalid"
     SignatureInvalid(_) => "SignatureInvalid"
+    // Loop #48: same two labels as `cmd/ssh_live`'s `live_error_name`, and the
+    // same reason -- 「我们拒绝了」和「我们因为钥匙不是钉住的那把而拒绝」
+    // 需要不同的处置，塌成一个标签就分不出来了。
+    HostkeyMismatch(_) => "HostkeyMismatch"
+    HostkeyUnknown(_) => "HostkeyUnknown"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
     BadPacket(w) => "BadPacket:" + w
@@ -419,6 +456,7 @@ async fn wt_sftp_fault_run(url : String) -> Unit {
     uname,
     test_auth_key(),
     ops,
+    cfg_kh_policy(),
   )
   match outcome {
     @wtlive.WtSftpOutcome::Done(r) => {
@@ -507,6 +545,7 @@ async fn wt_sftp_run(url : String) -> Unit {
     uname,
     test_auth_key(),
     ops,
+    cfg_kh_policy(),
   )
   match outcome {
     @wtlive.WtSftpOutcome::Done(r) => {
@@ -668,6 +707,7 @@ async fn main {
       cols,
       rows,
       resize,
+      cfg_kh_policy(),
     )
     match soutcome {
       @wtlive.Done(r) => {
@@ -739,6 +779,7 @@ async fn main {
       exec_cmd,
       stdin_data,
       envs,
+      cfg_kh_policy(),
     )
     match outcome {
       @wtlive.Done(r) => {
@@ -788,7 +829,14 @@ async fn main {
       }
     }
     println("transport: connected")
-    match @wtlive.wt_live_auth(aconn, fixed_x(), uname, test_auth_key()) {
+    match
+      @wtlive.wt_live_auth(
+        aconn,
+        fixed_x(),
+        uname,
+        test_auth_key(),
+        cfg_kh_policy(),
+      ) {
       @wtlive.Authenticated(r) => {
         println("result: USERAUTH_SUCCESS")
         println("user: " + r.user)
@@ -836,7 +884,7 @@ async fn main {
       }
     }
     println("transport: connected")
-    match @wtlive.wt_live_session(sconn, fixed_x()) {
+    match @wtlive.wt_live_session(sconn, fixed_x(), cfg_kh_policy()) {
       @wtlive.ServiceAccepted(r) => {
         println("result: SERVICE_ACCEPTED")
         println("service: " + r.service_name)
@@ -871,7 +919,7 @@ async fn main {
     }
   }
   println("transport: connected")
-  match @wtlive.wt_live_handshake(conn, fixed_x()) {
+  match @wtlive.wt_live_handshake(conn, fixed_x(), cfg_kh_policy()) {
     @wtlive.Established(r) => {
       println("result: ESTABLISHED")
       println("server_ident: " + r.server_ident)

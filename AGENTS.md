@@ -1265,6 +1265,90 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #48: host key pinning, in the live client
+
+Loop #47 proved the client refuses a peer's key exchange when the exchange does
+not hold up. Both of its forgeries are **inconsistent**: the blob does not
+prove the signature. What they cannot reach is the attack that matters in
+practice -- a man in the middle with its own key and its own perfectly valid
+signature. That exchange is entirely self-consistent, so every signature check
+passes. Only comparing the presented key against the expected one stops it.
+
+**And the live client was not doing that at all.** `src/kexflow` carries the
+rule (`check_host_key_strict`), and both live adapters implement their own
+handshake without going through kexflow -- so on the client that actually
+connects, host key pinning had never executed. The rule existed, was
+unit-tested, and was unreachable. Reading "the rule is written" as "the rule
+runs" is the specific mistake this loop closes.
+
+**The rule stayed in one place.** `KnownHostsPolicy` / `PinVerdict` live in
+`src/knownhosts`, next to `agrees_with_alg`'s reasoning and for the same reason:
+a rule copied into two transport adapters is a rule that eventually exists in
+one of them only. The adapters each translate the verdict into their own error
+variant and nothing else -- `HostkeyMismatch(String)` and `HostkeyUnknown(String)`
+in both, which Loop #44's anchors then hold together.
+
+**`Skip` and `Accept` are different verdicts on purpose.** "Checked and
+consistent" and "never checked" collapse to the same value in a Bool, and a log
+that says everything was verified would be lying. Keeping them apart is what
+lets a caller -- and a gate -- tell them apart.
+
+**Five cases per client, and the set is the point.** One man in the middle,
+presenting one self-consistent key, told different things about what to expect:
+
+| case | what the client is told | expected |
+|---|---|---|
+| match | pin the key actually sent | authenticate |
+| mismatch | pin a different key | refuse, send nothing |
+| unknown-strict | pin another host, strict | refuse, send nothing |
+| unknown-tofu | pin another host, non-strict | authenticate |
+| no-policy | nothing at all | authenticate |
+
+The last two look like failures and are not. They are here to pin down the
+policy actually in force -- **pinning is opt-in, and an unpinned host is
+accepted**. OpenSSH's default is the opposite. Writing that down as *passing*
+cases is what keeps the gap visible instead of quietly closed by somebody
+assuming it had been handled.
+
+**The matching case's known_hosts line is built from the transcript, not from a
+file in the repo.** The man in the middle reports the blob it presented
+(`hostkey_blob_b64`), so the line that should match is derived from what the
+peer actually sent. A pinned file would go stale the moment the key was
+regenerated, and the stale file reads as a mismatch -- which looks like a
+protocol bug and is a fixture problem.
+
+**known_hosts arrives as text, not as a path, and that was forced.** This moon
+version's core has no file-reading API (`@env` is argv / env / time), nothing in
+the repo reads files, and `src/wt` is js-only where a browser has no filesystem
+at all. A "read the known_hosts file" option that only works natively would
+split the two adapters into different behaviours -- the exact drift this repo
+keeps paying for. Text works in both, and it is what a browser application
+actually has. Both drivers call one `KnownHostsPolicy::from_text`.
+
+**A policy that parses to nothing is refused, not skipped.** `--known-hosts-text`
+with zero parsed entries would otherwise become a silent `Skip`, which is the
+worst possible outcome: a check that looks like it ran and did not.
+
+**Two mutations, both caught.** Reporting a mismatch as a match, and discarding
+the verdict in `src/sshclient`, both turn the gate red. Only the browser half of
+the second is left standing on purpose -- the point of a shared rule is that one
+adapter can be mutated without the other covering for it.
+
+**The mutation driver undoes itself, and that is not optional.** It snapshots
+every file it touches and restores from the snapshot. The first version was
+debugged by hand with `git checkout -- src/sshclient/live.mbt`, which -- because
+the loop's own uncommitted work sat in that same file -- silently undid the work
+too. The loss was invisible: the file still compiled. The same mistake then
+recurred on a second file, and for a while the driver reported the browser half
+failing under a mutation that only touches the native adapter. That result was
+impossible, and the cause was not a hidden dependency between the adapters but a
+tree that was not what it was believed to be. **A mutation is never undone with
+git unless it was committed first**, and when a result is impossible, suspect the
+tree before suspecting the code.
+
+**Verified:** `ALL PASS (15 checks)`. `verify_loop47` 19, `verify_loop46` 53,
+`verify_loop45` 51, `verify_loop41` 29, no regression.
+
 ### Loop #47: a peer that lies about its host key
 
 Every handshake test in this repo had talked to a peer that told the truth.

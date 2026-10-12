@@ -34,6 +34,7 @@ Prints one JSON object on stdout when the session ends.
 """
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -88,6 +89,20 @@ def signer_key():
     """The key that does not belong to the blob we present. See
     `LyingHostKey`."""
     return _read_or_make_ecdsa(SIGNER_KEY_PATH)
+
+
+def load_ecdsa(pem_path):
+    """Load a specific PEM as the key to present.
+
+    Loop #48 needs a peer whose key exchange is **self-consistent**: its own
+    key, signed correctly by itself. That is the one a signature check cannot
+    catch and the one host key pinning exists for, so it needs no lying wrapper
+    at all -- just a different key.
+    """
+    import paramiko as _p
+
+    with open(pem_path, encoding="ascii") as fh:
+        return _p.ECDSAKey.from_private_key(io.StringIO(fh.read()))
 
 
 class LyingHostKey:
@@ -201,7 +216,7 @@ def chop(data, size):
 
 
 def serve_one(sock, scenario, chop_size, result, lie_hostkey=False,
-              lie_hostkey_type=None):
+              lie_hostkey_type=None, host_key_pem=None):
     """Run one connection to completion.
 
     paramiko's own threading means `accept` returns a live `Transport`-able
@@ -222,10 +237,24 @@ def serve_one(sock, scenario, chop_size, result, lie_hostkey=False,
         result["mode"] = "lie-hostkey-type"
     elif lie_hostkey:
         result["mode"] = "lie-hostkey"
+    elif host_key_pem:
+        result["mode"] = "chosen-host-key"
     else:
         result["mode"] = "sftp" if scenario is not None else "control"
 
-    if lie_hostkey or lie_hostkey_type:
+    if host_key_pem:
+        # A perfectly self-consistent key exchange with a key the client may
+        # or may not have pinned. The transcript carries the fingerprint so
+        # the gate can check the *only* thing that matters here: that what the
+        # peer presented is not what the client was told to expect.
+        chosen = load_ecdsa(host_key_pem)
+        result["hostkey_presented_sha256"] = hashlib.sha256(
+            chosen.asbytes()
+        ).hexdigest()
+        result["hostkey_announced_type"] = chosen.get_name()
+        result["hostkey_blob_b64"] = base64.b64encode(chosen.asbytes()).decode()
+        t.add_server_key(chosen)
+    elif lie_hostkey or lie_hostkey_type:
         presented = host_key()
         signer = signer_key()
         # Both fingerprints go into the transcript, and the gate checks they
@@ -237,11 +266,18 @@ def serve_one(sock, scenario, chop_size, result, lie_hostkey=False,
         ).hexdigest()
         result["hostkey_signer_sha256"] = hashlib.sha256(signer.asbytes()).hexdigest()
         result["hostkey_announced_type"] = lie_hostkey_type or presented.get_name()
+        result["hostkey_blob_b64"] = base64.b64encode(presented.asbytes()).decode()
         t.add_server_key(
             LyingHostKey(presented, signer, name_override=lie_hostkey_type or None)
         )
     else:
-        t.add_server_key(host_key())
+        plain = host_key()
+        # The blob goes in the transcript so a pinning test can build the
+        # known_hosts line that *matches* from what the peer actually sent,
+        # rather than from a file that can go stale without anything failing.
+        result["hostkey_announced_type"] = plain.get_name()
+        result["hostkey_blob_b64"] = base64.b64encode(plain.asbytes()).decode()
+        t.add_server_key(plain)
     server = SftpMisbehavingServer(result)
     try:
         t.start_server(server=server, event=None)
@@ -404,6 +440,11 @@ def main():
         metavar="NAME",
         help="present a real host key blob under a different algorithm name",
     )
+    ap.add_argument(
+        "--host-key",
+        metavar="PEM",
+        help="present this specific key (signed correctly by itself)",
+    )
     args = ap.parse_args()
     lie_hostkey = args.lie_hostkey or bool(args.lie_hostkey_type)
 
@@ -439,7 +480,7 @@ def main():
             return
         holder["done"] = threading.Event()
         serve_one(conn, scenario, args.chop, result, lie_hostkey,
-                  args.lie_hostkey_type)
+                  args.lie_hostkey_type, args.host_key)
         holder["done"].set()
 
     worker = threading.Thread(target=accept_one, daemon=True)

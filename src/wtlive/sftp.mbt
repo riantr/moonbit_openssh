@@ -58,8 +58,9 @@ pub async fn wt_live_sftp(
   user : String,
   d : @bigint.BigNat,
   ops : Array[@sftp.SftpOp],
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> WtSftpOutcome {
-  let st = match wt_auth_into(conn, x, user, d) {
+  let st = match wt_auth_into(conn, x, user, d, kh) {
     Err(e) => return WtSftpOutcome::Failed(WtSftpError::AuthFailed(e))
     Ok(v) => v
   }

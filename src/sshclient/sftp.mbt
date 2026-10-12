@@ -64,8 +64,9 @@ pub fn live_sftp(
   user : String,
   d : @bigint.BigNat,
   ops : Array[@sftp.SftpOp],
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> SftpOutcome {
-  live_sftp_named(conn, x, user, d, "sftp", ops)
+  live_sftp_named(conn, x, user, d, "sftp", ops, kh)
 }
 
 ///|
@@ -82,8 +83,9 @@ pub fn live_sftp_named(
   d : @bigint.BigNat,
   subsystem : String,
   ops : Array[@sftp.SftpOp],
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> SftpOutcome {
-  let (auth, state_opt) = live_auth_with_state(conn, x, user, d)
+  let (auth, state_opt) = live_auth_with_state(conn, x, user, d, kh)
   match auth {
     Authenticated(_) => ()
     Failed(e) => return SftpOutcome::Failed(SftpError::AuthFailed(e))

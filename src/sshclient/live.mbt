@@ -71,6 +71,16 @@ pub(all) enum LiveError {
   /// The hash we computed is carried out so a diagnostic harness can diff it
   /// against an independent implementation instead of guessing.
   SignatureInvalid(FixedArray[Byte])
+  /// Loop #48: the host key verified (the peer owns it) but is not the one we
+  /// pinned for this host. This is the half a signature check cannot do, and
+  /// the half that catches a *consistent* man in the middle -- one with its own
+  /// key and its own valid signature. OpenSSH reports HOST_CHANGED and exits.
+  HostkeyMismatch(String)
+  /// Loop #48: this host was never pinned at all, and the policy is strict.
+  /// With a non-strict policy this is TOFU and is allowed through; carrying it
+  /// as its own variant is what lets a caller tell "checked and consistent"
+  /// from "never checked".
+  HostkeyUnknown(String)
   NewkeysSendFailed
   NoNewkeys
   /// A packet arrived but could not be framed -- bad length, bad padding, or
@@ -516,9 +526,14 @@ pub fn key_tag_of(
 /// `x` is the DH private exponent. A real client draws it from the CSPRNG;
 /// taking it as a parameter keeps this run reproducible, and the caller is
 /// responsible for using a fresh value per connection in production.
+/// `kh` is the host key pinning policy (Loop #48). It is a parameter rather
+/// than something read from a global because a global default would be exactly
+/// the wrong shape here: the safe reading and the insecure reading differ by one
+/// field, and a caller that forgets to set it should have to notice.
 fn handshake_to_session(
   conn : @tcp.TcpConn,
   x : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> (LiveResult, SessionState?) {
   let counters = { sent: 0, recv: 0, }
   let s = @bpacket.SendCtx::new()
@@ -687,6 +702,28 @@ fn handshake_to_session(
     @hostkey.Accepted => ()
     _ => return (Failed(SignatureInvalid(h)), None)
   }
+  // ---- 7b. host key pinning ----
+  // 上面那一步证明的是「对端拥有它出示的那把钥匙」,不是「那是我期待的那把
+  // 钥匙」。一个自洽的中间人(自己的密钥、自己签的 KEXDH_REPLY)完全过得去
+  // 上一步,而这正是签名校验挡不住的那一半攻击。OpenSSH 在 `sshconnect.c` 里
+  // 紧跟着做 host key 比对,不一致就报 HOST_CHANGED 退出。
+  //
+  // 判定本身住 `src/knownhosts`(和 `agrees_with_alg` 同一个理由:规则不该
+  // 在两条传输层驱动里各抄一份)。这里只把它翻译成本包自己的错误类型。
+  //
+  // `Unknown` 在非 strict 下放行,那是 TOFU:**没有**固定过的主机名仍然会被
+  // 接受。这是本项目当前的策略,不是疏忽,但它意味着第一次连接、以及对端换过
+  // 密钥之后的连接仍然可被中间人接管。见 AGENTS.md Loop #48。
+  match kh.verify(ks) {
+    @knownhosts.Skip => ()
+    @knownhosts.Accept => ()
+    @knownhosts.Unknown =>
+      if kh.strict {
+        return (Failed(HostkeyUnknown(kh.host_str)), None)
+      }
+    @knownhosts.Mismatch => return (Failed(HostkeyMismatch(kh.host_str)), None)
+    @knownhosts.InvalidEntry => return (Failed(HostkeyInvalid), None)
+  }
   // ---- 8. NEWKEYS ----
   if !send_packet(
       conn,
@@ -776,8 +813,12 @@ fn handshake_to_session(
 
 ///|
 /// Run a full handshake against `host:port`, stopping after NEWKEYS.
-pub fn live_handshake(conn : @tcp.TcpConn, x : @bigint.BigNat) -> LiveResult {
-  let (r, _) = handshake_to_session(conn, x)
+pub fn live_handshake(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
+) -> LiveResult {
+  let (r, _) = handshake_to_session(conn, x, kh)
   r
 }
 
@@ -834,8 +875,12 @@ pub const USERAUTH_SERVICE : String = "ssh-userauth"
 /// about that can be faked by a self-consistent bug on our side -- if our keys,
 /// counter or MAC were wrong the server would either drop the connection or
 /// reply `MAC error`/`decryption failed`, and this function would report it.
-pub fn live_session(conn : @tcp.TcpConn, x : @bigint.BigNat) -> SessionResult {
-  let (res, state) = handshake_to_session(conn, x)
+pub fn live_session(
+  conn : @tcp.TcpConn,
+  x : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
+) -> SessionResult {
+  let (res, state) = handshake_to_session(conn, x, kh)
   let handshake = match res {
     Established(rep) => rep
     Failed(e) => return Failed(SessionError::HandshakeFailed(e))
@@ -987,8 +1032,9 @@ pub fn live_auth(
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> AuthResult {
-  let (res, _st) = live_auth_with_state(conn, x, user, d)
+  let (res, _st) = live_auth_with_state(conn, x, user, d, kh)
   res
 }
 
@@ -1005,8 +1051,9 @@ fn live_auth_with_state(
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> (AuthResult, SessionState?) {
-  let (res, state) = handshake_to_session(conn, x)
+  let (res, state) = handshake_to_session(conn, x, kh)
   let handshake = match res {
     Established(rep) => rep
     Failed(e) =>
@@ -1206,8 +1253,9 @@ pub fn live_exec(
   user : String,
   d : @bigint.BigNat,
   command : String,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> ExecOutcome {
-  live_exec_io(conn, x, user, d, command, empty_stdin(), [])
+  live_exec_io(conn, x, user, d, command, empty_stdin(), [], kh)
 }
 
 ///|
@@ -1237,8 +1285,9 @@ pub fn live_exec_io(
   command : String,
   stdin_data : FixedArray[Byte],
   envs : Array[EnvVar],
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> ExecOutcome {
-  let (auth, state_opt) = live_auth_with_state(conn, x, user, d)
+  let (auth, state_opt) = live_auth_with_state(conn, x, user, d, kh)
   match auth {
     Authenticated(_) => ()
     Failed(e) => return ExecOutcome::AuthFailed(e)
@@ -1526,8 +1575,9 @@ pub fn live_shell(
   cols : Int,
   rows : Int,
   resize_to : (Int, Int)?,
+  kh : @knownhosts.KnownHostsPolicy,
 ) -> ShellOutcome {
-  let (auth, state_opt) = live_auth_with_state(conn, x, user, d)
+  let (auth, state_opt) = live_auth_with_state(conn, x, user, d, kh)
   match auth {
     Authenticated(_) => ()
     Failed(e) => return ShellOutcome::AuthFailed(e)
