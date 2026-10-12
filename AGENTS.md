@@ -1265,6 +1265,56 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #44: keeping the two transport adapters in step
+
+**What cannot be tested, stated plainly.** `run_sftp_session` is private in
+both `src/sshclient/sftp.mbt` and `src/wtlive/sftp.mbt`, and both take a
+*post-authentication* session state as their entry point. So the only way to
+hand either adapter's loop a malformed reply is to speak enough of the SSH
+handshake to get there -- a MITM server implementing the server side of kex and
+userauth. Until that exists, **no malformed byte can reach a transport
+adapter**, and any claim that the fault vectors cover the transports would be
+false. They cover `SftpSession` and `ChanState`, which is where Loop #43 drew
+the line.
+
+That leaves the actual risk: two files, two edit sites, and a rule that exists
+in both. Loop #39's G5 proves the browser side works against a real
+`internal-sftp`; Loop #43 proves the state machine and the channel layer hold
+under ten malformed replies. **Neither can catch "someone changed the window
+rule in one file and not the other"** -- the happy path never fills the
+window, and the fault vectors never reach either adapter's loop.
+
+**Why anchors and not a diff.** A normalized diff of the two files is ~145
+lines of *legitimate* difference: the auth entry points genuinely differ
+(native takes a `subsystem` parameter and gets its state from
+`live_auth_with_state`; wtlive hardcodes `"sftp"` and gets it from
+`wt_auth_into`), one is sync and one is async, and the send/receive calls have
+different names. Such a check fires on every correct edit and gets muted on
+the next one.
+
+`host/verify_transport_parity.py` instead pins the smaller claim: **each of
+fifteen load-bearing statements must still be present in both files.** It only
+goes red when a rule is actually removed, each anchor names the decision rather
+than a line number, and the anchors are *statements* -- deleting the comment
+that explains a rule does not satisfy it. Verified by deleting
+`if stuck && rest.length() > 0 {` from the wtlive copy: the gate reported
+exactly that one rule and named the file.
+
+The fifteen: wait for OPEN_CONFIRMATION; wait for CHANNEL_SUCCESS on the
+subsystem; the subsystem request itself; requests through the peer's window; a
+full window pumps before giving up; a bound on rounds; a bound on the clamp
+spin; an unparsable CHANNEL_DATA is an error; the parsed payload reaches the
+session; the session is pumped every round; only 0x5e carries data; the
+session's failure reason is surfaced; EOF on the clean path; both byte
+counters.
+
+**The last one is annotated, not just listed.** `st.counters.recv` counts the
+*encrypted stream from the server* and carries WINDOW_ADJUST timing, which is
+load-sensitive -- Loop #42 defect 4 exists because `verify_loop36` compared it
+cross-transport. The anchor requires the counter to be *reported* in both
+files while the exclusion stays a cross-transport rule; the reason sits next
+to the anchor so the next person to "fix" loop36 finds the argument.
+
 ### Loop #43: the same fault vectors through the channel layer
 
 Loop #41-M2 fed malformed bytes straight into `SftpSession::feed`. That proves

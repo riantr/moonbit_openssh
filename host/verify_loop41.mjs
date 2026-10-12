@@ -15,6 +15,9 @@
 //   4. `cmd/sftp_fault` passes on all four backends with the same verdict,
 //      which is where the framing invariant is checked on every backend
 //      rather than just the host one;
+//   4b. the two transport adapters still carry the same fifteen session-loop
+//      rules. Nothing else can catch a one-sided edit: the happy path never
+//      fills the window, and the fault vectors never reach either adapter;
 //   5. the three commands are actually *reachable over the bridge* -- this
 //      is the part a headless smoke test cannot see. The app opens a real
 //      window with a real CDP endpoint, we attach to the renderer, and we
@@ -302,6 +305,34 @@ const runVectorsIdentical = () =>
       }
     }
     ok("vector tables identical", `${a.size} scenarios`);
+  });
+
+// The two transport adapters are near-duplicates on purpose, and neither the
+// real-server gate nor the fault vectors can catch "someone changed the
+// window rule in one file and not the other": the happy path never fills the
+// window, and the fault vectors never reach either adapter's loop.
+const runParity = () =>
+  step("transport parity", () => {
+    const r = spawnSync("python", [path.join(root, "host", "verify_transport_parity.py")], {
+      cwd: root,
+      encoding: "utf-8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const out = `${r.stdout || ""}${r.stderr || ""}`;
+    const line = (out.match(/^the two transport adapters.*$/m) || [])[0];
+    if (r.status !== 0) {
+      bad(
+        "transport parity",
+        out
+          .trim()
+          .split("\n")
+          .filter((l) => l.includes("FAIL") || l.includes("missing from") || l.includes("anchors"))
+          .slice(0, 6)
+          .join("\n      "),
+      );
+      return;
+    }
+    ok("transport parity", line || out.trim());
   });
 
 // Four backends, and the framing invariant has to hold on all of them: a
@@ -626,6 +657,7 @@ const steps = [
   runOracle(),
   runBuild(),
   runVectorsIdentical(),
+  runParity(),
   runBackends(),
   runBridge(),
 ];
