@@ -265,6 +265,40 @@ fn parse_port_arg(s : String, fallback : Int) -> Int {
   acc
 }
 
+///|
+/// Loop #49 的写回。只有在**真的接受之后**才做,而且只在「这个主机本来没被固定过」
+/// 时做——已经固定过的那把要么匹配(无事可做)要么已经被拒(拒绝之后不能把对端那把
+/// 记下来,那等于把一次劫持变成一次「已信任」)。
+///
+/// 打印而不是落盘,理由见调用点。门禁读 `tofu: ` 那一行。
+///
+/// **这是诚实的 TOFU,不是安全的 TOFU。** 第一次连接仍然 susceptible:中间人在
+/// 那一刻可以出示它自己的钥匙,而我们会记下来并此后信任。OpenSSH 的
+/// `StrictHostKeyChecking=accept-new` 有一模一样的性质,差别只在于它把这件事
+/// 明说了。所以这里也明说——门禁读 `tofu: accepted-unpinned` 这一行来判断这次
+/// 连接到底有没有凭据出去。
+fn kh_report_tofu(argv : Array[String], port : Int, r : @sshclient.AuthReport) -> Unit {
+  if has_switch(argv, "--kh-tofu") {
+    let host = argv_value(argv, "--kh-host")
+    if host == "" {
+      println("tofu: skipped (no --kh-host)")
+      return
+    }
+    let existing = argv_value(argv, "--known-hosts-text")
+    let written = @knownhosts.append_line(
+      existing,
+      host,
+      r.session.handshake.hostkey_type,
+      r.session.handshake.hostkey_blob,
+    )
+    println("tofu: accepted-unpinned")
+    // 整段内容都打出来,包括结尾换行。`trim_end()` 给出的是 StringView,
+    // 而 StringView 不能拼进 String —— 与其做一次类型体操,不如让 `append_line`
+    // 保证末尾一定有换行(它本来就保证),这样直接打就行。
+    println("tofu: " + written)
+  }
+}
+
 fn kh_policy(argv : Array[String], port : Int) -> @knownhosts.KnownHostsPolicy {
   let text = argv_value(argv, "--known-hosts-text")
   if text == "" {
@@ -1133,6 +1167,18 @@ fn main {
         match outcome {
           @sshclient.Authenticated(r) => {
             println("result: USERAUTH_SUCCESS")
+            // Loop #49: TOFU 的 S。接受之后就记住,否则「记住」没有发生,下一次
+            // 连接仍然是一次全新的、无凭据的接受。
+            //
+            // 写的是**刚刚比过的那把 blob**(`r.session.handshake.hostkey_blob`),
+            // 不是对端自述的任何东西——后者会变成一次「信任对端的自我陈述」,
+            // 恰好把这一层要防的东西放了进来。
+            //
+            // 打印而不是写盘:这个 moon 版本的 core 没有文件 IO,而 `src/wt` 是
+            // js-only、浏览器里根本没有文件系统(见 AGENTS.md Loop #48)。所以
+            // 「长什么样」由 `src/knownhosts` 决定(两边同一串字节),「写到哪去」
+            // 由驱动决定。门禁捕获这一行并落盘,然后用写回来的那份重连。
+            kh_report_tofu(argv, port, r)
             println("user: " + r.user)
             println("method: " + r.method)
             println("key_type: " + r.key_type)

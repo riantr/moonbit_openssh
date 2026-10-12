@@ -112,6 +112,38 @@ fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
 }
 
 ///|
+/// Loop #49 的写回,与 `cmd/ssh_live` 的 `kh_report_tofu` 是同一件事。
+///
+/// 写的是**刚刚比过的那把 blob**(`r.session.handshake.hostkey_blob`),不是对端
+/// 自述的任何东西——后者等于「信任对端的自我陈述」,恰好把这一层要防的东西放了
+/// 进来。
+///
+/// 打印而不是落盘:浏览器里没有文件系统,而 `src/wt` 是 js-only(见 AGENTS.md
+/// Loop #48)。「长什么样」由 `src/knownhosts` 决定(两边同一串字节),「写到哪去」
+/// 由驱动决定——而浏览器应用的答案本来也不是 known_hosts 文件。
+///
+/// **诚实的 TOFU,不是安全的 TOFU。** 第一次连接仍然 susceptible;OpenSSH 的
+/// `StrictHostKeyChecking=accept-new` 性质一模一样,差别只在于它明说了。
+fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
+  if cfg("kh_tofu") != "1" && cfg("kh_tofu") != "true" {
+    return
+  }
+  let host = cfg("kh_host")
+  if host == "" {
+    println("tofu: skipped (no kh_host)")
+    return
+  }
+  let written = @knownhosts.append_line(
+    cfg("known_hosts"),
+    host,
+    r.session.handshake.hostkey_type,
+    r.session.handshake.hostkey_blob,
+  )
+  println("tofu: accepted-unpinned")
+  println("tofu: " + written)
+}
+
+///|
 fn fixed_x() -> @bigint.BigNat {
   let bytes : FixedArray[Byte] = FixedArray::from_array([
     0x5A, 0x17, 0xC3, 0x9E, 0x44, 0xB2, 0x6D, 0xF1, 0x08, 0xA7, 0x35, 0xCC, 0x91,
@@ -839,6 +871,7 @@ async fn main {
       ) {
       @wtlive.Authenticated(r) => {
         println("result: USERAUTH_SUCCESS")
+        cfg_report_tofu(r)
         println("user: " + r.user)
         println("method: " + r.method)
         println("key_type: " + r.key_type)

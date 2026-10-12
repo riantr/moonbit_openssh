@@ -1265,6 +1265,74 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #49: TOFU has to actually remember
+
+Loop #48 added the comparison. This closes the half that makes the policy TOFU
+rather than just "trust anything": **trust on first *use***. Accepting an
+unpinned host is half a policy. If nothing is written back, "use" never happened
+-- the next connection is again a fresh credential-free acceptance, and so is
+the one after that. The client never becomes harder to fool, only slower.
+
+**The write-back is rendered in `src/knownhosts` and printed by the driver.**
+`render.mbt` holds the rendering (`render`, `append_line`, `to_line`) and nothing
+else; no filesystem is touched, because this moon version's core has no
+file-reading API and `src/wt` is js-only where a browser has no filesystem at
+all. So "what a line looks like" has one implementation that both transports
+share, and "where it goes" is the driver's business -- a known_hosts file natively,
+localStorage in a browser. The gate captures the printed line and feeds it back
+in.
+
+**The sequence is the point, and step 3 is what makes step 2 mean something:**
+
+1. no known_hosts at all, an honest peer -> authenticate, and the client reports
+   the key it just accepted
+2. that text fed back in, **the same** peer -> authenticate, and it is now a match
+3. that text fed back in, a peer with a **different real key** -> refuse
+
+Step 3 is what catches a write-back that produced text matching nothing: TOFU
+would be indistinguishable from never having pinned at all, and step 2 alone
+passes in that case. The mismatching peer is a *self-consistent* one with the
+wrong key -- a forged one would fail earlier for an unrelated reason.
+
+**Two real bugs the round-trip property caught, both invisible end to end:**
+
+* **`render` dropped the `@revoked` / `@cert-authority` marker.** A revocation
+  record written back becomes an ordinary **trust** record -- the opposite
+  direction -- and it still parses, so nothing anywhere reports an error. This is
+  the worst class of write-back damage and the end-to-end sequence cannot see it,
+  because nothing in the sequence writes a marker. Hence a dedicated assertion.
+* **`render` did not emit a trailing newline**, so "read back out byte for byte"
+  did not close: every line differed by one `\n`.
+
+Both came from writing the property down first and testing it against real data.
+**The test constants are real SSH wire blobs, not placeholders** -- a made-up
+base64 string parses to zero entries, and a `0 != 1` failure reads like "the
+rendering is broken" when only the fixture was never a key. Same shape as Loop
+#43's `hex_to_bytes` lesson: a bad fixture produces a failure that points at the
+rule.
+
+**Two harness lessons, and one of them is a good assumption I got wrong:**
+
+* `println` can wrap the base64 across lines, so a single-line regex truncates
+  the key and the gate then reports "the written line does not carry the key the
+  peer presented" -- pointing at the driver, which was right. The line is also
+  printed *after* `tofu: accepted-unpinned`, so a first-match read returns the
+  status marker as content, and a last-match read swallows the rest of the
+  transcript.
+* **A repeated TOFU on reconnect is correct, not a failure.** Writing back again
+  on every accepted connection is what keeps the file current when a host
+  legitimately rotates its key. The first draft of this gate treated it as "the
+  first write-back was not remembered" and failed on correct behaviour; the
+  distinction that actually matters is in step 3.
+* The man in the middle writes its transcript when its session thread returns, so
+  a read placed before the client has connected gets an empty file. Both step 1
+  and step 3 had this; step 1 happened to pass, which is not a reason to leave it.
+
+**Verified:** `ALL PASS (11 checks)` plus 24 known_hosts unit tests. Both
+transports write a byte-identical line, so a browser user and a native user end
+up with the same known_hosts for the same server. `verify_loop48` 15,
+`verify_loop47` 19, `verify_loop41` 29, no regression.
+
 ### Loop #48: host key pinning, in the live client
 
 Loop #47 proved the client refuses a peer's key exchange when the exchange does
