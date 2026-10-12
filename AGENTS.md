@@ -1265,17 +1265,103 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #45: the fault vectors over a real socket (the MITM)
+
+Loop #44 stated the limit plainly: `run_sftp_session` is private in both
+adapters and starts from a post-authentication session state, so **no
+malformed byte could reach a transport adapter**. This removes that limit.
+
+**`host/sftp_mitm.py` is paramiko in _server_ mode.** Key exchange, cipher
+setup, NEWKEYS and userauth are a real SSH implementation doing real crypto --
+none of it re-derived, none of it trusted. What it does *not* do is speak
+SFTP: once the client asks for the `sftp` subsystem, it acknowledges the
+request and writes a scenario's bytes straight onto the channel. There is no
+`SFTPServer` anywhere in the file, and no code path that could grow one by
+accident -- the peer is wrong on purpose.
+
+It accepts **any** public key. That is a decision, not an oversight: the thing
+under test is what the client does with SFTP bytes *after* authentication, and
+a key check would be testing `src/userauth`, which Loop #34 and the live sshd
+gate already cover.
+
+`cmd/sftp_mitm` is the other end: a real TCP connection, a real handshake, the
+real `live_sftp`. Native by necessity -- `live_sftp` takes a `@tcp.TcpConn`.
+
+**The expectation does not change**, and that is the whole claim: the SFTP
+layer cannot tell whether the bytes came from a real `internal-sftp`, a fake
+peer in-process, or a man in the middle over a socket. Same vector table, same
+oracle, same cut points.
+
+**Two transcripts are compared, against different things on purpose.** The
+client's own report (version / results / done-or-failed, plus the
+`Protocol(<reason>)` string a failed session reports) against the expectations;
+and *the bytes the MITM saw the client send* against the expected request
+frames. The second is the one that would catch a transport that mangled what
+it sent -- a window clamp that over-sends, a subsystem request that leaves
+before the confirmation -- and the client's own report cannot see that, because
+a client has no idea what went out before the channel closed.
+
+**Three harness lessons, all of them wrong-looking failures:**
+
+1. **CRLF silently turns a match into no match.** The gate reported
+   `results: got []` for scenarios that were demonstrably producing the right
+   answer when run by hand. In a JavaScript regular expression `.` does not
+   match `\r` -- it is a line terminator, alongside `\n` -- so
+   `^op\d+: (.*)$` without the `m` flag can never match a CRLF line, and the
+   failure is **no match**, not a wrong value. An empty list reads as "this
+   scenario produced nothing", which points at the SFTP layer. `verify_loop39`
+   has normalized CRLF since Loop #38; the rule travels with the repo, not with
+   whichever file happened to remember it.
+
+2. **Comparing a raw tuple to a rendered string, a second time.** The oracle
+   stores a result as `["realpath", "/C:/Users/hp"]`; the client prints
+   `realpath=2f433a2f55736572732f6870`. `verify_loop41` made this exact
+   mistake and fixed it; `verify_loop45` made it again, because it is a new
+   file with a new author and the shape looks obviously compatible until it
+   does not. The fix is the same, and the cross-check against the *generated*
+   `cmd/sftp_mitm/vectors.mbt` is what keeps the second port honest.
+
+3. **The MITM must re-frame correctly or every transcript differs for the
+   wrong reason.** Re-assembling the client's requests re-attaches the length
+   prefix, and the length does **not** count itself
+   (`put_u32(mlen, sshbuf_len(m))`, sftp-client.c:160-161). Writing
+   `len(body) + 4` produced transcripts that differed from the expectations by
+   exactly four -- a difference with nothing to do with the fault being
+   injected, and one that would have been reported as a transport bug.
+
+**Verified:** `ALL PASS (51 checks)` -- 10 scenarios x 5 cut points, every one
+of them a real TCP connection, a real key exchange and a real userauth against
+the man in the middle. Three of the ten end in `Failed`, and their
+`Protocol(<reason>)` strings are compared rather than merely logged, so the
+path from a malformed reply to a reportable outcome is checked end to end.
+
+**It is a separate gate** (`node host/verify_loop45.mjs`), not a step inside
+`verify_loop41.mjs`, because it is by far the slowest thing in the repo: 50
+sessions, each a full handshake. Folding it into the fast gate would make
+every iteration pay for it.
+
+**What it retires.** `host/verify_transport_parity.py` (Loop #44) exists
+because nothing could reach an adapter. Now `src/sshclient` can be driven
+directly. `src/wtlive` still cannot -- it needs WebTransport, not TCP -- so the
+parity gate stays for the browser half, and its anchors are checked against
+this gate's coverage rather than assumed.
+
 ### Loop #44: keeping the two transport adapters in step
 
-**What cannot be tested, stated plainly.** `run_sftp_session` is private in
+**What could not be tested then, and no longer cannot.**
+`run_sftp_session` is private in
 both `src/sshclient/sftp.mbt` and `src/wtlive/sftp.mbt`, and both take a
 *post-authentication* session state as their entry point. So the only way to
 hand either adapter's loop a malformed reply is to speak enough of the SSH
 handshake to get there -- a MITM server implementing the server side of kex and
-userauth. Until that exists, **no malformed byte can reach a transport
-adapter**, and any claim that the fault vectors cover the transports would be
-false. They cover `SftpSession` and `ChanState`, which is where Loop #43 drew
-the line.
+userauth. Until Loop #45 built that, **no malformed byte could reach a
+transport adapter**, and any claim that the fault vectors covered the
+transports would have been false. They cover `SftpSession` and `ChanState`,
+which is where Loop #43 drew the line.
+
+**So the anchors below are a stopgap, not a permanent answer.** Once the MITM
+drives both adapters, this gate can retire; until it does, it is what stands
+between a one-sided edit and a divergence nobody would notice.
 
 That leaves the actual risk: two files, two edit sites, and a rule that exists
 in both. Loop #39's G5 proves the browser side works against a real

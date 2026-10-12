@@ -1,0 +1,47 @@
+///| cmd/sftp_mitm -- Loop #45: the fault vectors over a real socket
+///|
+///| Loops #41-M2 and #43 proved `src/sftp`'s state machine and `src/channel`'s
+///| framing hold against ten malformed replies -- the second one by driving
+///| them through `ChanState`. Neither could reach a **transport adapter**:
+///| `run_sftp_session` is private in both `src/sshclient/sftp.mbt` and
+///| `src/wtlive/sftp.mbt`, and both take a post-authentication session state as
+///| their entry point, so the only way to hand either one a malformed reply is
+///| to finish an SSH handshake with it first.
+///
+///| That is what `host/sftp_mitm.py` is: paramiko in server mode, doing real
+///| key exchange, cipher setup and userauth, then -- instead of an
+///| `internal-sftp` -- writing a scenario's bytes straight onto the channel.
+///| This package is the other end of that: a real TCP connection, a real
+///| handshake, the real `live_sftp`, and the same ten scenarios the other two
+///| gates use.
+///|
+///| **The expectation does not change.** The SFTP layer cannot tell whether
+///| the bytes in front of it came from a real server, a fake peer inside the
+///| process, or a man in the middle over a socket -- and that is the claim.
+///| If a scenario's transcript differs here, the difference is in the
+///| transport adapter, which is exactly the layer nothing else covers.
+///|
+///| Native only, and unavoidably so: `live_sftp` takes a `@tcp.TcpConn`, and
+///| `src/tcp` is a real socket. The browser side (`src/wtlive`) is reached
+///| through WebTransport instead, which is a different transport and needs its
+///| own man in the middle; this package is the native half of that pair.
+///|
+///| Run:  moon run cmd/sftp_mitm --target native -- <port> <scenario>
+///|       moon run cmd/sftp_mitm --target native -- --all <port-base>
+
+import {
+  "moonbitlang/core/env",
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/sftp",
+  "openssh/openssh_moonbit/src/sshclient",
+  "openssh/openssh_moonbit/src/tcp",
+}
+
+pkgtype(kind: "executable")
+
+// `live_sftp` takes a `@tcp.TcpConn` and `src/tcp` is a real socket, so this
+// package is native by necessity rather than by choice. Declaring it means a
+// wasm check is a *declared* impossibility instead of a surprise.
+options(
+  supported_targets: "+native",
+)

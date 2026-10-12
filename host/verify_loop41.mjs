@@ -653,6 +653,9 @@ function cleanup() {
 
 // ---------------------------------------------------------------------------
 
+// The MITM is the slowest step by far -- 50 sessions, each one a real TCP
+// connection, a real key exchange and a real userauth -- so it is a separate
+// gate rather than another step here. `node host/verify_loop45.mjs` on its own.
 const steps = [
   runOracle(),
   runBuild(),
