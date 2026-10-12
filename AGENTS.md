@@ -1265,6 +1265,101 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #46: the same vectors, in a browser Worker
+
+Loop #45 left exactly one adapter undriven. `src/sshclient` had a man in the
+middle in front of it; `src/wtlive` did not, and the stated reason was that
+`src/wt` speaks **WebTransport**, which needs a publicly trusted certificate --
+Chromium rejects a locally-added one on the QUIC path with
+`QUIC_TLS_CERTIFICATE_UNKNOWN` no matter which override flag is set.
+
+**The reason was half right, and the useful half was in `src/wt`.** It picks its
+transport from the URL: `ws://` opens a `WebSocketStream`, anything else opens
+WebTransport (`host/wt/moonbit_wt.js`). A `ws://` URL carries exactly the same
+bytes, so everything above the transport is exercised identically -- no change
+to `src/`, no new cryptography, and the WebTransport limitation stops being a
+limit on what can be *tested* rather than on what can be *shipped*.
+
+```
+browser Worker (MoonBit js, src/wtlive) --WebSocket--> wt_mitm_bridge --TCP--> sftp_mitm.py
+```
+
+`host/wt_mitm_bridge.mjs` is `host/wt/ws_relay.py` with a different upstream,
+which is deliberate: the relay is already proven against a real sshd, so the
+browser half is not a new thing being trusted for the first time. It forwards
+bytes and **parses nothing** -- no SSH, no reassembly, no counting. Any of those
+would be a second implementation of something that already has one, and a place
+for a transcript to be quietly wrong in a way the gate could not see.
+
+**The rendering is `cmd/wt_ssh`'s own, and the gate undoes it instead of
+forcing it to match.** `wt_print_sftp_op` prints `op0: REALPATH` plus
+`op0_hex: ...` rather than `cmd/ssh_live`'s single rendered line, because its
+alignment with `ssh_live` line for line *is* Loop #39 G5's assertion. Changing it
+to make this gate simpler would have deleted the thing the earlier gate
+measures, so the third gate parses the multi-line form back into the shape the
+other two compare. That is a different trade from `verify_loop41` and
+`verify_loop45`, which each ported the renderer: those compare rendered strings
+to rendered strings, this one compares parsed fields, so the duplication is
+smaller and there is nothing to cross-check against a generated table.
+
+**Hex case is a rendering choice, not a protocol fact, and the two drivers make
+opposite ones.** `cmd/wt_ssh` prints through `@ecdsa.bytes_to_hex` (uppercase);
+`cmd/sftp_mitm` has its own `to_hex` (lowercase). `wt_ssh` is the one that is
+right -- `wt_dump_prefix` is deliberately aligned with `cmd/ssh_live` -- so the
+gate folds case on the **hex fields only**. Folding the whole rendered string
+would also hide a case change in `realpath=` itself.
+
+**Requests are compared by count, not by bytes.** In the TCP run the framing is
+the client's, so the concatenated stream is comparable; a browser's WebSocket
+chunks it however it likes. Counting still catches the failure that matters --
+a client that never sends its requests, or sends the wrong number.
+
+**Four harness lessons, every one of them a failure that pointed somewhere
+else:**
+
+1. **`worker error: [object Event]` was a 404, twice over.** `serve()` called
+   `readFile`, which was never imported, so *every* static request raised a
+   `ReferenceError` and answered 404 -- the page, the Worker script, everything.
+   A Worker's `onerror` for a script that never loaded receives a DOM `Event`
+   with no `.message`, no `.filename`, and `String(ev)` is the literal
+   `"[object Event]"`, so the cause was nowhere in the output. Two changes make
+   that class of failure impossible to hide again: the Event's fields are copied
+   into a plain object and rendered by name, and the page records every
+   `response >= 400` and every `requestfailed`, so a missing asset is a visible
+   `404 <url>` instead of an opaque Event.
+
+2. **`page.evaluate` carries no Node scope.** The formatting helper was defined
+   beside the gate and referenced inside the evaluated function, so the page
+   raised `ReferenceError: describeEvent is not defined` -- while the gate went
+   on to report a *worker* failure, one layer away from the actual cause. The
+   browser side now copies fields out and Node formats them; no `eval` of a
+   stringified function.
+
+3. **The gate hung up on the MITM before it finished writing.** `sftp_mitm.py`
+   records its transcript when the session thread returns, and three scenarios
+   were reported as `the man in the middle recorded nothing` -- which reads as
+   a protocol failure. It was a race: the child was killed the instant the
+   Worker's result arrived. The order is the dependency's order -- close the
+   bridge, the MITM sees the socket end, the thread returns, the transcript is
+   written -- and only then is a kill still needed.
+
+4. **A wrong field name reads as a protocol divergence.** The parser asked for
+   `op0_path_hex`; `wt_print_sftp_op` prints `op<i>_hex` for the bytes and
+   `op<i>_path` for the length. The failure was
+   `got ["realpath=undefined"] want ["realpath=2f"]`, which is indistinguishable
+   from `src/wtlive` returning something else.
+
+**Verified:** `ALL PASS (53 checks)` -- the same 10 scenarios x 5 cut points
+`verify_loop45` runs, every one of them a real SSH handshake, but driven from a
+browser Worker over WebSocket. The bytes above the transport are now proven
+identical across both adapters: a window rule changed in one file, or a pump
+forgotten in the other, shows up here as a transcript that differs from
+expectations `verify_loop45` already proved.
+
+**What it does not retire.** The WebTransport path itself is still untested
+locally -- that needs a publicly trusted certificate, not a flag -- so what is
+proven is everything above the transport, on the WebSocket carrier.
+
 ### Loop #45: the fault vectors over a real socket (the MITM)
 
 Loop #44 stated the limit plainly: `run_sftp_session` is private in both
@@ -1342,9 +1437,10 @@ every iteration pay for it.
 
 **What it retires.** `host/verify_transport_parity.py` (Loop #44) exists
 because nothing could reach an adapter. Now `src/sshclient` can be driven
-directly. `src/wtlive` still cannot -- it needs WebTransport, not TCP -- so the
-parity gate stays for the browser half, and its anchors are checked against
-this gate's coverage rather than assumed.
+directly. `src/wtlive` could not -- it needs WebTransport, not TCP -- so at this
+point the parity gate still carried the browser half alone. Loop #46 put the
+same vectors in front of `src/wtlive` over a WebSocket carrier, which closes
+that; the parity anchors are now checked against real coverage on both sides.
 
 ### Loop #44: keeping the two transport adapters in step
 

@@ -1,6 +1,6 @@
 ///| GENERATED FILE -- do not edit by hand.
-///|
-/// Regenerate: python host/gen_fault_vectors.py <oracle.json> <out.mbt> [header]
+///
+/// Regenerate: python host/gen_fault_vectors.py <oracle.json> <out.mbt>
 ///
 /// Every inbound payload and every expected request below comes from
 /// `host/sftp_fault_oracle.py`, which is an independent implementation
@@ -9,12 +9,14 @@
 /// own run of each scenario agrees with the hand-written expectation, so a
 /// scenario cannot silently become "whatever the implementation does".
 ///
-/// Two copies of this table are generated from that one JSON:
-/// `cmd/proton_gui/fault_vectors.mbt` (fed straight to `SftpSession`) and
-/// `cmd/sftp_fault/vectors.mbt` (re-sliced through the channel layer).  They
-/// must stay identical -- same scenarios, same expectations -- so that a
-/// difference in what the two layers report is a transport bug and not two
-/// different test sets.
+/// Four copies of this table are generated from that one JSON, and they must
+/// stay identical -- same scenarios, same expectations -- so that a difference
+/// between two layers is a transport bug and not two different test sets:
+///
+///   cmd/proton_gui/fault_vectors.mbt  fed straight to `SftpSession`
+///   cmd/sftp_fault/vectors.mbt        re-sliced through the channel layer
+///   cmd/sftp_mitm/vectors.mbt         over a real socket, behind a MITM
+///   cmd/wt_ssh/fault_vectors.mbt      in a browser Worker, over WebSocket
 
 pub(all) struct Op {
   /// 0 realpath, 1 stat, 4 writefile, 9 rename

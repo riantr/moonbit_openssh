@@ -8,10 +8,11 @@
 //      inbound stream at four different CHANNEL_DATA cut points reproduces
 //      the whole-payload answer exactly);
 //   2. `cmd/proton_gui` builds and the CEF runtime stages beside the exe;
-//   3. the two generated vector tables -- `cmd/proton_gui` and
-//      `cmd/sftp_fault` -- carry the same scenarios and the same
-//      expectations. They must, or a difference between the two layers'
-//      reports is a transport bug rather than two different test sets;
+//   3. the generated vector tables all carry the same scenarios and the same
+//      expectations. They must, or a difference between two layers' reports is
+//      a transport bug rather than two different test sets. There are four
+//      copies now -- `cmd/proton_gui`, `cmd/sftp_fault`, `cmd/sftp_mitm` and
+//      `cmd/wt_ssh` -- because four drivers consume them;
 //   4. `cmd/sftp_fault` passes on all four backends with the same verdict,
 //      which is where the framing invariant is checked on every backend
 //      rather than just the host one;
@@ -280,31 +281,47 @@ const runBuild = () =>
   });
 
 // The channel layer sits *below* the state machine the console drives, and
-// the two vector tables have to stay identical or a difference in what they
-// report is a transport bug rather than two different test sets.
+// every driver's vector table has to stay identical or a difference in what they
+// report is a transport bug rather than two different test sets. Four drivers
+// consume the table, so "identical" is checked across all four and grows a new
+// entry when a fifth appears -- a check that silently covers two of four is the
+// failure mode this is here to prevent.
+const VECTOR_TABLES = [
+  ["cmd/proton_gui/fault_vectors.mbt", "cmd/proton_gui"],
+  ["cmd/sftp_fault/vectors.mbt", "cmd/sftp_fault"],
+  ["cmd/sftp_mitm/vectors.mbt", "cmd/sftp_mitm"],
+  ["cmd/wt_ssh/fault_vectors.mbt", "cmd/wt_ssh"],
+];
+
 const runVectorsIdentical = () =>
-  step("both vector tables agree", () => {
-    const a = readRenderedResultsFromMbt(path.join(root, "cmd", "proton_gui", "fault_vectors.mbt"));
-    const b = readRenderedResultsFromMbt(path.join(root, "cmd", "sftp_fault", "vectors.mbt"));
-    if (a.size === 0 || b.size === 0) {
-      bad("vector tables", `proton_gui=${a.size} sftp_fault=${b.size}`);
+  step("every vector table agrees", () => {
+    const ref = readRenderedResultsFromMbt(path.join(root, VECTOR_TABLES[0][0]));
+    if (ref.size === 0) {
+      bad("vector tables", `${VECTOR_TABLES[0][1]} parsed 0 scenarios`);
       return;
     }
-    if (a.size !== b.size) {
-      bad("vector tables", `${a.size} vs ${b.size} scenarios`);
-      return;
-    }
-    for (const [name, results] of a) {
-      if (!b.has(name)) {
-        bad("vector tables", `${name} missing from cmd/sftp_fault`);
+    for (const [file, label] of VECTOR_TABLES.slice(1)) {
+      const b = readRenderedResultsFromMbt(path.join(root, file));
+      if (b.size === 0) {
+        bad("vector tables", `${label} parsed 0 scenarios`);
         return;
       }
-      if (JSON.stringify(results) !== JSON.stringify(b.get(name))) {
-        bad("vector tables", `${name}: results differ between the two tables`);
+      if (ref.size !== b.size) {
+        bad("vector tables", `${VECTOR_TABLES[0][1]}=${ref.size} ${label}=${b.size}`);
         return;
       }
+      for (const [name, results] of ref) {
+        if (!b.has(name)) {
+          bad("vector tables", `${name} missing from ${label}`);
+          return;
+        }
+        if (JSON.stringify(results) !== JSON.stringify(b.get(name))) {
+          bad("vector tables", `${name}: results differ between ${VECTOR_TABLES[0][1]} and ${label}`);
+          return;
+        }
+      }
     }
-    ok("vector tables identical", `${a.size} scenarios`);
+    ok("vector tables identical", `${ref.size} scenarios x ${VECTOR_TABLES.length} tables`);
   });
 
 // The two transport adapters are near-duplicates on purpose, and neither the

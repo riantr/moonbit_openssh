@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Emit cmd/proton_gui/fault_vectors.mbt from the oracle's JSON.
+"""Emit a MoonBit vector table from the oracle's JSON.
 
 The JSON is the artifact the oracle checked itself against; this file only
 transcribes it into MoonBit syntax, so there is exactly one place where the
 expected bytes are written down and a second (independent) place where they
 are derived.
+
+Four consumers exist and all four read the same table, so `host/verify_loop41.mjs`
+checks that their copies agree rather than trusting it.
 """
 
 import io
@@ -12,8 +15,8 @@ import json
 import sys
 
 HEADER = '''///| GENERATED FILE -- do not edit by hand.
-///|
-/// Regenerate: python host/gen_fault_vectors.py <oracle.json> <out.mbt> [header]
+///
+/// Regenerate: python host/gen_fault_vectors.py <oracle.json> <out.mbt>
 ///
 /// Every inbound payload and every expected request below comes from
 /// `host/sftp_fault_oracle.py`, which is an independent implementation
@@ -22,12 +25,14 @@ HEADER = '''///| GENERATED FILE -- do not edit by hand.
 /// own run of each scenario agrees with the hand-written expectation, so a
 /// scenario cannot silently become "whatever the implementation does".
 ///
-/// Two copies of this table are generated from that one JSON:
-/// `cmd/proton_gui/fault_vectors.mbt` (fed straight to `SftpSession`) and
-/// `cmd/sftp_fault/vectors.mbt` (re-sliced through the channel layer).  They
-/// must stay identical -- same scenarios, same expectations -- so that a
-/// difference in what the two layers report is a transport bug and not two
-/// different test sets.
+/// Four copies of this table are generated from that one JSON, and they must
+/// stay identical -- same scenarios, same expectations -- so that a difference
+/// between two layers is a transport bug and not two different test sets:
+///
+///   cmd/proton_gui/fault_vectors.mbt  fed straight to `SftpSession`
+///   cmd/sftp_fault/vectors.mbt        re-sliced through the channel layer
+///   cmd/sftp_mitm/vectors.mbt         over a real socket, behind a MITM
+///   cmd/wt_ssh/fault_vectors.mbt      in a browser Worker, over WebSocket
 
 pub(all) struct Op {
   /// 0 realpath, 1 stat, 4 writefile, 9 rename
@@ -133,9 +138,7 @@ def main():
             + "],\n"
         )
         out.append("    expect_done: " + ("true" if c["done"] else "false") + ",\n")
-        out.append(
-            "    expect_failed: " + ("true" if c["failed"] else "false") + ",\n"
-        )
+        out.append("    expect_failed: " + ("true" if c["failed"] else "false") + ",\n")
         out.append(
             "    expect_reason: " + mbt_str(c["failure_reason"]) + ",\n"
         )

@@ -39,6 +39,46 @@ extern "js" fn cfg(name : String) -> String = "((n) => (globalThis.__wt_cfg && g
 /// the Worker cannot treat "importScripts returned" as completion.
 extern "js" fn wt_finish(ok : Bool, detail : String) -> Unit = "((ok, detail) => { globalThis.__wt_finish({ ok: ok, detail: detail }) })"
 
+///| One vector from `fault_vectors.mbt` -- the same generated table
+///| `cmd/sftp_mitm` and `cmd/sftp_fault` carry. Three copies of one file is
+///| why `host/verify_loop41.mjs` checks the tables agree.
+fn wt_fault_case(name : String) -> FaultCase {
+  for i = 0; i < fault_cases.length(); i = i + 1 {
+    if fault_cases[i].name == name {
+      return fault_cases[i]
+    }
+  }
+  abort("unknown scenario: " + name)
+}
+
+///| hex -> bytes, for a writefile payload. Written out rather than reached for
+///| because this package has no hex helper yet and the standard library's
+///| `hex_to_bytes` silently drops a trailing odd digit -- a fault vector
+///| mistyped by one character would then be a *different* vector rather than a
+///| compile error.
+fn wt_hex_to_bytes(s : String) -> FixedArray[Byte] {
+  let n = s.length() / 2
+  if s.length() % 2 != 0 {
+    abort("odd-length hex")
+  }
+  let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    out[i] = ((wt_hex_nibble(s[i * 2]) << 4) | wt_hex_nibble(s[i * 2 + 1])).to_byte()
+  }
+  out
+}
+
+fn wt_hex_nibble(c : UInt16) -> Int {
+  let n = c.to_int()
+  if n >= 48 && n <= 57 {
+    return n - 48
+  }
+  if n >= 97 && n <= 102 {
+    return n - 87
+  }
+  abort("bad hex digit")
+}
+
 ///|
 fn fixed_x() -> @bigint.BigNat {
   let bytes : FixedArray[Byte] = FixedArray::from_array([
@@ -339,6 +379,68 @@ fn wt_payload_of(n : Int) -> FixedArray[Byte] {
   out
 }
 
+async fn wt_sftp_fault_run(url : String) -> Unit {
+  let name = cfg("sftp_fault")
+  if name == "" {
+    wt_finish(false, "sftp_fault needs a scenario name")
+    return
+  }
+  let c = wt_fault_case(name)
+  let user = cfg("user")
+  let uname = if user == "" { "hp" } else { user }
+  println("scenario: " + c.name)
+  println("intent: " + c.intent)
+  let ops : Array[@sftp.SftpOp] = []
+  for i = 0; i < c.ops.length(); i = i + 1 {
+    let o = c.ops[i]
+    ops.push(
+      match o.kind {
+        0 => @sftp.SftpOp::Realpath(o.path)
+        1 => @sftp.SftpOp::Stat(o.path)
+        4 => @sftp.SftpOp::WriteFile(o.path, wt_hex_to_bytes(o.arg))
+        _ => @sftp.SftpOp::Rename(o.path, o.arg)
+      },
+    )
+  }
+  let conn = @wt.WtConn::connect(url) catch {
+    _ => {
+      println("outcome: connect_failed")
+      wt_finish(false, "connect failed")
+      return
+    }
+  }
+  println("connected: true")
+  // The same call `wt_sftp_run` makes, with the same op script the vectors
+  // record. Nothing below the transport branches on which scenario this is --
+  // that is the property being asserted.
+  let outcome = @wtlive.wt_live_sftp(
+    conn,
+    fixed_x(),
+    uname,
+    test_auth_key(),
+    ops,
+  )
+  match outcome {
+    @wtlive.WtSftpOutcome::Done(r) => {
+      println("outcome: done")
+      println("version: " + r.version.to_string())
+      println("extensions: " + r.extensions.to_string())
+      println("requests_sent: " + r.requests_sent.to_string())
+      println("replies_recv: " + r.replies_recv.to_string())
+      println("sftp_bytes_in: " + r.sftp_bytes_in.to_string())
+      for i = 0; i < r.ops.length(); i = i + 1 {
+        wt_print_sftp_op(i, r.ops[i])
+      }
+    }
+    @wtlive.WtSftpOutcome::Failed(e) => {
+      println("outcome: failed")
+      println("error: " + wt_sftp_error_name(e))
+    }
+  }
+  conn.close()
+  wt_finish(true, "done")
+}
+
 async fn wt_sftp_run(url : String) -> Unit {
   let user = cfg("user")
   let uname = if user == "" { "hp" } else { user }
@@ -514,6 +616,14 @@ async fn main {
   // Loop #36: `shell: <command>` opens a pty, types, optionally resizes, exits.
   // Checked before `exec` so a config carrying both runs the interactive one.
   let shell_cmd = cfg("shell")
+  // Loop #46: one fault vector, against a peer that misbehaves on purpose.
+  // Checked before the SFTP read/write dispatch, because the two share the
+  // `sftp_` prefix and a vector named after its own file would otherwise be
+  // indistinguishable from a read request.
+  if cfg("sftp_fault") != "" {
+    wt_sftp_fault_run(url)
+    return
+  }
   // Loop #39/40: SFTP read and write side.  Checked after `shell`, which keeps
   // the earlier dispatch order intact.
   if cfg("sftp") != "" || cfg("sftp_read") != "" || cfg("sftp_missing") != "" ||
