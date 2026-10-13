@@ -1265,6 +1265,205 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #52: a pin that survives the page going away
+
+Loops #49/#50 made the *decision* right and the *rendering* right, and then
+printed the line. Printing is not remembering: the gate caught stdout and fed
+the line back by hand, while a browser user has nobody to do that. So `--kh-tofu`
+on Tuesday means unpinned again on Wednesday -- the exact state TOFU exists to
+remove and `accept-new` is not allowed to leave. The pin lived exactly as long as
+the test that produced it.
+
+New `src/khstore` (js-only) plus `host/wt/moonbit_khs.js`, following the shape
+`src/wt` already established: "what a line looks like" stays in `src/knownhosts`
+and is shared by both transports; "where it goes" is the platform's. The stored
+value is the **line**, not a structured object, so a browser user who exports it
+gets text they can paste into `~/.ssh/known_hosts` -- a richer structure would
+need a conversion step, and conversion is where format bugs live (Loop #49's
+marker-loss bug was exactly that).
+
+**Four real obstacles, all found by running it rather than reasoning about it.**
+
+1. **A Web Worker has no `localStorage`.** The first version wrote to it. Not a
+   policy or a permission -- simply absent: `globalThis.localStorage` is
+   `undefined` inside a Worker, so the property access throws and no `try` around
+   the call rescues it. IndexedDB is the only origin-scoped storage a Worker has,
+   and the only one that makes sense here. What made this findable rather than a
+   silent no-op is that the failure was **reported**: every connection printed
+   `tofu: NOT stored`, and the driver says it in words rather than letting a user
+   believe they are pinned.
+2. **No string literals inside an `extern "js"` body.** MoonBit has no
+   single-quoted string (`'` is a lexing error, U+0027), so `""` inside a
+   double-quoted body must be written `\"` -- and the compiler emits that
+   right-hand side as a literal, backslash and all. The generated JavaScript
+   contains `?? \"\"`, a SyntaxError, and the module dies at `importScripts` with
+   an **empty transcript**, so the failure looks like a harness problem rather
+   than a code problem. `src/wt/ffi.mbt` escaped this by accident: none of its
+   bodies needs a string. Same family, opposite end -- it recorded inline
+   `#| ... |#` leaking its own terminator.
+3. **No `Option` across the FFI boundary.** `getItem`'s `null` looks like it
+   should arrive as `None` and does not: the generated code tests
+   `=== undefined` and treats `null` as `Some(null)`, so the `Some` arm
+   dereferences null and the error surfaces far from the cause. The extern now
+   answers "was there anything" and the value travels in a second call.
+4. **Awaiting is `@js_async.Promise::wait(...)`, not an `await` keyword.**
+   `await f(x)` parses `await` as an unbound identifier. Only a parse error, so
+   the only kind of confusion that costs nothing.
+
+**A fifth one, and it is the harness contract rather than the language.** Every
+mode in `cmd/wt_ssh` ends with its own `wt_finish(...)`, because the Worker
+harness takes "finished" from MoonBit through `__wt_finish` rather than guessing
+when `importScripts` returned. `kh_forget` shipped once without it: the mode
+printed `forget: 127.0.0.1` correctly and then hung, so the gate saw a bare
+timeout with a *complete and correct* transcript. That failure reads as a slow
+machine, not as a missing signal. **A new mode that returns early must signal.**
+The gate now reports that case by name rather than as a timeout.
+
+**`moon check src/khstore` said "no work to do" right after a failed run**,
+because the failed attempt had already populated the cache. Force a rebuild
+(`moon build`) when a check seems to have skipped your change.
+
+**The gate's isolation is the design, not a detail.** The obvious version passes
+for the wrong reason: if step 2 runs in the same page, it cannot distinguish "the
+store worked" from "nothing changed and the browser is still holding the first
+connection's state". So every step runs in a fresh Page inside a **shared
+BrowserContext** -- a new page, new globals, new Worker, no leftovers, and the
+same origin-scoped storage. That required changing `host/wt_browser.mjs`'s
+`openPage`, which had used `browser.newPage()` and therefore opened a fresh
+*context* every call: right for Loop #48/49/51, which wanted total isolation, and
+wrong here, where the whole claim is that the pin outlives the page. Getting that
+backwards reports a working store as a broken one.
+
+Five cases, and three of them exist to stop the store from being merely a cache:
+
+| case | flags | expected |
+|---|---|---|
+| 0 | nothing stored, nothing pinned | refuse, `HostkeyUnknown` |
+| 1 | `kh_tofu` | authenticate, and the browser really holds the pin |
+| 2 | **none at all**, new page | authenticate, from the stored pin |
+| 3 | the stored host presents a different key | refuse, `HostkeyMismatch` |
+| 4 | `kh_forget`, then connect | forget does not connect; then refuse as `Unknown` |
+
+Case 4 is two steps on purpose, and that is what is under test. `kh_forget`
+forgets and **stops** -- it does not go on to accept whatever the peer presents.
+One step that does both is how a "remove this pin" button becomes a silent
+accept, which is the fail-open Loop #51 closed. And a forgotten host must come
+back as `Unknown`, not `Mismatch`: a store that cannot tell "not pinned" from
+"the key changed" cries wolf about a legitimate rotation, and its users learn to
+click through.
+
+**Step 4a asserts the absence of a file, not the contents of one.** "Forgetting
+must not also connect" is checked as `existsSync(transcript) === false`, because
+the man in the middle writes its transcript when a connection happens and writes
+nothing otherwise. The first version read the transcript and asserted
+`auth_attempts == 0` -- and `.loop52/` is not cleaned between runs, so it read a
+file left by a *previous* run and reported an authentication attempt that never
+happened. A failure with no cause behind it is the worst kind to chase, and it
+took an isolated run of `kh_forget` (which showed no connection, and no file at
+all) to see that the client was right and the gate was not. The scratch directory
+is now wiped at startup for the same reason, so the property holds on the first
+run and not just the hundredth. **Step 4a passes `kh_tofu` as well, and that combination took four attempts to
+find.** Removing `kh_forget`'s `return` -- the obvious mutation -- turns out to
+be *safe*: the pin has just been forgotten, so the connection that follows reads
+an empty store and is refused anyway. The mutation also has to remove the
+`wt_finish` **call**, because the harness takes "finished" from that call: with
+the signal still there the mode announced completion before performing the
+authentication it was supposed to perform, and the gate correctly read a clean
+forget. A mutation that produces the right answer for a reason that has nothing
+to do with the mutation is indistinguishable, from the outside, from a gate with
+a hole. So 4a asks for both `kh_forget` and `kh_tofu` and asserts that neither
+credential leaves nor any authentication is attempted.
+
+**Sharing the context cost a real regression, and that is the interesting part.**
+Making storage survive meant `openPage` had to stop using `browser.newPage()`,
+which opens a fresh *context* every call. The first regression run then failed
+**Loop #48**, whose `unpinned` case had been relying on "a new context means a
+clean slate" -- and it failed by *authenticating*, because a pin left behind by an
+earlier case in the same run was still there. That is the worst way for this gate
+to fail: the case named "nothing is pinned" passed by being pinned.
+
+So `openPage` takes `{ freshStorage: true }`, and every gate that is not about
+storage persistence now asks for it explicitly. Only `verify_loop52` shares. The
+default stays shared so that a future gate testing persistence inherits the right
+behaviour rather than having to discover it, and the opt-out is one visible word
+at the call site. `verify_loop46` needed it for a second reason: it passes
+`kh_tofu`, and a leftover pin from an earlier case can change whether a fault
+vector is even reached -- which is the part that gate measures.
+
+**The gate asks the browser, not the client.** The first version of step 1
+asserted the `tofu: stored` line -- and mutation A *is* `let stored = true`. The
+self-report agreed with itself and passed, so a client that stored nothing would
+have been reported as having stored. The gate now reads the same IndexedDB from
+its own side, twice: that a pin exists, and that it carries the key the peer was
+shown. A pin filed under the right host with the wrong key would authenticate on
+the next connection only by luck, and "only by luck" is exactly what TOFU is.
+
+Writing that check immediately failed for the wrong reason: the first version
+looked up the bare host name, while `src/khstore` files pins under
+`moonbit.ssh.known_hosts/<host>`. Step 2 was *passing* throughout, which is what
+said the pin was really there and the lookup was wrong -- two checks that
+disagree is a signal worth reading before believing either. The key is now
+duplicated into the gate **on purpose**: if `storage_key` ever changes, the
+lookup returns null and step 1 fails loudly instead of quietly agreeing with a
+store that moved.
+
+**Four failed mutations, and the fourth one is the lesson.** Getting C to mean
+"kh_forget forgets and then carries on" took four attempts, each failing in a way
+that looked like a different problem:
+
+1. the anchor spelled out a Chinese comment, which drifts when someone edits it;
+2. the anchor shrank to `wt_finish(true, "done")\n    return` -- which appears
+   **five times** in `main.mbt`, because every mode ends the same way. So
+   `str.replace` rewrote all five and the mutation silently became "every mode
+   carries on". At the one path the gate measures, behaviour was unchanged, so it
+   reported **MISSED** -- pointing at the gate;
+3. a one-line anchor plus an inserted statement, which changes no control flow at
+   all, so the `return` was still there;
+4. removing the `return` but keeping `wt_finish(true, "done")` -- the subtle one.
+   The harness takes "finished" from that call, so the mode announced completion
+   **before** the authentication it was supposed to perform, and the gate
+   correctly read a clean forget.
+
+The fourth is worth keeping. **A mutation that produces the right answer for a
+reason that has nothing to do with the mutation is indistinguishable, from the
+outside, from a gate with a hole** -- nothing in `MISSED` says which it was.
+
+Every one of these produces a confident verdict about a mutation that was not the
+one described. All four mutation drivers now assert `src.count(frm) == 1` and
+report **NOBUILD** otherwise -- nothing was proven, and MISSED would be a lie.
+
+**Adding a status line is a protocol change, and it broke two gates downstream.**
+Loop #52 inserts `tofu: stored` / `tofu: NOT stored` between the existing
+`tofu: accepted-unpinned` and the entry itself. `verify_loop49` and
+`verify_loop50` both parse that output to recover the written line, and both had
+their own filter listing only the one marker they knew about -- so each silently
+picked up `stored` as if it were a known_hosts line. Same failure both times: a
+byte-for-byte comparison between transports reporting a mismatch, and a
+reconnect refused because the "line" was the word `stored`.
+
+Two gates, one cause, found twice, which is what it costs for a parsed protocol to
+have a marker list living in two places. It now lives in **one**
+(`host/tofu_transcript.mjs`), used by all three gates, and it recognises the entry
+**structurally** as well -- a `known_hosts` line has at least two
+whitespace-separated fields, and no status line does. So a future status line
+breaks the parse only if somebody forgets a file that already has a fallback.
+
+The general rule: a driver and a gate are two independent implementations of "what
+this output means", and neither is documentation for the other.
+
+**Browser gates do not run concurrently with anything.** Every one of them
+launches Chromium, a static server, and a WebSocket bridge, and they pick ports
+with `freePort()`. Two at once produce failures that read like protocol bugs --
+`no outcome from the Worker`, `http=404` for the MoonBit module, `did not
+authenticate: ""` -- none of which says "two gates shared the machine". Discovered
+by running a mutation driver and a regression sweep at the same time during this
+loop and having to throw both sets of results away. Run them one at a time.
+
+**Verified:** `ALL PASS (9 checks)` on `verify_loop52`, and `loop52_mutations`
+reports `3 CAUGHT, 0 MISSED`. No regression on `verify_loop46` 53 / `47` 19 /
+`48` 15 / `49` 11 / `50` 13 / `51` 17.
+`verify_loop47` 19 / `48` 15 / `49` 11 / `50` 13 / `51` 17.
+
 ### Loop #51: `@cert-authority` is not a host key pin
 
 Loop #50 made refusing the default. This closes a hole that default made

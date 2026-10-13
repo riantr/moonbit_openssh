@@ -55,6 +55,12 @@ import {
   sleep,
   wtCfg,
 } from "./wt_browser.mjs";
+import {
+  hasAcceptedUnpinned,
+  hasNotStored,
+  hasStored,
+  tofuEntry,
+} from "./tofu_transcript.mjs";
 
 let chromium = null;
 try {
@@ -92,14 +98,15 @@ function classify(text) {
     authed: /^result: USERAUTH_SUCCESS$/m.test(n),
     error: err,
     leaf: leafOf(err),
-    // The write-back is two lines: a status, then the known_hosts text. Only the
-    // second is an entry, and picking the first match on the status would feed
-    // "accepted-unpinned" to --known-hosts-text -- which parses to zero entries
-    // and fails with a message that points at the parser instead of at the bug.
-    tofuLine: (n.match(/^tofu: (.+)$/gm) || [])
-      .map((l) => l.slice("tofu: ".length))
-      .find((l) => l !== "accepted-unpinned") || null,
-    tofuAccepted: /^tofu: accepted-unpinned$/m.test(n),
+    // The write-back is a status line, then a storage line, then the known_hosts
+    // text. `tofuEntry` knows which is which -- see `host/tofu_transcript.mjs`,
+    // which exists because this filter and the one in `verify_loop49` were two
+    // copies of the same list and both broke the same way when Loop #52 added
+    // `tofu: stored`.
+    tofuLine: tofuEntry(n),
+    tofuAccepted: hasAcceptedUnpinned(n),
+    stored: hasStored(n),
+    notStored: hasNotStored(n),
   };
 }
 
@@ -170,7 +177,7 @@ async function startBridge(tcpPort) {
 async function runWorkerAuth(browser, httpPort, wsPort, tag, extraCfg) {
   const base = `http://127.0.0.1:${httpPort}`;
   const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", ...extraCfg });
-  const { page, state } = await openPage(browser, httpPort);
+  const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {
     out = await runWorker(page, cfg);

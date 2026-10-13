@@ -71,6 +71,20 @@ self.onmessage = function (e) {
     }
   }
 
+  // Loop #52: the known-hosts store shim. Optional on purpose -- the byte-stream
+  // shim above is enough for every mode that does not pin, and making this one
+  // mandatory would mean a storage failure showed up as "the harness is
+  // misconfigured" rather than as the client reporting that it could not store a
+  // pin, which is the answer that actually helps.
+  if (cfg.khsShimUrl) {
+    try {
+      importScripts(cfg.khsShimUrl);
+    } catch (err) {
+      finish({ ok: false, error: 'khs shim import failed: ' + describe(err) });
+      return;
+    }
+  }
+
   if (!cfg.moduleUrl) {
     finish({ ok: false, error: 'no moduleUrl in config' });
     return;

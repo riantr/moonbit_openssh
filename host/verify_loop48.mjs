@@ -176,7 +176,14 @@ async function startBridge(tcpPort) {
 async function runWorkerAuth(browser, httpPort, wsPort, tag, extraCfg) {
   const base = `http://127.0.0.1:${httpPort}`;
   const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", ...extraCfg });
-  const { page, state } = await openPage(browser, httpPort);
+  // `freshStorage` because this gate's `unpinned` case is only meaningful
+  // against an empty store. Loop #52 made the store real and persistent, so
+  // sharing a browser context across pages would let an earlier case in this
+  // same run leave a pin behind -- and `unpinned` would then pass by
+  // *authenticating*, which is the opposite of what it asserts. The first
+  // regression run after #52 did exactly that, and nothing in the failure said
+  // "your isolation changed".
+  const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {
     out = await runWorker(page, cfg);

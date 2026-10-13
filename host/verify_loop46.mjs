@@ -214,7 +214,11 @@ async function runScenario(browser, httpPort, vector, chop) {
     kh_tofu: "1",
     kh_host: "127.0.0.1",
   });
-  const { page, state } = await openPage(browser, httpPort);
+  // `freshStorage` because this gate is about fault vectors, not pinning, and
+  // Loop #52 made the store real and persistent. Sharing a context would let a
+  // pin from an earlier case change whether a case even reaches the handshake --
+  // which is the part this gate is actually measuring.
+  const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   const pageErrors = state.pageErrors;
   const pageNet = state.net;
   let workerOut = { lines: [], done: false, ok: false };

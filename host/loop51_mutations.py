@@ -130,6 +130,19 @@ def main():
                 print("SKIP  %s -- anchor not found in %s" % (label, path))
                 counts["NOBUILD"] += 1
                 continue
+            # An anchor that appears more than once is worse than a missing one:
+            # `str.replace` rewrites *every* occurrence, so the mutation silently
+            # becomes a different mutation and then reports a confident verdict
+            # about it. Loop #52 lost three attempts to exactly this and called it
+            # MISSED, which pointed at the gate.
+            hits = src.count(frm)
+            if hits != 1:
+                print(
+                    "NOBUILD  %s -- anchor appears %d times in %s; replace would "
+                    "mutate more than intended" % (label, hits, path)
+                )
+                counts["NOBUILD"] += 1
+                continue
             write(path, src.replace(frm, to))
 
             proc = run_gate()

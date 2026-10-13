@@ -214,7 +214,7 @@ async function startBridge(tcpPort) {
 async function runWorker_(browser, httpPort, wsPort, tag) {
   const base = `http://127.0.0.1:${httpPort}`;
   const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", kh_tofu: "1", kh_host: "127.0.0.1" });
-  const { page, state } = await openPage(browser, httpPort);
+  const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {
     out = await runWorker(page, cfg);

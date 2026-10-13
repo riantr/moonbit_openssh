@@ -94,10 +94,20 @@ fn cfg_kh_host() -> String {
   if given == "" { "127.0.0.1" } else { given }
 }
 
-fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
-  let text = cfg("known_hosts")
+async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
+  let given = cfg("known_hosts")
+  let mut text = given
   let host = cfg_kh_host()
   let tofu = cfg("kh_tofu") == "1" || cfg("kh_tofu") == "true"
+  // Loop #52: 没显式给文本就去读存储。**显式给的优先**,包括显式给空串——因为
+  // 「我就是要这次不 pin」是一个正当的意图,和「我没配」不是一回事,而 Loop #50
+  // 刚把后者的默认值定成拒绝。
+  if given == "" {
+    text = @khstore.load(host)
+    if text != "" {
+      println("known_hosts: " + text.length().to_string() + " bytes from storage")
+    }
+  }
   if text == "" {
     // 和 `cmd/ssh_live` 一样:走一条真的 strict 路径而不是 `skip()`,让这个
     // 拒绝由固定规则本身产生,而不是一条绕过它的旁路。
@@ -105,7 +115,7 @@ fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   }
   let p = @knownhosts.KnownHostsPolicy::from_text(
     text,
-    cfg_kh_host(),
+    host,
     // 0 = 「端口从 kh_host 的 `[host]:port` 形式里读」,和 `cmd/ssh_live`
     // 的 `--kh-port` 缺省值一致。两条驱动的默认值必须相同,否则同一份
     // known_hosts 在两边会落到不同的条目上——而那种差异只有在连接失败时
@@ -126,20 +136,21 @@ fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   p
 }
 
-///|
-/// Loop #49 的写回,与 `cmd/ssh_live` 的 `kh_report_tofu` 是同一件事。
+///| Loop #52: 写回真正落到 localStorage,打印只是它的一份副本。
 ///
-/// 写的是**刚刚比过的那把 blob**(`r.session.handshake.hostkey_blob`),不是对端
-/// 自述的任何东西——后者等于「信任对端的自我陈述」,恰好把这一层要防的东西放了
-/// 进来。
+/// Loop #49/#50 的写回是**打印**的,门禁捕获那一行再手工喂回去。那对测试是够的,
+/// 对产品是零:浏览器里没人读 stdout,所以周二敲了 `--kh-tofu` 的用户,周三会发现
+/// pin 没了——而那正是 TOFU 要修、`accept-new` 不该留下的状态。
 ///
-/// 打印而不是落盘:浏览器里没有文件系统,而 `src/wt` 是 js-only(见 AGENTS.md
-/// Loop #48)。「长什么样」由 `src/knownhosts` 决定(两边同一串字节),「写到哪去」
-/// 由驱动决定——而浏览器应用的答案本来也不是 known_hosts 文件。
+/// 顺序是**先存后打**,不是二选一:存了才说「记住了」,否则用户会以为记住了。
+/// 存失败不改变这次连接的结果——连接本身是成功的,丢的只是以后那次不用再敲
+/// 开关的能力——但必须**说出来**,否则用户会带着「我已经 pin 了」的错觉离开。
+///
+/// 存的**内容**仍然由 `src/knownhosts` 决定,和原生侧同一串字节;这里只决定写到哪。
 ///
 /// **诚实的 TOFU,不是安全的 TOFU。** 第一次连接仍然 susceptible;OpenSSH 的
 /// `StrictHostKeyChecking=accept-new` 性质一模一样,差别只在于它明说了。
-fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
+async fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
   if cfg("kh_tofu") != "1" && cfg("kh_tofu") != "true" {
     return
   }
@@ -150,7 +161,22 @@ fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
     r.session.handshake.hostkey_type,
     r.session.handshake.hostkey_blob,
   )
-  println("tofu: accepted-unpinned")
+  let stored = @khstore.save(host, written)
+  if stored {
+    println("tofu: accepted-unpinned")
+    println("tofu: stored")
+  } else {
+    // Loop #52: 这一行是这个循环存在的理由。写不进去(隐私模式、配额满、被策略
+    // 禁掉)不是连接失败,而是「下次还得再敲一次」——不告诉用户的话,他会带着
+    // 「我已经 pin 了」的错觉离开,直到下一次连接又被拒。
+    println("tofu: accepted-unpinned")
+    println(
+      "tofu: NOT stored -- storage refused the write, so the next connection to " +
+      host + " will need kh_tofu again",
+    )
+  }
+  // 仍然打印这一行:它既是给门禁捕获的,也让用户在 DevTools 之外看得到自己
+  // pin 了什么。`src/knownhosts` 保证末尾有换行。
   println("tofu: " + written)
 }
 
@@ -723,6 +749,25 @@ fn wt_sftp_error_name(e : @wtlive.WtSftpError) -> String {
 }
 
 async fn main {
+  // Loop #52: forget a pin and stop, without connecting. This exists because a
+  // store you cannot clear is a store you cannot recover from when a key really
+  // does change, and `ssh-keygen -R` has no browser equivalent without one.
+  //
+  // It is deliberately *only* this: forgetting must not also accept whatever
+  // the peer presents next. Doing both in one step is how a "remove this pin"
+  // button turns into a silent accept, which is the same fail-open Loop #51
+  // just closed.
+  if cfg("kh_forget") == "1" || cfg("kh_forget") == "true" {
+    let host = cfg_kh_host()
+    @khstore.forget(host)
+    println("forget: " + host)
+    // 必须发完成信号。Worker harness 靠 `__wt_finish` 判定「跑完了」,而每个
+    // 模式都自己发——这一处一开始漏了,于是 `kh_forget` 打印了正确的一行然后
+    // 静默挂死,门禁只看到一个 timeout 和一段完整 transcript。那种失败读起来像
+    // 存储有问题,实际上什么都没发生。
+    wt_finish(true, "done")
+    return
+  }
   let url = cfg("url")
   // The Worker passes `session: 1` for the Loop #33 run. A config lookup
   // rather than argv, because a browser has no argv.

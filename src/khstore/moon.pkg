@@ -1,0 +1,47 @@
+import {
+  "moonbitlang/async/js_async",
+}
+
+///| Loop #52: where a TOFU write-back actually goes.
+///
+///|
+///
+/// Loops #49 and #50 left a gap that read as a decision and was really a
+/// deferral. The write-back was **printed**, and the gate captured the line and
+/// fed it back by hand. That is fine for a test and useless in the product: in a
+/// browser there is nobody to read stdout, so `--kh-tofu` on a second visit
+/// starts from nothing again. The pin is remembered for the length of one test
+/// run.
+///
+///|
+///
+/// The shape is the one `src/knownhosts/render.mbt` established -- "what a line
+/// looks like" lives in `src/knownhosts` and is shared by both transports; "where
+/// it goes" is the platform's business. What was missing is that the platform side
+/// had no implementation at all.
+///
+///|
+///
+/// **js target only, and deliberately not gated at the package level.** Same
+/// reasoning as `src/wt`: a `targets:` gate on the package would block downstream
+/// consumers, so the gating is per file. `store.mbt` uses `extern "js"`, which the
+/// wasm backends reject outright, so a wasm-wanting consumer fails loudly at its
+/// own compile rather than silently here.
+///
+///|
+///
+/// The extern bodies use the double-quoted IIFE form rather than `#| ... |#`. The
+/// compiler evaluates the right-hand side as a module constant, and the inline form
+/// leaked its own terminator into the emitted JavaScript and produced a SyntaxError
+/// at load time in the browser -- see `src/wt/ffi.mbt`, which found that the hard
+/// way.
+///
+///|
+///
+/// **Never throw.** Every failure is a value. A storage shim that raised would
+/// turn "the browser is in private mode" into a failed connection, which is the
+/// wrong failure for the wrong reason: the connection itself is fine, and the user
+/// loses the ability to pin for a session rather than losing the session.
+options(
+  targets: { "store.mbt": [ "js" ] },
+)

@@ -46,6 +46,10 @@ import {
   sleep,
   wtCfg,
 } from "./wt_browser.mjs";
+// One place knows what a `tofu:` status line is. This file had its own copy of
+// the filter, `verify_loop50` had another, and Loop #52 broke both at once by
+// adding two status lines. See `host/tofu_transcript.mjs`.
+import { hasAcceptedUnpinned, tofuEntry } from "./tofu_transcript.mjs";
 
 let chromium = null;
 try {
@@ -96,18 +100,8 @@ function classify(text) {
     // swallows the whole rest of the driver's output, which is every field
     // after the TOFU line, and then "both transports write the same line"
     // compares two transcripts.
-    written: (() => {
-      const re = /^tofu: (.+)$/gm;
-      let m;
-      while ((m = re.exec(n)) !== null) {
-        const candidate = m[1].trim();
-        if (candidate !== "accepted-unpinned") {
-          return candidate.replace(/\s+/g, " ");
-        }
-      }
-      return null;
-    })(),
-    tofu: /^tofu: accepted-unpinned$/m.test(n),
+    written: tofuEntry(n),
+    tofu: hasAcceptedUnpinned(n),
   };
 }
 
@@ -178,7 +172,7 @@ async function startBridge(tcpPort) {
 async function runWorkerAuth(browser, httpPort, wsPort, tag, extraCfg) {
   const base = `http://127.0.0.1:${httpPort}`;
   const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", ...extraCfg });
-  const { page, state } = await openPage(browser, httpPort);
+  const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {
     out = await runWorker(page, cfg);

@@ -141,8 +141,10 @@ function describeEvent(snap) {
 // One page per scenario: a Worker outlives the promise that started it, and on
 // a shared page the previous scenario's Worker is still attached when the next
 // one constructs its own -- so its late `onerror` resolves the new promise.
-export async function openPage(browser, httpPort) {
-  const page = await browser.newPage();
+export async function openPage(browser, httpPort, opts = {}) {
+  const page = opts.freshStorage
+    ? await newPageInFreshContext(browser)
+    : await newPageInSharedContext(browser);
   const state = { pageErrors: [], net: [] };
   page.on("pageerror", (e) => state.pageErrors.push(String(e)));
   page.on("response", (r) => {
@@ -153,6 +155,42 @@ export async function openPage(browser, httpPort) {
   );
   await page.goto(`http://127.0.0.1:${httpPort}/host/wt/probe.html`);
   return { page, state };
+}
+
+// A page that shares its browser's **context**, so origin-scoped storage
+// survives it.
+//
+// `browser.newPage()` opens a fresh context every call, and a fresh context has
+// its own IndexedDB -- so a pin written on one page is invisible to the next.
+// That is right for the pinning gates (Loop #48/49/51 wanted total isolation) and
+// wrong for Loop #52, whose entire claim is "this survives the page going away".
+// Getting that wrong produces a gate that reports a working store as a broken
+// one, so the distinction is deliberate rather than incidental.
+//
+// **`freshStorage: true` exists because sharing has a cost.** Once the store is
+// real and persistent, every gate that used to rely on "a new context means a
+// clean slate" silently inherits whatever the previous gate wrote. Loop #48's
+// `unpinned` case started passing for the wrong reason -- authenticated, because
+// Loop #52 had left a pin behind -- which is a worse failure than the one the
+// shared context was introduced to fix. A gate that wants isolation asks for it.
+const sharedContexts = new WeakMap();
+export async function newPageInSharedContext(browser) {
+  let ctx = sharedContexts.get(browser);
+  if (!ctx) {
+    ctx = await browser.newContext();
+    sharedContexts.set(browser, ctx);
+  }
+  return ctx.newPage();
+}
+
+const freshContexts = new WeakMap();
+export async function newPageInFreshContext(browser) {
+  let n = freshContexts.get(browser) || 0;
+  n += 1;
+  freshContexts.set(browser, n);
+  // A brand new context has no storage at all, which is exactly what
+  // "isolated" has to mean once there is something to isolate from.
+  return (await browser.newContext()).newPage();
 }
 
 // Drive one Worker. `cfg` is posted flat because `cfg()` in the MoonBit side
@@ -226,6 +264,12 @@ export function wtCfg(base, httpPort, wsPort, extra = {}) {
   return {
     workerUrl: `${base}/host/wt/worker.js`,
     shimUrl: `${base}/host/wt/moonbit_wt.js`,
+    // Loop #52: the known-hosts store's shim. It is a *separate* script rather
+    // than part of `moonbit_wt.js` because it answers a different question --
+    // "where did the pin go" rather than "give me bytes" -- and because a gate
+    // that wants to see storage fail should be able to load one without the
+    // other.
+    khsShimUrl: `${base}/host/wt/moonbit_khs.js`,
     moduleUrl: `${base}/_build/js/debug/build/cmd/wt_ssh/wt_ssh.js`,
     url: `ws://127.0.0.1:${wsPort}/ssh`,
     nonce: "wt",
