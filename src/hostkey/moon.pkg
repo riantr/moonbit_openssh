@@ -4,3 +4,11 @@ import {
   "openssh/openssh_moonbit/src/ecdsa",
   "openssh/openssh_moonbit/src/rsa",
 }
+
+// Loop #53: base64 只被测试固定件用到（证书 blob 以 base64 常量落盘，由
+// host/cert_gen_fixture.py 从真实 ssh-keygen 输出生成）。生产代码里没有
+// base64 调用，所以它属于 `wbtest` 段而不是主 `import` 段——留在主段里，
+// 每次构建都会报一条 unused_package 告警，而告警是会被静音的。
+import {
+  "moonbitlang/core/encoding/base64",
+} for "test"

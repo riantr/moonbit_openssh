@@ -65,7 +65,13 @@ pub(all) enum WtLiveError {
   /// client does not validate host certificates. Its own variant, and the same
   /// reason as the native side: reporting it as a mismatch would tell the user
   /// to rotate a key nobody forged, and then to reach for `--kh-tofu`.
-  HostkeyCertAuthority(String)
+  HostkeyCertAuthority(String, String)
+  /// Loop #53: 对端出示了一张主机证书，但这台主机没有任何 `@cert-authority` 条目。
+  ///
+  /// 与 `HostkeyCertAuthority` 分开的理由和原生侧一样：一个是「配了信任锚但不认
+  /// 这张证书」，一个是「压根没配信任锚」。都拒绝，但用户该做的事完全不同。
+  /// `--kh-tofu` 不覆盖它。
+  HostkeyCertUntrusted(String)
   NewkeysSendFailed
   NoNewkeys
   /// 一整段字节读回来了,但它不是一个合法的包。
@@ -353,7 +359,9 @@ async fn wt_handshake_into(
     return Failed(NoServerIdent)
   }
   // ---- 2. KEXINIT ----
-  let my = @sshclient.live_proposal()
+  // Loop #53: 只有这台主机配了 `@cert-authority` 才报出主机证书算法，
+  // 和原生侧用同一个判定。
+  let my = @sshclient.live_proposal_with_certs(kh.has_ca_anchor())
   let ic_payload = @kexflow.kexinit_payload(@sshclient.fixed_cookie(), my)
   if !wt_send_plain_packet(
       conn,
@@ -473,16 +481,22 @@ async fn wt_handshake_into(
     k_wire,
   )
   // ---- 7. host key verification ----
-  let key = match @hostkey.HostKey::from_blob(ks) {
-    @hostkey.Parsed(k) => k
-    _ => return Failed(HostkeyInvalid)
+  //
+  // Loop #53: K_S 可能是一张证书，而握手签名是**内层**那把钥匙签的。两条路径共用
+  // `presented_key` 这一份规则（连同 RFC 8332 的配对判定），和 src/sshclient 是
+  // 同一个函数——证书路径最容易出的错就是两边各写一份然后只改了一边。
+  let presented = match @hostkey.presented_key(ks, neg.hostkey_alg) {
+    @hostkey.PresentedResult::Bad(_) => return Failed(HostkeyInvalid)
+    @hostkey.PresentedResult::Ready(p) => p
   }
-  // 规则在 src/hostkey(`agrees_with_alg`),和 src/sshclient 的握手用的是同一份。
-  if !@hostkey.HostKey::agrees_with_alg(key, neg.hostkey_alg) {
-    return Failed(HostkeyInvalid)
-  }
+  let key = presented.key
   let (ktype, kbits) = @hostkey.HostKey::describe(key)
-  match @hostkey.HostKey::verify_with_alg(key, h, sig_blob, neg.hostkey_alg) {
+  match @hostkey.HostKey::verify_with_alg(
+    key,
+    h,
+    sig_blob,
+    presented.sig_alg,
+  ) {
     @hostkey.Accepted => ()
     _ => return Failed(SignatureInvalid(h))
   }
@@ -503,8 +517,10 @@ async fn wt_handshake_into(
     None => ()
     Some(@knownhosts.PinFailure::Mismatch(h)) => return Failed(HostkeyMismatch(h))
     Some(@knownhosts.PinFailure::Unknown(h)) => return Failed(HostkeyUnknown(h))
-    Some(@knownhosts.PinFailure::CertAuthority(h)) =>
-      return Failed(HostkeyCertAuthority(h))
+    Some(@knownhosts.PinFailure::CertAuthority(h, reason)) =>
+      return Failed(HostkeyCertAuthority(h, reason))
+    Some(@knownhosts.PinFailure::CertUntrusted(h)) =>
+      return Failed(HostkeyCertUntrusted(h))
     Some(@knownhosts.PinFailure::InvalidEntry) => return Failed(HostkeyInvalid)
   }
   // ---- 8. NEWKEYS ----

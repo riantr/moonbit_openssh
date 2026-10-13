@@ -1265,6 +1265,173 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #53: `@cert-authority` becomes a real trust anchor
+
+Loop #51 turned the fail-*open* off and stopped there: a `@cert-authority` line
+was parsed, noticed, and refused, but nothing was ever verified against it. That
+is the right answer for a client that cannot verify certificates -- and it makes
+the standard deployment impossible. Puppet, Chef and Ansible all ship SSH host
+certificates signed by a CA; a client that refuses every certificate is a client
+that cannot be pointed at a fleet those tools manage.
+
+So this loop makes the CA entry the thing it is named after: a **trust anchor**.
+The certificate is accepted when the pinned CA signed it, it is inside its
+validity window, and it names this host.
+
+**The hard part was not the cryptography -- it was four facts about the blob that
+I had wrong, and all four fail silently.**
+
+| what I would have written from memory | what the bytes say |
+|---|---|
+| `cert type`: 1 = host, 2 = user | **`USER = 1`, `HOST = 2`** |
+| inner key field carries its type name | **bare public key material**, no type name (32 bytes for ed25519) |
+| `principals` is a comma-separated ASCII list | **one string**, holding length-prefixed substrings back to back (`00 00 00 10 host.example.com`) |
+| `signed_data` = `nonce..reserved` (192 bytes) | **`blob[0 : len - 4 - len(sig)]`** (247 bytes), including the type name *and* the signature-key field |
+
+Getting the type constants backwards does not "support one more certificate" --
+it treats a certificate issued **to alice** as proof of a **host's** identity. The
+two have different principal semantics and a different meaning entirely. The
+values here came from signing one certificate with and without `ssh-keygen -h`,
+reading the type field out of the blob, and cross-checking against what
+`ssh-keygen -L` prints.
+
+**The `signed_data` one is the reason this loop needed an independent oracle.**
+The 192-byte reading is off by 55 bytes, and an ed25519 verifier given the wrong
+message does not raise -- it returns "invalid signature". Every self-made vector
+would therefore have been checked by a *broken* verifier and come out red for the
+right-looking reason, or, once the fixture was signed by the same broken
+implementation, come out green. The fixtures cannot catch it, because the
+fixtures and the verifier would share the same mistake.
+
+So `host/cert_signed_data_oracle.mjs` does not trust the layout: it takes the
+blob's **every contiguous slice** and asks OpenSSL whether any of them verifies.
+Exactly one does, and it is the 247-byte one. The oracle self-checks against a
+self-signed vector before it will say anything (`host/cert_oracle_selfcheck.mjs`)
+-- an oracle that is itself unverified is how a wrong answer gets promoted to a
+spec.
+
+**The signature check runs before every semantic check.** Every field in the
+certificate is attacker-supplied until the CA signature verifies, so reading
+`cert_type` first is feeding peer bytes into a branch. Written as a
+non-negotiable rule with the reason next to it, because reordering it "for a
+better error message" breaks nothing that any test would catch: each individual
+check stays green.
+
+**Six conditions, and `--kh-tofu` is not an exception to any of them.** There is
+no case where a certificate is accepted without a pinned CA. A certificate with
+no local anchor is indistinguishable from one a man in the middle invented, and
+TOFU cannot help: there is no single key to remember, there is a CA to trust.
+
+**Direct pins still beat CA entries, certificates included.** A known_hosts with
+both a direct pin and a CA anchor, presented with a valid certificate, is a
+`Mismatch` -- not "certificates are unsupported". Loop #51's priority rule
+exists so a genuine key change is not laundered into an unimplemented-feature
+error.
+
+**`CertAuthority` and `CertUntrusted` are different failures with opposite
+remedies.** The first means "an anchor is configured and this certificate does
+not match it" (re-sign, or the CA changed). The second means "no anchor exists
+at all" (add one line). Both refuse; telling the user to go hunting for a man in
+the middle when the fix is one config line is the wrong answer either way. This
+is also why `PinVerdict::CertAuthority` was renamed to `CertRejected(String)` --
+its meaning changed under Loop #51, and a same-named constructor in two enums
+does not compile.
+
+**The clock is injected, and the default is fail-closed.** `KnownHostsPolicy::now`
+defaults to `0`, which is "not yet valid" -- i.e. reject. The failure mode for
+forgetting to pass a clock is a refusal, never an acceptance. And it must be
+injected rather than read: the gate re-runs "an expired certificate must be
+refused" forever, and a wall clock would make that assertion permanently true
+after the day it was written. The drivers pass `@env.now() / 1000`; the unit was
+measured against Python's `time.time()`, not assumed. An extern `Date.now()`
+version was written first and deleted -- one less FFI boundary, and Loop #52 had
+already paid for the bugs on that boundary.
+
+**The certificate algorithm is advertised only when an anchor exists.** OpenSSH
+offers `ssh-ed25519-cert-v01@openssh.com` unconditionally. Offering it
+unconditionally is not a security gain here, and it would move the KEXINIT
+baseline in `verify_loop41` / `verify_loop45` byte for byte. This is a
+deliberate deviation, marked as one in the source, so the next person to
+"complete" it reads the argument first.
+
+**The gate refuses for the right reason, and that is the assertion.** Two
+outcomes that look like failures are the *strong* outcomes: with no anchor
+configured, the client never offers the certificate algorithm, so the peer has
+nothing to negotiate and the handshake dies at **agreement** -- the client never
+reaches a pinning decision at all, let alone sends credentials. Asserting
+`HostkeyUnknown` there would demand the weaker behaviour and read a correct run
+as a failure. Each refusal additionally asserts the leaf name, that the hint
+names the actual remedy, that `auth_attempts == 0`, and that the peer really had
+a host key configured -- absent must never be read as zero.
+
+**Two of the awkward decisions are not guesses -- they are `hostfile.c`.**
+
+- **The CA is found by issuer, and the first match wins.** `hostfile.c:377`
+  handles `want_cert` by comparing `k->cert->signature_key` against each entry's
+  key and `break`ing on the first hit with the comment "A matching CA exists".
+  That is byte equality against the **issuer**, not last-match-wins, and it is
+  what `find_ca_entry` does. Last-match-wins is the rule for the *direct* key
+  path precisely because a bare key line is a claim about a host; a certificate
+  names exactly one issuer, so there is nothing to order.
+- **Revoking a CA kills every certificate it cut, host-scoped or not.**
+  `hostfile.c:321-330` sweeps every `MRK_REVOKE` entry globally and, for a
+  certificate, compares against `k->cert->signature_key` as well as the key
+  itself. The `revoked-ca` case in the gate exists because that second
+  comparison is easy to leave out, and leaving it out means a revoked CA keeps
+  working forever.
+
+**An untested half, recorded rather than glossed.** `ssh-keygen` refuses to sign
+a certificate with no principals ("Empty principal name"), so the other half of
+"an empty principal list is valid for every principal" -- the accepting side --
+has no fixture. Only the parsing side of `parse_principals` is covered. A
+fixture minted by hand-rolling the signing would need a second implementation of
+certificate issuance, which is exactly the thing this loop avoided.
+
+**Four harness lessons, all of them failures that pointed somewhere else:**
+
+1. **A MITM serves exactly one connection** (`listen(1)`, a single `accept`). The
+   first version of the browser half reused the peer's the native client had just
+   consumed, so the browser run reported `NoServerIdent` -- a transport symptom
+   for a harness bug. Every transport now gets its own man in the middle.
+
+2. **Check that the man in the middle is alive.** `freePort()` closes a listener
+   and hands the number back, and the OS may give it to something else, or
+   paramiko may exit on it. Against a dead peer the transcript says nothing and
+   the client says `NoServerIdent`. Loop #52 already wrote this check; loop53
+   wrote a new `startMitm` and left it out, and then spent three hypotheses
+   ruling out the certificate code.
+
+3. **Browser gates must never run concurrently.** Each spawns Chromium, a static
+   server and a WS bridge. One gate's `moon clean` deleted another gate's
+   freshly built `_build` mid-run, and the result was a failure that read like a
+   protocol bug.
+
+4. **A gate that does not exit is a gate whose results cannot be attributed.**
+   `serve()` leaves an HTTP server listening and `chromium.launch()` leaves a
+   browser open; `openPage(..., { freshStorage: true })` opens a context per case
+   that outlives its page. The gate printed its verdict and then sat there
+   forever, so the shell never returned and an **orphaned gate from the previous
+   run stayed on the machine**, holding ports and racing the next one. That is
+   how two `verify_loop53.mjs` processes ended up writing the same
+   `.loop53/*.json` at once -- and one mutation verdict was read from a
+   transcript the other gate had overwritten. Closing the server, the browser
+   and each context dropped the runtime from over four minutes to 111 seconds as
+   well.
+
+The fourth lesson has a corollary worth stating on its own: **`task_stop` is not
+a substitute for a restore.** Killing the mutation runner mid-flight skipped its
+`finally`, leaving the tree mutated, and the next gate run faithfully reported
+the mutation as a failure. Nothing about that output was wrong -- it was a
+correct verdict about the wrong tree.
+
+**Verified:** `verify_loop53` `ALL PASS (26 checks)` -- 11 cases, each driven by
+both `cmd/ssh_live --auth` over TCP and `cmd/wt_ssh` in a browser Worker.
+`host/loop53_mutations.py` 3 CAUGHT / 0 MISSED / 0 NOBUILD / 0 CRASH.
+`moon test src/hostkey` 25/25, `moon test src/knownhosts` 49/49. No regression:
+`verify_loop41` 29 (the KEXINIT byte baseline, unmoved -- the conditional
+advertisement does its job), `verify_loop45` 51, `verify_loop46` 53,
+`verify_loop47` 19, `verify_loop52` 9.
+
 ### Loop #52: a pin that survives the page going away
 
 Loops #49/#50 made the *decision* right and the *rendering* right, and then

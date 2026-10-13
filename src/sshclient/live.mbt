@@ -89,7 +89,15 @@ pub(all) enum LiveError {
   /// investigated. This means the client cannot answer the question -- and
   /// reporting it as a mismatch teaches the user to reach for `--kh-tofu`, which
   /// is the opposite of the fix.
-  HostkeyCertAuthority(String)
+  HostkeyCertAuthority(String, String)
+  /// Loop #53: 出示了一张主机证书，但这台主机**没有**任何 `@cert-authority` 条目。
+  ///
+  /// 和 `HostkeyCertAuthority` 分开是因为处置完全不同：那是「你配了信任锚，但它
+  /// 不认这张证书」（该重签 / 该换 CA）；这一条是「你根本没配信任锚」（该加一行
+  /// `@cert-authority`）。两者都拒绝，但把它们合成一个错误名，用户就只能靠猜。
+  ///
+  /// `--kh-tofu` **不**覆盖这一条：学了它等于「信任此刻出示的任何证书」。
+  HostkeyCertUntrusted(String)
   NewkeysSendFailed
   NoNewkeys
   /// A packet arrived but could not be framed -- bad length, bad padding, or
@@ -265,10 +273,26 @@ pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
 const LIVE_HOSTKEY_ALGS : String =
   "ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384"
 
+///|
+/// Loop #53: 主机证书算法。**只有这台主机配了 `@cert-authority` 时才报出来**
+/// ——规则和理由见 `KnownHostsPolicy::has_ca_anchor`。
+const LIVE_HOSTKEY_ALGS_CERTS : String =
+  "ssh-ed25519-cert-v01@openssh.com," + LIVE_HOSTKEY_ALGS
+
 pub fn live_proposal() -> @kexflow.Proposal {
+  live_proposal_with_certs(false)
+}
+
+///|
+/// 带主机证书的提案
+pub fn live_proposal_with_certs(allow_certs : Bool) -> @kexflow.Proposal {
   {
     kex_algs: "diffie-hellman-group14-sha256",
-    hostkey_algs: LIVE_HOSTKEY_ALGS,
+    hostkey_algs: if allow_certs {
+      LIVE_HOSTKEY_ALGS_CERTS
+    } else {
+      LIVE_HOSTKEY_ALGS
+    },
     enc_ctos: "aes128-ctr",
     enc_stoc: "aes128-ctr",
     mac_ctos: "hmac-sha2-256",
@@ -573,7 +597,8 @@ fn handshake_to_session(
     return (Failed(NoServerIdent), None)
   }
   // ---- 2. KEXINIT ----
-  let my = live_proposal()
+  // Loop #53: 只有这台主机配了 `@cert-authority` 才报出主机证书算法。
+  let my = live_proposal_with_certs(kh.has_ca_anchor())
   let ic_payload = @kexflow.kexinit_payload(fixed_cookie(), my)
   if !send_packet(conn, counters, s, @sshwire.SSH_MSG_KEXINIT, ic_payload) {
     return (Failed(KexinitSendFailed), None)
@@ -695,19 +720,26 @@ fn handshake_to_session(
   // ---- 7. host key verification ----
   // Parse once: the key value is what both the type inspection and the
   // signature check need, and re-parsing would be wasted work.
-  let key = match @hostkey.HostKey::from_blob(ks) {
-    @hostkey.Parsed(k) => k
-    _ => return (Failed(HostkeyInvalid), None)
+  //
+  // Loop #53: K_S 可能是一张**证书**，而握手签名是**内层**那把钥匙签的。把两者
+  // 搞混会得到一个必然失败的验签——症状是「签名不对」，病因却是拿错了钥匙。
+  // `presented_key` 是这条规则的唯一实现（含 RFC 8332 的配对判定和「协商名必须
+  // 等于证书类型名」），和 `agrees_with_alg` 一样住在 src/hostkey 而不是这里。
+  let presented = match @hostkey.presented_key(ks, neg.hostkey_alg) {
+    @hostkey.PresentedResult::Bad(_) => return (Failed(HostkeyInvalid), None)
+    @hostkey.PresentedResult::Ready(p) => p
   }
-  // 「密钥类型和协商出的算法名配不配对」这条规则住在 src/hostkey
-  // (`agrees_with_alg`),不在这里抄一份:RFC 8332 让 ed25519/ECDSA 和 RSA
-  // 的答案不同,两份抄件迟早会漂。类型不配对报 HostkeyInvalid,签名本身
-  // 验不过报 SignatureInvalid——两者在协议上的后果相同,但诊断时完全不同。
-  if !@hostkey.HostKey::agrees_with_alg(key, neg.hostkey_alg) {
-    return (Failed(HostkeyInvalid), None)
-  }
+  let key = presented.key
+  // 「密钥类型和协商出的算法名配不配对」由 `presented_key` 内部做完了（类型不配对
+  // 报 TypeMismatch），这里只把它的结论翻译成本包自己的错误类型。签名本身验不过
+  // 报 SignatureInvalid——两者在协议上的后果相同，但诊断时完全不同。
   let (ktype, kbits) = @hostkey.HostKey::describe(key)
-  match @hostkey.HostKey::verify_with_alg(key, h, sig_blob, neg.hostkey_alg) {
+  match @hostkey.HostKey::verify_with_alg(
+    key,
+    h,
+    sig_blob,
+    presented.sig_alg,
+  ) {
     @hostkey.Accepted => ()
     _ => return (Failed(SignatureInvalid(h)), None)
   }
@@ -734,8 +766,10 @@ fn handshake_to_session(
     None => ()
     Some(@knownhosts.PinFailure::Mismatch(h)) => return (Failed(HostkeyMismatch(h)), None)
     Some(@knownhosts.PinFailure::Unknown(h)) => return (Failed(HostkeyUnknown(h)), None)
-    Some(@knownhosts.PinFailure::CertAuthority(h)) =>
-      return (Failed(HostkeyCertAuthority(h)), None)
+    Some(@knownhosts.PinFailure::CertAuthority(h, reason)) =>
+      return (Failed(HostkeyCertAuthority(h, reason)), None)
+    Some(@knownhosts.PinFailure::CertUntrusted(h)) =>
+      return (Failed(HostkeyCertUntrusted(h)), None)
     Some(@knownhosts.PinFailure::InvalidEntry) => return (Failed(HostkeyInvalid), None)
   }
   // ---- 8. NEWKEYS ----

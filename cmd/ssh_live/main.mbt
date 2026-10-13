@@ -49,7 +49,10 @@ fn live_error_name(e : @sshclient.LiveError) -> String {
     HostkeyUnknown(h) => "HostkeyUnknown"
     // Loop #51: 不叫 HostkeyMismatch,也不叫 HostkeyUnknown。前者会让人去查中间人
     // (没有),后者会让人去找一条直接条目(这个客户端给不了)。见 policy.mbt。
-    HostkeyCertAuthority(h) => "HostkeyCertAuthority"
+    HostkeyCertAuthority(h, r) => "HostkeyCertAuthority"
+    // Loop #53: 「压根没配信任锚」——加一行就解决，而把它报成上面任何一种都
+    // 会让人查错方向。
+    HostkeyCertUntrusted(h) => "HostkeyCertUntrusted"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
     BadPacket => "BadPacket"
@@ -98,12 +101,53 @@ fn print_pin_hint(e : @sshclient.AuthError) -> Unit {
     _ => return
   }
   match inner {
-    @sshclient.HostkeyCertAuthority(h) =>
+    @sshclient.HostkeyCertAuthority(host, reason) =>
+      // Loop #53: 载荷是 (主机名, 理由)。这几种的处置完全不同，所以提示必须按
+      // 理由给，不能给一句通用的话——而门禁断言的正是提示里提到了该提的那件事。
+      if reason == "no-certificate-expected" {
+        println(
+          "hint: " + host + " is pinned via a @cert-authority entry, but the " +
+          "server sent a plain key instead of a certificate. Pin the host key " +
+          "directly (ssh-keyscan -t ecdsa " + host + ") if that is what you want.",
+        )
+      } else if reason == "expired" || reason == "not-yet-valid" {
+        println(
+          "hint: the host certificate presented is outside its validity window " +
+          "(reason: " + reason + "). Check the clock on both ends, then re-issue " +
+          "the certificate on the server (ssh-keygen -s <ca> -h -I <id> " +
+          "-n " + host + ").",
+        )
+      } else if reason == "principal-mismatch" {
+        println(
+          "hint: the host certificate does not list " + host +
+          " among its principals. Issue one whose principal is the name you " +
+          "connect to, or connect by a name the certificate already covers.",
+        )
+      } else if reason == "ca-revoked" {
+        println(
+          "hint: the certificate was signed by a CA that appears in an @revoked " +
+          "entry. That is deliberate on this machine; remove the @revoked line if " +
+          "it is stale.",
+        )
+      } else if reason == "not-a-host-certificate" {
+        println(
+          "hint: the server sent a USER certificate. User certificates prove which " +
+          "user someone is, not which host they are talking to, and this client " +
+          "will never accept one as a host identity.",
+        )
+      } else {
+        println(
+          "hint: the host certificate did not validate (reason: " + reason +
+          "). --kh-tofu does NOT apply to certificates: a certificate without a " +
+          "pinned CA looks exactly like what a man in the middle would send.",
+        )
+      }
+    @sshclient.HostkeyCertUntrusted(h) =>
       println(
-        "hint: " + h + " is pinned via a @cert-authority entry, and this client does " +
-        "not validate host certificates. This is not a man in the middle: pin the " +
-        "host key directly (ssh-keyscan -t ecdsa " + h + "), or use --kh-tofu and " +
-        "know that the pin will break when the host renews its certificate.",
+        "hint: the server sent a host certificate signed by a CA that has no " +
+        "@cert-authority entry here for " + h + ". Add the CA's public key as " +
+        "@cert-authority " + h + " ssh-ed25519 <base64>, or connect to a host whose " +
+        "CA you already pin. --kh-tofu does not apply to certificates.",
       )
     @sshclient.HostkeyMismatch(h) =>
       println(
@@ -365,22 +409,37 @@ fn kh_host_name(argv : Array[String]) -> String {
 }
 
 ///|
+/// Loop #53: 当前 Unix 秒，给证书有效期判定用。
+///
+///| `@env.now()` 返回的是**毫秒**——量出来的，不是照文档抄的（见
+///| `cmd/wt_ssh/main.mbt` 的同名函数，两边的注释指向同一件事）。
+///| 猜错单位的后果很安静：比较差 1000 倍，有效期判定放行该拒的、拒掉该放的，
+///| 没有任何报错可以指过去。
+fn kh_now_seconds() -> UInt64 {
+  @env.now() / 1000UL
+}
+
+///|
 fn kh_policy(argv : Array[String], port : Int) -> @knownhosts.KnownHostsPolicy {
   let text = argv_value(argv, "--known-hosts-text")
   let host = kh_host_name(argv)
+  // Loop #53: 证书的有效期判定必须有真实时钟。`KnownHostsPolicy::now` 的缺省值是
+  // 0，刻意的 fail-closed——「忘了传时钟」必须表现为拒绝而不是「不检查就放行」。
+  let now = kh_now_seconds()
   // 默认 strict;accept-new 是那个需要明写的例外。
   let strict = !has_switch(argv, "--kh-tofu")
   if text == "" {
     // 什么都没给。strict 下的答案是拒绝,而且这个拒绝是由**固定规则本身**产生的:
     // 这个主机「没被固定过」。走一条真的 strict 路径而不是 `skip()`,这样拒绝
     // 走的是和「钉住的钥匙对不上」同一条代码,不会有一条例外路径悄悄绕过它。
-    return @knownhosts.KnownHostsPolicy::from_text("", host, 0, strict)
+    return @knownhosts.KnownHostsPolicy::from_text_at("", host, 0, strict, now)
   }
-  let p = @knownhosts.KnownHostsPolicy::from_text(
+  let p = @knownhosts.KnownHostsPolicy::from_text_at(
     text,
     host,
     parse_port_arg(argv_value(argv, "--kh-port"), 0),
     strict,
+    now,
   )
   // 「给了文本但一条都没解析出来」必须报错,不能安静地变成 skip。
   // `verify` 看到空条目就返回 Skip,而调用方「要求固定」和「忘了固定」在那一层

@@ -102,6 +102,29 @@ fn HkCursor::remaining(self : HkCursor) -> Int {
 }
 
 ///|
+/// 已消费的字节数。证书的 signed_data 就是「读到 reserved 为止」的切片长度,
+/// 所以这个偏移必须由游标自己报告,而不是在调用方重新推算一遍。
+fn HkCursor::offset(self : HkCursor) -> Int {
+  self.off
+}
+
+///|
+/// 取 u64(证书的 serial / valid_after / valid_before 是 64 位,不带符号)。
+/// 缓冲不足即 fail。
+fn HkCursor::get_u64(self : HkCursor) -> UInt64 {
+  if self.err is Some(_) {
+    return 0UL
+  }
+  if self.remaining() < 8 {
+    self.fail(InvalidFormat)
+    return 0UL
+  }
+  let v = read_u64hk(self.bytes, self.off)
+  self.off = self.off + 8
+  v
+}
+
+///|
 /// 取 u32 长度前缀的字节串(get_string 语义);不满足即 fail
 fn HkCursor::get_string(self : HkCursor) -> FixedArray[Byte] {
   let empty : FixedArray[Byte] = FixedArray::make(0, b'\x00')
@@ -191,12 +214,45 @@ fn HkCursor::get_bignum2(self : HkCursor) -> FixedArray[Byte] {
 }
 
 ///|
+/// 无条件前进 n 字节(调用方已确认缓冲足够)。
+fn HkCursor::skip(self : HkCursor, n : Int) -> Unit {
+  self.off = self.off + n
+}
+
+///|
 /// 大端读 u32
 fn read_u32hk(buf : FixedArray[Byte], off : Int) -> UInt {
   (buf[off].to_uint() << 24) |
   (buf[off + 1].to_uint() << 16) |
   (buf[off + 2].to_uint() << 8) |
   buf[off + 3].to_uint()
+}
+
+///|
+/// 大端读 u64
+fn read_u64hk(buf : FixedArray[Byte], off : Int) -> UInt64 {
+  let mut v = 0UL
+  let mut i = 0
+  while i < 8 {
+    v = (v << 8) | buf[off + i].to_uint64()
+    i = i + 1
+  }
+  v
+}
+
+///|
+/// 取 [from, to) 的拷贝。证书的 signed_data 就是这么切出来的。
+fn copy_range(
+  src : FixedArray[Byte],
+  from : Int,
+  to : Int,
+) -> FixedArray[Byte] {
+  let n = to - from
+  let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
+  for i = 0; i < n; i = i + 1 {
+    out[i] = src[from + i]
+  }
+  out
 }
 
 ///|

@@ -39,6 +39,21 @@ extern "js" fn cfg(name : String) -> String = "((n) => (globalThis.__wt_cfg && g
 /// the Worker cannot treat "importScripts returned" as completion.
 extern "js" fn wt_finish(ok : Bool, detail : String) -> Unit = "((ok, detail) => { globalThis.__wt_finish({ ok: ok, detail: detail }) })"
 
+///| Loop #53: 当前 Unix 秒，给证书有效期判定用
+///
+///| `@env.now()` 返回的是**毫秒**——这一点是量出来的（`.loop53/probe`，与 Python
+///| 的 `time.time()` 对拍：1791858899366 对 1791858899），不是照文档抄的。猜错
+///| 单位的后果很安静：所有比较差 1000 倍，有效期判定会放行该拒的、拒掉该放的，
+///| 而且没有任何报错可以指过去。
+///
+///| 曾经为它写过一个 `extern "js"` 的版本（Worker 里取 `Date.now()`）。删掉了：
+///| core 已经给了 `@env.now()`，而那条路要跨 FFI 边界，Loop #52 在那里踩过的坑
+///| （实现串里的字符串字面量、`null` 被判成 `Some(null)`）一个都省不掉。少一层
+///| FFI 比多一份注释值钱。
+fn cfg_now_seconds() -> UInt64 {
+  @env.now() / 1000UL
+}
+
 ///| One vector from `fault_vectors.mbt` -- the same generated table
 ///| `cmd/sftp_mitm` and `cmd/sftp_fault` carry. Three copies of one file is
 ///| why `host/verify_loop41.mjs` checks the tables agree.
@@ -99,6 +114,10 @@ async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   let mut text = given
   let host = cfg_kh_host()
   let tofu = cfg("kh_tofu") == "1" || cfg("kh_tofu") == "true"
+  // Loop #53: 证书的有效期判定必须有真实时钟，否则每一张证书都会被判成
+  // not-yet-valid 而拒绝。`KnownHostsPolicy::now` 的缺省值是 0，刻意的
+  // fail-closed；所以这里必须显式注入。
+  let now = cfg_now_seconds()
   // Loop #52: 没显式给文本就去读存储。**显式给的优先**,包括显式给空串——因为
   // 「我就是要这次不 pin」是一个正当的意图,和「我没配」不是一回事,而 Loop #50
   // 刚把后者的默认值定成拒绝。
@@ -111,9 +130,9 @@ async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   if text == "" {
     // 和 `cmd/ssh_live` 一样:走一条真的 strict 路径而不是 `skip()`,让这个
     // 拒绝由固定规则本身产生,而不是一条绕过它的旁路。
-    return @knownhosts.KnownHostsPolicy::from_text("", host, 0, !tofu)
+    return @knownhosts.KnownHostsPolicy::from_text_at("", host, 0, !tofu, now)
   }
-  let p = @knownhosts.KnownHostsPolicy::from_text(
+  let p = @knownhosts.KnownHostsPolicy::from_text_at(
     text,
     host,
     // 0 = 「端口从 kh_host 的 `[host]:port` 形式里读」,和 `cmd/ssh_live`
@@ -122,6 +141,7 @@ async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
     // 才显形。
     cfg_int("kh_port", 0),
     !tofu,
+    now,
   )
   // 「给了文本却一条都没解析出来」必须报错:它有「文件坏了」和「这个主机没被固定
   // 过」两种读法,而处置不同。放过去的话,一个空文件会被报告成后者,而真正的
@@ -210,7 +230,9 @@ fn error_name(e : @wtlive.WtLiveError) -> String {
     HostkeyMismatch(_) => "HostkeyMismatch"
     HostkeyUnknown(_) => "HostkeyUnknown"
     // Loop #51: 与原生路径同名同义,理由见 `cmd/ssh_live` 里同一处。
-    HostkeyCertAuthority(_) => "HostkeyCertAuthority"
+    HostkeyCertAuthority(_, _) => "HostkeyCertAuthority"
+    // Loop #53: 与原生路径同名同义。
+    HostkeyCertUntrusted(_) => "HostkeyCertUntrusted"
     NewkeysSendFailed => "NewkeysSendFailed"
     NoNewkeys => "NoNewkeys"
     BadPacket(w) => "BadPacket:" + w
@@ -258,12 +280,50 @@ fn print_pin_hint(e : @wtlive.WtAuthError) -> Unit {
     _ => return
   }
   match inner {
-    @wtlive.HostkeyCertAuthority(h) =>
+    @wtlive.HostkeyCertAuthority(host, reason) =>
+      // Loop #53: 载荷是 (主机名, 理由)。提示按理由分支，和 cmd/ssh_live 的那份
+      // 结构相同——两边给出不同的说法，用户就会以为其中一边在说谎。
+      if reason == "no-certificate-expected" {
+        println(
+          "hint: " + host + " is pinned via a @cert-authority entry, but the " +
+          "server sent a plain key instead of a certificate. Pin the host key " +
+          "directly if that is what you want.",
+        )
+      } else if reason == "expired" || reason == "not-yet-valid" {
+        println(
+          "hint: the host certificate presented is outside its validity window " +
+          "(reason: " + reason + "). Check the clock on both ends, then re-issue " +
+          "the certificate on the server with principal " + host + ".",
+        )
+      } else if reason == "principal-mismatch" {
+        println(
+          "hint: the host certificate does not list " + host +
+          " among its principals. Issue one whose principal is the name you " +
+          "connect to.",
+        )
+      } else if reason == "ca-revoked" {
+        println(
+          "hint: the certificate was signed by a CA that appears in an @revoked " +
+          "entry. Remove the @revoked line if it is stale.",
+        )
+      } else if reason == "not-a-host-certificate" {
+        println(
+          "hint: the server sent a USER certificate. User certificates prove which " +
+          "user someone is, not which host they are talking to.",
+        )
+      } else {
+        println(
+          "hint: the host certificate did not validate (reason: " + reason +
+          "). kh_tofu does NOT apply to certificates: a certificate without a " +
+          "pinned CA looks exactly like what a man in the middle would send.",
+        )
+      }
+    @wtlive.HostkeyCertUntrusted(h) =>
       println(
-        "hint: " + h + " is pinned via a @cert-authority entry, and this client does " +
-        "not validate host certificates. This is not a man in the middle: pin the " +
-        "host key directly (ssh-keyscan -t ecdsa " + h + "), or use kh_tofu and " +
-        "know that the pin will break when the host renews its certificate.",
+        "hint: the server sent a host certificate signed by a CA that has no " +
+        "@cert-authority entry here for " + h + ". Add the CA's public key as " +
+        "@cert-authority " + h + " ssh-ed25519 <base64>. kh_tofu does not apply " +
+        "to certificates.",
       )
     @wtlive.HostkeyMismatch(h) =>
       println(

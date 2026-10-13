@@ -23,6 +23,12 @@ pub(all) struct KnownHostsPolicy {
   port : Int
   /// strict_kex:主机名压根没被固定过也算失败(TOFU 的拒绝侧)
   strict : Bool
+  /// Unix 秒。**证书路径必须有一个真实时钟**，所以它由调用方注入而不是在这里取。
+  ///
+  /// 没有它的话，有效期判定就没法做：要么读墙上时间（门禁不可重放，「过期证书
+  /// 必须被拒」写出来第二天就永远为真），要么假装过期（那等于关掉证书）。
+  /// 默认 0 是**刻意的 fail-closed**：把证书判成 not-yet-valid 而拒绝。
+  now : UInt64
 }
 
 ///|
@@ -32,7 +38,44 @@ pub fn KnownHostsPolicy::new(
   port : Int,
   strict : Bool,
 ) -> KnownHostsPolicy {
-  { entries, host_str, port, strict, }
+  { entries, host_str, port, strict, now: 0UL, }
+}
+
+///|
+/// 带显式时钟的构造函数。证书验证必须用真实时间，见 `now` 字段的说明。
+pub fn KnownHostsPolicy::at(
+  entries : Array[KnownHostEntry],
+  host_str : String,
+  port : Int,
+  strict : Bool,
+  now : UInt64,
+) -> KnownHostsPolicy {
+  { entries, host_str, port, strict, now, }
+}
+
+///| 这台主机是否被任何 `@cert-authority` 条目覆盖
+///
+///| 客户端据此决定要不要在 KEXINIT 里**报出**主机证书算法。规则是「有信任锚
+///| 才报」,不是 OpenSSH 的「无条件报、之后再拒」。
+///
+///| 理由有两条,一条是安全的:我们**永远**只认被 pin 的 CA(见 `CertUntrusted`),
+///| 所以在没有 CA 条目时报出证书算法只增加攻击面,对合法连接没有任何好处。
+///| 另一条是本仓库特有的:KEXINIT 的算法名列表是要和 OpenSSH/paramiko 抓包
+/// 逐字节对比的,无条件加名字会让那几道门禁的基线全部漂掉。
+///
+///| 这是一个**有意的偏差**,不是遗漏;注释写在这里就是为了下次有人「补全」它时
+/// 能先看见。
+pub fn KnownHostsPolicy::has_ca_anchor(self : KnownHostsPolicy) -> Bool {
+  let (host_only, port_from_str) = split_host_str(self.host_str)
+  let port_caller = if self.port == 0 {
+    match port_from_str {
+      Some(p) => p
+      None => 22
+    }
+  } else {
+    self.port
+  }
+  has_any_ca_entry(self.entries, host_only, port_caller)
 }
 
 ///|
@@ -43,7 +86,7 @@ pub fn KnownHostsPolicy::new(
 /// 它必须走 `Unknown + 非 strict` 那条路,而不是一条只在特定配置下才生效的
 /// 旁路。旁路正是默认不安全的那类形状。
 pub fn KnownHostsPolicy::skip() -> KnownHostsPolicy {
-  { entries: [], host_str: "", port: 0, strict: false, }
+  { entries: [], host_str: "", port: 0, strict: false, now: 0UL, }
 }
 
 ///|
@@ -59,7 +102,19 @@ pub fn KnownHostsPolicy::from_text(
   port : Int,
   strict : Bool,
 ) -> KnownHostsPolicy {
-  { entries: parse_file(content), host_str, port, strict, }
+  { entries: parse_file(content), host_str, port, strict, now: 0UL, }
+}
+
+///|
+/// `from_text` + 显式时钟
+pub fn KnownHostsPolicy::from_text_at(
+  content : String,
+  host_str : String,
+  port : Int,
+  strict : Bool,
+  now : UInt64,
+) -> KnownHostsPolicy {
+  { entries: parse_file(content), host_str, port, strict, now, }
 }
 
 ///|
@@ -78,7 +133,16 @@ pub(all) enum PinVerdict {
   Accept
   Mismatch
   Unknown
-  CertAuthority
+  /// Loop #53: 这台主机的 `@cert-authority` 条目命中了，但证书没过验。
+  /// 字符串里是具体理由（`expired` / `principal-mismatch` /
+  /// `ca-signature-invalid` / `ca-revoked` ...）。
+  ///
+  /// Loop #51 时这个变体叫 `CertAuthority` 且不带载荷，含义是「我们不验证主机
+  /// 证书」。现在我们验证了，所以它改名为 `CertRejected` 并带上理由——两者对应
+  /// 完全不同的处置，必须能一眼分开。
+  CertRejected(String)
+  /// 出示了证书，但这台主机没有任何 `@cert-authority` 条目
+  CertUntrusted(String)
   InvalidEntry
 }
 
@@ -94,12 +158,57 @@ pub fn KnownHostsPolicy::verify(
   self : KnownHostsPolicy,
   presented_blob : FixedArray[Byte],
 ) -> PinVerdict {
+  // Loop #53: 出示的是一张证书就走证书路径。这里只**分流**，不做信任判断——
+  // 「像不像证书」只是读 blob 的第一个字符串，而真正的判断全在下面。
+  if @hostkey.looks_like_cert(presented_blob) {
+    return self.verify_cert(presented_blob)
+  }
   match check_host_key(self.entries, self.host_str, self.port, presented_blob) {
     Ok => Accept
     Mismatch => Mismatch
     Unknown => Unknown
-    CertAuthority => CertAuthority
+    CertAuthority => CertRejected("no-certificate-expected")
     InvalidEntry => InvalidEntry
+  }
+}
+
+///|
+/// 证书路径的判定（Loop #53）
+///
+///| 两条优先级规则在这里落地：
+///
+///| 1. **直接条目压过 CA 条目。** 这台主机既有 `@cert-authority` 又有一把裸钥匙的
+///|    直接 pin，而对端递了张证书过来 —— 报 `Mismatch`，不是 `CertAuthority`。
+///|    Loop #51 立这条规则是为了别把「钥匙真换了」洗成「我不支持证书」；证书只是
+///|    换了一种出示方式，不该成为绕过它的后门。
+///| 2. **证书必须找到自己那把 CA 才可能被认**，见 `CertUntrusted` 的说明。
+pub fn KnownHostsPolicy::verify_cert(
+  self : KnownHostsPolicy,
+  cert_blob : FixedArray[Byte],
+) -> PinVerdict {
+  let (host_only, port_from_str) = split_host_str(self.host_str)
+  let port_caller = if self.port == 0 {
+    match port_from_str {
+      Some(p) => p
+      None => 22
+    }
+  } else {
+    self.port
+  }
+  // 规则 1：直接 pin 存在时，证书不能顶替它。
+  if find_last_direct_match_v2(self.entries, host_only, port_caller) is Some(_) {
+    return Mismatch
+  }
+  match check_host_key_cert(
+    self.entries,
+    self.host_str,
+    self.port,
+    cert_blob,
+    self.now,
+  ) {
+    Trusted => Accept
+    CaRejected(reason) => CertRejected(reason)
+    NoCaEntry => CertUntrusted(self.host_str)
   }
 }
 
@@ -117,7 +226,17 @@ pub(all) enum PinFailure {
   /// 「这个客户端没实现证书验证」,该换工具或改配置。把后者报成前者,用户
   /// 照着 `HOST_CHANGED` 的标准流程走就会去加 `--kh-tofu`,而那正好是
   /// Loop #50 刚刚才让需要多敲一个字的选择。
-  CertAuthority(String)
+  CertAuthority(String, String)
+  /// Loop #53: 出示了一张证书，但这台主机**没有**任何 `@cert-authority` 条目。
+  ///
+  /// 和 `Unknown` 看起来相似（都是「没 pin 过」），但**处置相反**：`Unknown` 在
+  /// 非 strict 下会放行，这里在**任何**模式下都拒绝。因为 `Unknown` 的含义是
+  /// 「对端出示了一把裸钥匙，而我们没 pin 过它」——此时对端持有的东西就是全部的
+  /// 信任来源，宽松模式放行的是「一把没验证过的钥匙」；而证书的内层钥匙是由 CA
+  /// 背书的凭证，没有 CA 就没有任何信任来源，和 MITM 没有区别。
+  ///
+  /// `--kh-tofu` 也不开这个口子：它会把「学一张没被 pin 住的证书」变成事实。
+  CertUntrusted(String)
   InvalidEntry
 }
 
@@ -156,10 +275,13 @@ pub fn KnownHostsPolicy::decide(
         None
       }
     Mismatch => Some(Mismatch(self.host_str))
-    // 没有 strict 的例外:我们不验证证书,所以**任何**模式下都没有可接受的
-    // 主机密钥。`--kh-tofu` 也不开这个口子——那会把「用 CA pin 的」悄悄变成
-    // 「信任此刻出示的任何东西」,正是 Loop #51 关掉的那个降级。
-    CertAuthority => Some(CertAuthority(self.host_str))
+    // Loop #53 起这条不再是「我们不验证证书」——我们验证了，而且验不过。
+    // 字符串里是具体理由（expired / principal-mismatch / ca-signature-invalid
+    // ...），因为这几种的处置完全不同：补一个 CA 条目、重新签一张证书、
+    // 查 CA 私钥，各走各的路。
+    CertRejected(reason) => Some(CertAuthority(self.host_str, reason))
+    // 证书没有任何本地信任锚。没有 strict 的例外，也没有 TOFU 的例外。
+    CertUntrusted(host) => Some(CertUntrusted(host))
     InvalidEntry => Some(InvalidEntry)
   }
 }

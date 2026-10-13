@@ -54,6 +54,14 @@ fn entry_matches_spec(
 ///
 /// last-match-wins 保留在直接条目内部。一个主机上既有直接条目又有 CA 条目时,
 /// 拿直接条目说话:那才是「我们钉过这把钥匙,而它变了」,是真指控。
+///
+/// **Loop #53: `@revoked` 也不是直接条目。** 它是「把这把钥匙永久拒绝」,不是
+/// 「这把钥匙是这台主机的钥匙」。两者在 last-match-wins 里被当成同一种东西时,
+/// 一条排在后面的 `@revoked *` 会盖掉前面真正的 pin,于是这台主机被报成
+/// `Mismatch`。方向上是 fail-closed 所以不会漏,但报出来的原因是错的(「有人在
+/// 中间」而不是「你这把钥匙被吊销了」),而且 `ssh-keygen -R` 之后的正常连接会
+/// 无端失败。吊销的判定在 `check_host_key` 的第 2 步做一次全局扫,那才是它该待的
+/// 地方。
 fn find_last_direct_match_v2(
   entries : Array[KnownHostEntry],
   host_only : String,
@@ -62,7 +70,7 @@ fn find_last_direct_match_v2(
   let mut found : KnownHostEntry? = None
   for i = 0; i < entries.length(); i = i + 1 {
     let e = entries[i]
-    if e.marker != Marker::CertAuthority && entry_matches_spec(e, host_only, port_caller) {
+    if e.marker == Marker::None && entry_matches_spec(e, host_only, port_caller) {
       found = Some(e)
     }
   }

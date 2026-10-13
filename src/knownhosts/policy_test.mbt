@@ -38,7 +38,8 @@ fn decide_as(p : @knownhosts.KnownHostsPolicy, blob : FixedArray[Byte]) -> Strin
       match f {
         Mismatch(h) => "mismatch:" + h
         Unknown(h) => "unknown:" + h
-        CertAuthority(h) => "certauthority:" + h
+        CertAuthority(h, reason) => "certauthority:" + h + "/" + reason
+        CertUntrusted(h) => "certuntrusted:" + h
         InvalidEntry => "invalid"
       }
   }
@@ -154,7 +155,10 @@ test "a_cert_authority_entry_is_never_a_direct_pin" {
   let blob = blob_of(PIN_ED25519_B64)
   let line = "@cert-authority h.example ssh-ed25519 " + PIN_ED25519_B64
   let strict = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 0, true)
-  assert_eq(decide_as(strict, blob), "certauthority:h.example")
+  assert_eq(
+    decide_as(strict, blob),
+    "certauthority:h.example/no-certificate-expected",
+  )
 }
 
 test "a_cert_authority_entry_does_not_escape_under_tofu" {
@@ -166,7 +170,10 @@ test "a_cert_authority_entry_does_not_escape_under_tofu" {
   let blob = blob_of(PIN_ED25519_B64)
   let line = "@cert-authority h.example ssh-ed25519 " + PIN_ED25519_B64
   let tofu = @knownhosts.KnownHostsPolicy::from_text(line, "h.example", 0, false)
-  assert_eq(decide_as(tofu, blob), "certauthority:h.example")
+  assert_eq(
+    decide_as(tofu, blob),
+    "certauthority:h.example/no-certificate-expected",
+  )
 }
 
 test "a_cert_authority_entry_for_another_host_is_still_unknown" {
@@ -218,5 +225,192 @@ test "a_wildcard_cert_authority_entry_covers_the_host" {
   let blob = blob_of(PIN_ED25519_B64)
   let line = "@cert-authority *.example.com ssh-ed25519 " + PIN_ED25519_B64
   let p = @knownhosts.KnownHostsPolicy::from_text(line, "h.example.com", 0, true)
-  assert_eq(decide_as(p, blob), "certauthority:h.example.com")
+  assert_eq(
+    decide_as(p, blob),
+    "certauthority:h.example.com/no-certificate-expected",
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Loop #53: `@cert-authority` 变成一个真正能用的信任锚
+// ---------------------------------------------------------------------------
+//
+// 固定件来自 src/hostkey/cert_fixture.mbt（真实 ssh-keygen 证书），生成过程见
+// host/cert_gen_fixture.py。
+
+/// GOOD_CERT 的有效期正中
+const CERT_NOW : UInt64 = (@hostkey.GOOD_CERT_VALID_AFTER +
+  @hostkey.GOOD_CERT_VALID_BEFORE) / 2UL
+
+/// 一行「这台主机由这把 CA 担保」的 known_hosts
+fn ca_line(host : String, ca_b64 : String) -> String {
+  "@cert-authority " + host + " ssh-ed25519 " + ca_b64
+}
+
+/// 带时钟的策略
+fn policy_for(
+  line : String,
+  host : String,
+  strict : Bool,
+  now : UInt64,
+) -> @knownhosts.KnownHostsPolicy {
+  @knownhosts.KnownHostsPolicy::from_text_at(line, host, 0, strict, now)
+}
+
+test "a_valid_host_certificate_is_accepted" {
+  // 这一条是 Loop #53 的正例：Loop #51 时同一个场景报的是「我不支持证书」。
+  let p = policy_for(
+    ca_line("127.0.0.1", @hostkey.CA_PUB),
+    "127.0.0.1",
+    true,
+    CERT_NOW,
+  )
+  assert_eq(decide_as(p, blob_of(@hostkey.GOOD_CERT)), "allow")
+}
+
+test "a_certificate_only_behaves_like_this_when_strict_is_off" {
+  // 非 strict 下，**没有 CA 条目**时证书仍然被拒。这条与 `Unknown` 的宽松放行
+  // 正好相反，必须单独钉住：宽松模式放行的是「一把没验证过的裸钥匙」，而
+  // 一张没有本地信任锚的证书没有任何东西为它背书。
+  let p = policy_for(
+    ca_line("other.example", @hostkey.CA_PUB),
+    "127.0.0.1",
+    false,
+    CERT_NOW,
+  )
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.GOOD_CERT)),
+    "certuntrusted:127.0.0.1",
+  )
+  let tofu = policy_for(
+    ca_line("other.example", @hostkey.CA_PUB),
+    "127.0.0.1",
+    true,
+    CERT_NOW,
+  )
+  assert_eq(
+    decide_as(tofu, blob_of(@hostkey.GOOD_CERT)),
+    "certuntrusted:127.0.0.1",
+  )
+}
+
+test "a_certificate_from_an_unpinned_ca_is_untrusted" {
+  // 证书指名 rogue CA，而本机 pin 的是另一把 CA。这不是验签失败——rogue 证书
+  // 本身签名是好的——而是「这台主机没有你这个信任锚」。
+  let p = policy_for(
+    ca_line("127.0.0.1", @hostkey.CA_PUB),
+    "127.0.0.1",
+    true,
+    CERT_NOW,
+  )
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.ROGUE_CA_CERT)),
+    "certuntrusted:127.0.0.1",
+  )
+}
+
+test "an_expired_certificate_names_the_reason" {
+  // 理由要能一眼看出该干什么：补 CA 条目 / 重签证书 / 查 CA 私钥是三条不同的路。
+  let p = policy_for(
+    ca_line("127.0.0.1", @hostkey.CA_PUB),
+    "127.0.0.1",
+    true,
+    (@hostkey.GOOD_CERT_VALID_BEFORE + 1UL),
+  )
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.EXPIRED_CERT)),
+    "certauthority:127.0.0.1/expired",
+  )
+}
+
+test "a_certificate_for_another_principal_names_the_reason" {
+  let p = policy_for(
+    ca_line("127.0.0.1", @hostkey.CA_PUB),
+    "127.0.0.1",
+    true,
+    CERT_NOW,
+  )
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.OTHER_PRINCIPAL_CERT)),
+    "certauthority:127.0.0.1/principal-mismatch",
+  )
+}
+
+test "a_user_certificate_is_not_a_host_identity" {
+  let p = policy_for(
+    ca_line("alice", @hostkey.CA_PUB),
+    "alice",
+    true,
+    CERT_NOW,
+  )
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.USER_CERT)),
+    "certauthority:alice/not-a-host-certificate",
+  )
+}
+
+test "a_revoked_ca_stops_cutting_certificates" {
+  // 吊销检查的对象是**签发者**：CA 进了 @revoked，它签的一切证书就都不再可信。
+  let line = ca_line("127.0.0.1", @hostkey.CA_PUB) +
+    "\n@revoked * ssh-ed25519 " + @hostkey.CA_PUB
+  let p = policy_for(line, "127.0.0.1", true, CERT_NOW)
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.GOOD_CERT)),
+    "certauthority:127.0.0.1/ca-revoked",
+  )
+}
+
+test "a_direct_pin_outranks_a_ca_entry_even_for_certificates" {
+  // Loop #51 立过一条规则：直接条目压过 CA 条目，否则真换钥会被洗成
+  // 「不支持证书」。Loop #53 必须让这条规则对证书一样成立——证书只是换了一种
+  // 出示方式，不该成为绕过它的后门。
+  let line = "h.example ssh-ed25519 " + PIN_ED25519_B64 + "\n" +
+    ca_line("h.example", @hostkey.CA_PUB)
+  let p = policy_for(line, "h.example", true, CERT_NOW)
+  assert_eq(decide_as(p, blob_of(@hostkey.GOOD_CERT)), "mismatch:h.example")
+}
+
+test "a_certificate_is_not_learned_by_tofu" {
+  // `--kh-tofu` 会学一张没有信任锚的证书，那等于把「信任此刻出示的任何东西」
+  // 换了个说法重新装回来——Loop #51 关掉的正是这个降级。
+  let p = policy_for("", "127.0.0.1", false, CERT_NOW)
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.GOOD_CERT)),
+    "certuntrusted:127.0.0.1",
+  )
+}
+
+test "the_clock_is_injected_not_read" {
+  // 同一张证书、同一份 known_hosts，只有 now 不同。门禁要能反复跑「过期必须被
+  // 拒」，所以时钟必须由调用方给；这条同时证明 `now` 真的参与了判定。
+  let line = ca_line("127.0.0.1", @hostkey.CA_PUB)
+  let inside = policy_for(line, "127.0.0.1", true, CERT_NOW)
+  assert_eq(decide_as(inside, blob_of(@hostkey.GOOD_CERT)), "allow")
+  let after = policy_for(line, "127.0.0.1", true, (@hostkey.GOOD_CERT_VALID_BEFORE + 1UL))
+  assert_eq(
+    decide_as(after, blob_of(@hostkey.GOOD_CERT)),
+    "certauthority:127.0.0.1/expired",
+  )
+  let before = policy_for(line, "127.0.0.1", true, (@hostkey.GOOD_CERT_VALID_AFTER - 1UL))
+  assert_eq(
+    decide_as(before, blob_of(@hostkey.GOOD_CERT)),
+    "certauthority:127.0.0.1/not-yet-valid",
+  )
+}
+
+test "a_default_clock_refuses_instead_of_expiring_silently" {
+  // `now = 0`（没注入时钟）必须 fail-closed 成 not-yet-valid，而不是「不检查
+  // 有效期就放行」。把默认值选成宽松那一边，等于给「忘了传时钟」写了一个
+  // 默认放行的后门。
+  let line = ca_line("127.0.0.1", @hostkey.CA_PUB)
+  let p = @knownhosts.KnownHostsPolicy::from_text(
+    line,
+    "127.0.0.1",
+    0,
+    true,
+  )
+  assert_eq(
+    decide_as(p, blob_of(@hostkey.GOOD_CERT)),
+    "certauthority:127.0.0.1/not-yet-valid",
+  )
 }

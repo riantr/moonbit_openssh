@@ -159,6 +159,82 @@ class LyingHostKey:
         return self._signer.sign_ssh_data(data, None)
 
 
+def read_host_cert(spec):
+    """Resolve a `--host-cert` spec into (cert blob, inner private PEM, CA pub b64).
+
+    The spec is `<certfile>;<innerkey>;<ca.pub>` -- semicolons, **not** colons,
+    because on Windows every one of those three paths begins with a drive letter
+    and `split(":")` hands back four pieces. Getting that wrong is quiet: the
+    ValueError is raised before the transcript is populated, so the run leaves a
+    file that says `mode: host-cert` and nothing else -- which reads like a
+    certificate peer that simply never got going.
+
+    Three files rather than one because the certificate itself does not contain
+    the inner private key (it must not) and nothing in it names the CA in a form
+    this script can read without re-implementing a certificate parser on the MITM
+    side -- and the whole point of this mode is that the MITM adds no
+    cryptography of its own.
+    """
+    parts = spec.split(";")
+    if len(parts) != 3:
+        raise ValueError(
+            "--host-cert wants <cert.pub>;<inner.pem>;<ca.pub>, got %r" % (spec,)
+        )
+    cert_path, inner_path, ca_path = parts
+    with open(cert_path, "r", encoding="utf-8") as fh:
+        cert_b64 = fh.read().strip().split()[1]
+    with open(inner_path, "r", encoding="utf-8") as fh:
+        inner_pem = fh.read()
+    with open(ca_path, "r", encoding="utf-8") as fh:
+        ca_b64 = fh.read().strip().split()[1]
+    return base64.b64decode(cert_b64), inner_pem, ca_b64
+
+
+class CertifiedHostKey:
+    """Present a real OpenSSH host certificate, signed by the certified key.
+
+    paramiko 5.0 has no server-side host certificate support, but it does not
+    need any: `kex_group14.py` (and every other engine) build KEXDH_REPLY from a
+    single object -- `asbytes()` for the K_S blob and `sign_ssh_data()` for the
+    signature -- so one wrapper makes paramiko present a certificate and sign it
+    with the right key. **No cryptography of our own**: the certificate was
+    minted by `ssh-keygen -s`, the signature over the exchange hash is made by
+    paramiko's ed25519, and the CA signature was made by OpenSSH.
+
+    Two details the wrapper has to get right, both of which are properties of the
+    protocol rather than of paramiko:
+
+    * `get_name()` must report the *certificate* algorithm, because that string
+      is what the server puts in the negotiated-algorithm slot and what the
+      client compares against the certificate's own type name.
+    * `sign_ssh_data` must delegate to the **inner** key. The handshake
+      signature is made by the certified key, not by the CA. For ed25519
+      paramiko ignores the algorithm argument entirely and always writes
+      `ssh-ed25519` into the signature blob, which is exactly what the protocol
+      wants here -- so delegating is both correct and the reason we do not have
+      to hand-build the signature.
+    """
+
+    def __init__(self, inner, cert_blob):
+        self._inner = inner
+        self._cert_blob = cert_blob
+
+    def get_name(self):
+        return "ssh-ed25519-cert-v01@openssh.com"
+
+    def get_bits(self):
+        return self._inner.get_bits()
+
+    def asbytes(self):
+        return self._cert_blob
+
+    def sign_ssh_data(self, data, algorithm=None):
+        return self._inner.sign_ssh_data(data, None)
+
+    def sign_ssh(self, data):
+        return self._inner.sign_ssh_data(data, None)
+
+
 class SftpMisbehavingServer(paramiko.ServerInterface):
     """Authenticates everything, then answers the channel requests itself.
 
@@ -216,7 +292,7 @@ def chop(data, size):
 
 
 def serve_one(sock, scenario, chop_size, result, lie_hostkey=False,
-              lie_hostkey_type=None, host_key_pem=None):
+              lie_hostkey_type=None, host_key_pem=None, host_cert=None):
     """Run one connection to completion.
 
     paramiko's own threading means `accept` returns a live `Transport`-able
@@ -237,12 +313,36 @@ def serve_one(sock, scenario, chop_size, result, lie_hostkey=False,
         result["mode"] = "lie-hostkey-type"
     elif lie_hostkey:
         result["mode"] = "lie-hostkey"
+    elif host_cert:
+        result["mode"] = "host-cert"
     elif host_key_pem:
         result["mode"] = "chosen-host-key"
     else:
         result["mode"] = "sftp" if scenario is not None else "control"
 
-    if host_key_pem:
+    if host_cert:
+        # Loop #53. Both the certificate blob and the CA's public key go into
+        # the transcript: the gate builds its `@cert-authority` line from what
+        # the peer actually sent rather than from a file that can go stale
+        # without anything failing. A test that pins the CA it *believes* the
+        # server used would pass even if the peer signed with someone else.
+        #
+        # Wrapped because everything above this runs in the accept thread with
+        # no handler: an exception here kills the thread and still writes a
+        # transcript, and that transcript says `mode: host-cert` with no error in
+        # it -- indistinguishable from a peer that started and then stopped.
+        try:
+            cert_blob, inner_pem, ca_pub_b64 = read_host_cert(host_cert)
+            inner = paramiko.Ed25519Key.from_private_key(io.StringIO(inner_pem))
+        except Exception as exc:
+            result["error"] = "host-cert: %r" % (exc,)
+            return
+        result["hostkey_cert_b64"] = base64.b64encode(cert_blob).decode()
+        result["hostkey_ca_b64"] = ca_pub_b64
+        result["hostkey_inner_b64"] = base64.b64encode(inner.asbytes()).decode()
+        result["hostkey_announced_type"] = "ssh-ed25519-cert-v01@openssh.com"
+        t.add_server_key(CertifiedHostKey(inner, cert_blob))
+    elif host_key_pem:
         # A perfectly self-consistent key exchange with a key the client may
         # or may not have pinned. The transcript carries the fingerprint so
         # the gate can check the *only* thing that matters here: that what the
@@ -281,6 +381,12 @@ def serve_one(sock, scenario, chop_size, result, lie_hostkey=False,
     server = SftpMisbehavingServer(result)
     try:
         t.start_server(server=server, event=None)
+        # What the key exchange actually agreed on. Recorded separately from the
+        # configured key on purpose: a peer configured to present a certificate
+        # that never got to present one looks identical in every other field, and
+        # a gate that cannot tell those apart would read "the certificate was
+        # refused" into a run where the certificate was never offered.
+        result["hostkey_negotiated_type"] = getattr(t, "host_key_type", None)
         if lie_hostkey or lie_hostkey_type:
             # With a forged key exchange the client hangs up during the
             # handshake, so there is no channel and `accept` times out.
@@ -445,6 +551,15 @@ def main():
         metavar="PEM",
         help="present this specific key (signed correctly by itself)",
     )
+    ap.add_argument(
+        "--host-cert",
+        metavar="CERT:KEY:CA",
+        help=(
+            "present a real OpenSSH host certificate (CERT.pub), signing the "
+            "exchange hash with the certified key (KEY.pem); CA.pub is only "
+            "reported into the transcript so the gate can pin it"
+        ),
+    )
     args = ap.parse_args()
     lie_hostkey = args.lie_hostkey or bool(args.lie_hostkey_type)
 
@@ -480,7 +595,7 @@ def main():
             return
         holder["done"] = threading.Event()
         serve_one(conn, scenario, args.chop, result, lie_hostkey,
-                  args.lie_hostkey_type, args.host_key)
+                  args.lie_hostkey_type, args.host_key, args.host_cert)
         holder["done"].set()
 
     worker = threading.Thread(target=accept_one, daemon=True)
