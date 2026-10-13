@@ -1,0 +1,13 @@
+///| cmd/ed25519_kat -- Loop #55: export MoonBit Ed25519 vectors for comparison.
+///
+/// The KAT lives in `src/ed25519/*_wbtest.mbt` where `moon test` can reach it.
+/// A gate, however, cannot read another package's test output, and "the tests
+/// passed" is not a byte comparison -- it is a comparison against constants
+/// this repository also wrote. This program prints the same vectors in the
+/// Python reference's format so `verify_loop55.mjs` can compare them textually.
+import {
+  "openssh/openssh_moonbit/src/ed25519",
+  "openssh/openssh_moonbit/src/ecdsa",
+}
+
+pkgtype(kind: "executable")

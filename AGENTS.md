@@ -1265,6 +1265,135 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #55: a second pair of eyes, runnable
+
+`verify_c/` has held nine C harnesses and seven Python references since the
+early loops. Every one was run by hand and the result went into a document.
+**Nothing ran them again.** `scripts/compare_kat.mjs` exists and works; nothing
+invokes it. The nine `build_*.bat` scripts are named in `docs/` and nowhere
+else. A `git grep` for `build_ed25519` outside `verify_c/` hits only
+documentation.
+
+That is worth stating plainly because it is the same shape Loop #53 was written
+against: a fixture and a verifier sharing one mistake. Ed25519, AEAD and the
+binary packet layer are the three places where a wrong answer is **silent** -- a
+verifier that accepts a forged signature, an AEAD that accepts tampered
+ciphertext, a length prefix off by four -- and all three were being checked only
+against constants this repository also wrote.
+
+**What runs now.** `host/verify_loop55.mjs`, three seconds, and it compares
+*values* rather than counting lines:
+
+| side | what it is |
+|---|---|
+| MoonBit | `src/ed25519` via the new `cmd/ed25519_kat` |
+| C | OpenSSH's original `ed25519.c` (`verify_c/ed25519_harness.c`) |
+| Python | `cryptography`, libsodium/OpenSSL-backed (`verify_c/ed25519_python_ref.py`) |
+
+Each side prints the vectors in a different shape, so the gate parses each into
+a map keyed by vector name and compares `pk` and `sig` across all three. A
+shared text format would have been cosmetic and would have broken the first time
+one side's banner changed.
+
+**A published authority is not a second opinion, so all three are checked
+against each other as well as against RFC 8032.** Two implementations agreeing
+with a standard is evidence. Two implementations agreeing with each other
+because both were written from the same misreading is not, and nothing here can
+rule that out -- which is exactly why the malleability check is asserted
+separately instead of being folded into the byte comparison.
+
+**The negative cases are the load-bearing part, and getting them right took a
+mutation.** `s == L` (malleability), a tampered message and a wrong key change
+no positive vector at all. A verifier that accepts a malleable signature agrees
+with all three sides on every RFC 8032 vector and is still exploitable, so a
+gate that only compared the vectors would report ALL PASS.
+
+**The first mutation run proved the opposite of what was assumed here, and the
+harness was at fault.** `MISSED -- the gate still reported ALL PASS` for "disable
+the range check". The malleability vector was built with `s = L`, and L's top
+byte is `0xed`, so `sig[63] & 0xE0 != 0` rejected it at the **first** check --
+the range check was never reached. The test had been passing for a reason that
+had nothing to do with malleability.
+
+The real attack is `s + L`, not `L`: a second valid signature over the same
+message. `s + L < 2L < 2^253`, so its top byte is under `0x20` -- both the
+high-bits check and the S-range bit check pass, and the *only* thing that can
+reject it is the range check. That is the vector that tests the thing. It also
+carries its own self-check: if `s + L` overflowed 32 bytes it would have wrapped
+back into range and stopped being malleable, so the emitter prints the carry and
+the gate requires it to be clear. A test that quietly stops testing itself is
+worse than no test.
+
+The original signature is re-verified in the same block as the control. Without
+it, "the malleable one was rejected" could just mean `verify` rejects everything.
+
+**One mutation here turned out to be an equivalent mutant, and that is recorded
+as its own verdict rather than as `MISSED`.** Disabling `sc_is_in_range_bytes`
+does not change what this client accepts: `s + L` is still rejected. Asking
+Python settled why -- `cryptography`, which is OpenSSL/libsodium-backed and
+shares no code with this repository, **also rejects `s + L`** (`InvalidSignature`).
+So the rejection is a property of the format, not of one line here, and the range
+check is defence in depth rather than the sole guard.
+
+`MISSED` is an accusation and `EQUIVALENT` is a finding; conflating them makes
+both useless, which is why `loop55_mutations.py` grew a fifth verdict. The
+concrete claim is bounded and stated that way: **equivalent with respect to the
+vectors this gate tests.** A vector that separated them does not exist yet, and
+inventing one would mean hand-rolling a signature no other implementation
+accepts -- the thing Loop #53 twice declined to do.
+
+The mutation that *does* prove the negative cases are load-bearing is dropping
+the final `pack(P) == R` comparison instead. No positive vector changes; a
+forged signature becomes accepted, and the tampered-message, wrong-key and
+malleability checks are the only things that see it.
+
+**The C harness's own verdict is asked before anything is compared with it.**
+If the reference says FAIL, "MoonBit matched it" is not good news, and a gate
+that only compared values would print a cheerful match.
+
+**`build_ed25519.bat` had `%%` in a `REM` line**, so cmd expanded it and every
+run printed `'%' is not recognized` before the build. Harmless -- and it trained
+everyone to ignore noise in the output of the one script a gate shells out to.
+The script now also **deletes the previous `.exe` before building**: a stale
+binary that still passes is the Loop #47 failure exactly, one level down.
+
+**AEAD and bpacket are regressions only, and the gate says so.** Their C and
+Python sides use *independently generated* case sets -- `C1a` versus `S1a` --
+so there is nothing to line up and no shared vector file to compare against. The
+gate checks that both harnesses still build and pass, which catches a harness
+that stopped compiling, and says in its own header that this is not a substitute
+for a three-way comparison. Claiming more than that would be the kind of
+overclaim this loop exists to remove.
+
+**The gate's first run caught a bug in the gate.** The Python reference prints
+its RFC vectors and *then* a "Tampered Message Rejection" section that also has a
+`sig =` line; the parser kept `current = "Test 3"` and silently overwrote the
+signature, so the gate reported "Python disagrees with C and MoonBit" and pointed
+at the reference. It is now wrong twice over on purpose: a `=====` banner ends the
+section, and a key that already exists raises instead of overwriting. A parser
+that can silently replace a value it already has will, given any reference with
+more than one section, report a confident wrong answer -- which is the same shape
+as the bug the loop exists to catch, one level up.
+
+**`hx()` is written out again rather than shared with `src/aead`.** The two never
+parse the same input -- RFC 8032 constants here, RFC 8439 constants there -- so
+sharing a parser would make "both sides mis-read the same character" happen once
+instead of twice, which is the failure being hunted.
+
+**Verified:** `verify_loop55` `ALL PASS (17 checks)`, 3 seconds.
+`host/loop55_mutations.py` 3 CAUGHT / 0 MISSED / 0 NOBUILD / 0 CRASH, where the
+three mutations are "a signature bit is wrong" (caught by the comparison and by
+`moon test`), "s == L is accepted" (caught only by the negative case, which is
+the point), and "the MoonBit side prints nothing" (caught because a comparison
+with a missing side must fail rather than pass vacuously).
+`moon test src/ed25519` 23/23 unchanged.
+
+**What it does not retire.** Six of the nine harnesses -- hostkey, kexflow,
+knownhosts, kex, kex_c25519, and the SHA-2 / HMAC / poly1305 / x25519 ones --
+still run only by hand. Each needs a MoonBit-side emitter in its reference's
+format before it can be compared the way ed25519 now is, and that is one loop
+each.
+
 ### Loop #54: the pin that outlives the process
 
 Loop #52 made TOFU remember, in a browser. The native client kept **printing**
