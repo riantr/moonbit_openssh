@@ -1265,6 +1265,117 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #54: the pin that outlives the process
+
+Loop #52 made TOFU remember, in a browser. The native client kept **printing**
+the line: `--kh-tofu` produced text, a human copied it into `known_hosts`, and
+the pin lived exactly as long as the terminal they had open. That is the same
+defect Loop #52's own title names, on the other transport -- and after Loop #53
+it got worse, because the hint on a rejected certificate tells the user to add
+a `@cert-authority` line by hand while the tool that could write the file does
+not exist natively.
+
+**"This moon version has no file IO" was out of date.** Loop #48 wrote that and
+it was true then. `moonbitlang/async/fs` is in `.mooncakes` with a native stub
+(`stub.c`, `dir.c`, `watch_windows.c`) and the whole surface this needs: `exists`,
+`read_file`, `write_file`, `rename`, `remove`.
+
+**`write_file(append=true)` truncates unless you also change `create_mode`.**
+This is the footgun worth knowing about, and it is silent:
+
+```
+create_mode defaults to CreateOrTruncate
+append     defaults to false
+```
+
+Those two defaults are safe *together*. Pass `append=true` alone and the file is
+truncated and then one line is appended to nothing -- no error, no log, and the
+next connection reports the host as unpinned, which reads as "TOFU forgot
+again" wearing a completely different cause. `OpenOrCreate` is the mode that
+makes append mean append, and `store_test.mbt` asserts the *property* (existing
+entries survive) rather than the mechanism, so the test still holds if the
+implementation is rewritten.
+
+**Append, not read-modify-write.** Both preserve existing content, so the gate
+asserts the property and not the choice. Append is narrower: a read-modify-write
+can lose a concurrent writer's entry outright, while an append can only fail to
+add its own. There is no lock, and that is a decision rather than an omission --
+concurrent writers can still race, and it is written down instead of implied.
+
+**A torn append costs the line being added and nothing else, and that was
+checked rather than assumed.** `parse_file` skips a line it cannot parse, so a
+fragment is ignored rather than read as a wrong key -- the failure that would
+actually matter, because a half-written entry that *did* parse would report a
+mismatch against a host nobody changed.
+
+**The gate's isolation is a separate process, which is stronger than Loop
+#52's fresh page.** Nothing carries over between the two runs except the file on
+disk -- no module variable, no Worker, no open connection. "The client
+remembered" and "the client is still holding the first connection's state" are
+indistinguishable from inside one process; a new process makes them different
+facts.
+
+**What step 1 asserts past "a line appeared" is the part that is easy to get
+wrong.** The file already holds a comment, an unrelated direct entry and an
+`@revoked` line. A write-back that rewrites instead of appending destroys all
+three, and the *next* connection still authenticates on the new host -- so the
+damage stays invisible until the day somebody relies on a pin they already had.
+"Exactly one line added" does not catch it either: truncate-then-append also adds
+exactly one line. Only the three preservation assertions do.
+
+**Reading the file is a decision input, not just a write target**, so step 4
+pins a key that is *not* the presented one and requires `HostkeyMismatch` with
+zero authentication attempts. A `--kh-file` that was only ever written would pass
+every other step of this gate.
+
+**The write-failure case is its own step because the failure this shape invites
+is the exact one Loop #52 had to fix on the browser side**: print `accepted`,
+quietly drop the pin. And the notice has to separate two different failures --
+the credentials already went out, so the connection succeeded; what failed is
+the *remembering*. Reporting it as a connection failure tells the user something
+was refused, and reporting it as success tells them they are pinned.
+
+**`main` became async; nothing else did.** Reading a file is async, and
+`kh_policy` had six call sites each re-parsing `argv`. The fix is to resolve once
+in `main` and pass a `KhConfig` down, so the `run_*` functions stayed **sync**
+and each gained one parameter. The alternative -- making each caller async --
+would have put the read six times and reintroduced the read/write drift that
+`KhConfig` exists to remove. It also puts `--kh-file` resolution *after* the
+`--proposal` early return, so that path stays a pure offline dump.
+
+**`has_line` was extracted rather than written twice.** `append_line` already
+contained the "is this line already here" loop, and the file path needs the same
+predicate against different storage. `append_line` now goes through
+`to_line` + `has_line`, which also removes the inline field-order duplication
+its own comment complained about.
+
+**A read that fails forces strict on, and that is the only safe reading.**
+A user who cannot read their own trust anchors must never be accepted *because*
+they could not read them -- that translates "storage is broken" into "trust
+whatever is offered". `Missing` and `Unreadable` are separated in the transcript
+so the user learns their file has a problem, while the *trust decision* treats
+both as "no pin here" and refuses.
+
+**`src/khfile` does not depend on `src/knownhosts`, deliberately.** Row format
+belongs to the format layer and the dependency runs *that* way: the format
+package is used by the platform package, not the reverse. The first draft had
+`khfile` call `has_line` and it was removed -- one fewer edge that can drift.
+
+**Deleted `src/knownhosts_store`**, 19 lines of Loop #19 `extern "wasm"`
+scaffolding with zero importers. The repo-root `moon check --target native` is
+*still* red afterwards, but for a different and correct reason: `src/ws_socket`,
+`src/wt_socket` and the `cmd/wt_*` executables are js/wasm-only live packages.
+Per-package checking is the right granularity in a repository with per-target
+packages; a root-wide native check cannot be green here and chasing it would
+mean deleting working code.
+
+**Verified:** `verify_loop54` `ALL PASS (16 checks)` -- five steps, every one a
+separate `cmd/ssh_live` process against its own man in the middle.
+`host/loop54_mutations.py` 3 CAUGHT / 0 MISSED / 0 NOBUILD / 0 CRASH.
+`moon test src/khfile --target native` 8/8. No regression: `moon test
+src/knownhosts`, `verify_loop41` 29, `verify_loop47` 19, `verify_loop52` 9,
+`verify_loop53` 26.
+
 ### Loop #53: `@cert-authority` becomes a real trust anchor
 
 Loop #51 turned the fail-*open* off and stopped there: a `@cert-authority` line

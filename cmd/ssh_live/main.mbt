@@ -349,6 +349,32 @@ fn parse_port_arg(s : String, fallback : Int) -> Int {
 }
 
 ///|
+/// Loop #54:主机固定配置**解析一次**的结果
+///
+/// `kh_policy` 之前在 6 个调用点各被调一次,每个调用点自己 `argv_value` 一遍。
+/// 这个形状有两个问题,都不是这一轮引入的:
+///
+/// 1. 读侧和写侧**各自**重新解析一遍参数。两边问同一个问题的答案一旦不同,
+///    写回写进文件的和下一次读出来比对的就不是同一条,失败点在几天之后。
+/// 2. 加一个 `--kh-file` 就要读一次文件,而读文件是 async 的。6 个调用点
+///    各自 async 化会把整个 `main` 的 dispatch 一起拖成 async。
+///
+/// 改成在 `main` 里解析一次、把结果传下去,两个问题一起消失:文件只读一次,
+/// 而 `run_*` 全部保持同步(它们只是多收一个参数)。
+pub(all) struct KhConfig {
+  /// 判定用的策略。读侧唯一的输入。
+  policy : @knownhosts.KnownHostsPolicy
+  /// 要写回的 host field。判定和写回问同一个问题,答案在这里只有一个。
+  host : String
+  /// `--kh-file` 给的路径;空串 = 不落盘,退回打印。
+  file : String
+  /// 启动时读到的文本,用于写回前的重复判定。
+  text : String
+  /// 是否给了 `--kh-tofu`
+  tofu : Bool
+}
+
+///|
 /// Loop #49 的写回。只有在**真的接受之后**才做,而且只在「这个主机本来没被固定过」
 /// 时做——已经固定过的那把要么匹配(无事可做)要么已经被拒(拒绝之后不能把对端那把
 /// 记下来,那等于把一次劫持变成一次「已信任」)。
@@ -360,21 +386,53 @@ fn parse_port_arg(s : String, fallback : Int) -> Int {
 /// `StrictHostKeyChecking=accept-new` 有一模一样的性质,差别只在于它把这件事
 /// 明说了。所以这里也明说——门禁读 `tofu: accepted-unpinned` 这一行来判断这次
 /// 连接到底有没有凭据出去。
-fn kh_report_tofu(argv : Array[String], port : Int, r : @sshclient.AuthReport) -> Unit {
-  if has_switch(argv, "--kh-tofu") {
-    let host = kh_host_name(argv)
-    let existing = argv_value(argv, "--known-hosts-text")
+///
+/// Loop #54:给了 `--kh-file` 就**真的落盘**,不再只打印。写不进去必须是一个
+/// 看得见的失败:打印 `accepted-unpinned` 然后悄悄丢掉 pin,正是 Loop #52 在
+/// 浏览器侧刚消灭掉的 silent-accept 缺陷,换个平台不构成理由。
+async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
+  if !kh.tofu {
+    return
+  }
+  // 行格式由 src/knownhosts 决定,和浏览器那一侧同一串字节。写的是**刚刚比过
+  // 的那把 blob**,不是对端自述的任何东西——后者会变成一次「信任对端的自我
+  // 陈述」,恰好把这一层要防的东西放了进来。
+  let line = @knownhosts.KnownHostEntry::to_line(
+    kh.host,
+    r.session.handshake.hostkey_type,
+    r.session.handshake.hostkey_blob,
+  )
+  println("tofu: accepted-unpinned")
+  if kh.file == "" {
+    // 没有落盘目标:退回 Loop #49 的打印。整段内容都打出来,包括结尾换行,
+    // 门禁读这一行并落盘,再用写回来的那份重连。
     let written = @knownhosts.append_line(
-      existing,
-      host,
+      kh.text,
+      kh.host,
       r.session.handshake.hostkey_type,
       r.session.handshake.hostkey_blob,
     )
-    println("tofu: accepted-unpinned")
-    // 整段内容都打出来,包括结尾换行。`trim_end()` 给出的是 StringView,
-    // 而 StringView 不能拼进 String —— 与其做一次类型体操,不如让 `append_line`
-    // 保证末尾一定有换行(它本来就保证),这样直接打就行。
     println("tofu: " + written)
+    return
+  }
+  // 重复判定:写回是在「给了 --kh-tofu」时做的,不是只在「新钥匙被接受」时做的。
+  // 所以对一台已经钉住的主机再跑一次 TOFU 也会走到这里,没有这道判断文件就会
+  // 每次连接长出一行一模一样的条目。
+  if @knownhosts.has_line(kh.text, line) {
+    println("tofu: already in " + kh.file)
+    return
+  }
+  match @khfile.append_terminated(kh.file, line) {
+    @khfile.AppendResult::Appended => println("tofu: written to " + kh.file)
+    @khfile.AppendResult::Failed(why) => {
+      // **凭据已经出去了**,这次连接是成功的;失败的是「记住」。这两件事必须
+      // 分开说:报成连接失败会让用户以为拒绝了什么,报成成功会让用户以为记住了。
+      println(
+        "tofu: NOT written to " + kh.file + " (" + why + ") -- this connection " +
+        "was accepted, but the pin was not remembered and the next one to " +
+        kh.host + " will need --kh-tofu again",
+      )
+    }
   }
 }
 
@@ -420,27 +478,103 @@ fn kh_now_seconds() -> UInt64 {
 }
 
 ///|
-fn kh_policy(argv : Array[String], port : Int) -> @knownhosts.KnownHostsPolicy {
-  let text = argv_value(argv, "--known-hosts-text")
+/// Loop #54: 读一次 `--known-hosts-text` 或 `--kh-file`，建出判定与写回共用的配置。
+///
+///| **优先级与浏览器那一侧逐字相同**：显式给的 `--known-hosts-text` 优先，
+/// **包括显式给空串**——「我就是要这次不固定」是一个正当的意图，和「我没配」
+/// 不是一回事，而这个客户端的缺省（Loop #50）恰好是拒绝，所以这两者必须能分开。
+/// 没有显式文本才去读 `--kh-file`。
+///
+///| **读不出来必须说话。** 一个读不到自己信任锚的用户，不该在第二次连接时才发现，
+/// 而 discover 到的应该是「我读不到」而不是「这里没有条目」——后者在 strict 下
+/// 表现为拒绝，方向对，但理由是错的。
+async fn kh_resolve(argv : Array[String], port : Int) -> KhConfig {
   let host = kh_host_name(argv)
+  let file = argv_value(argv, "--kh-file")
+  let tofu = has_switch(argv, "--kh-tofu")
   // Loop #53: 证书的有效期判定必须有真实时钟。`KnownHostsPolicy::now` 的缺省值是
   // 0，刻意的 fail-closed——「忘了传时钟」必须表现为拒绝而不是「不检查就放行」。
   let now = kh_now_seconds()
+  let kh_port = parse_port_arg(argv_value(argv, "--kh-port"), 0)
   // 默认 strict;accept-new 是那个需要明写的例外。
-  let strict = !has_switch(argv, "--kh-tofu")
-  if text == "" {
+  let strict = !tofu
+  let given = argv_value(argv, "--known-hosts-text")
+  // 显式给了文本(哪怕是空串)就用它,不碰文件。
+  if given != "" || file == "" {
+    let p = kh_policy_from(
+      given,
+      host,
+      kh_port,
+      strict,
+      now,
+      "--known-hosts-text",
+    )
+    return { policy: p, host, file: if given != "" { "" } else { file }, text: given, tofu }
+  }
+  let loaded = @khfile.load(file)
+  let text = match loaded {
+    @khfile.LoadResult::Read(t) => t
+    @khfile.LoadResult::Missing => ""
+    @khfile.LoadResult::Unreadable(why) => {
+      // 不中止:连接本身是好的,坏的是「记住」的能力。strict 下这仍会拒绝,
+      // 而非 strict 下会放行——后者是危险的,所以下面把 strict 强制打开。
+      //
+      // 强制 strict 是这里唯一正确的答案。一个读不到自己信任锚的人**绝不该**
+      // 因为读不到而被放行:那等于把「存储坏了」翻译成「信任一切」。
+      println(
+        "known_hosts: cannot read " + file + " (" + why + ") -- pinning is forced " +
+        "on for this connection, because not being able to read your own trust " +
+        "anchors must never mean trusting whatever is offered",
+      )
+      let p = @knownhosts.KnownHostsPolicy::from_text_at(
+        "",
+        host,
+        kh_port,
+        true,
+        now,
+      )
+      return { policy: p, host, file, text: "", tofu }
+    }
+  }
+  println("known_hosts: " + text.length().to_string() + " bytes from " + file)
+  if text.length() == 0 {
+    // 文件在但是空的:这和「文件不存在」在**信任**上是同一件事(没被固定过),
+    // 但原因不同,所以说出来。一个空文件不报错,也不该报错——它是合法的
+    // known_hosts,只是里面还没有条目。
+    println("known_hosts: " + file + " is empty -- nothing is pinned here")
+    let p = @knownhosts.KnownHostsPolicy::from_text_at(
+      "",
+      host,
+      kh_port,
+      strict,
+      now,
+    )
+    return { policy: p, host, file, text, tofu }
+  }
+  let p = kh_policy_from(text, host, kh_port, strict, now, file)
+  { policy: p, host, file, text, tofu }
+}
+
+///|
+/// 建策略 + 那道「解析出 0 条就报错」的闸
+///
+///| `source` 只是给错误信息用的:用户要看到是哪个来源坏了,而不是「known_hosts
+/// 坏了」。两个调用点各写一遍这条闸,迟早有一处漏掉 `abort`。
+fn kh_policy_from(
+  text : String,
+  host : String,
+  kh_port : Int,
+  strict : Bool,
+  now : UInt64,
+  source : String,
+) -> @knownhosts.KnownHostsPolicy {
+  if text.length() == 0 {
     // 什么都没给。strict 下的答案是拒绝,而且这个拒绝是由**固定规则本身**产生的:
     // 这个主机「没被固定过」。走一条真的 strict 路径而不是 `skip()`,这样拒绝
     // 走的是和「钉住的钥匙对不上」同一条代码,不会有一条例外路径悄悄绕过它。
     return @knownhosts.KnownHostsPolicy::from_text_at("", host, 0, strict, now)
   }
-  let p = @knownhosts.KnownHostsPolicy::from_text_at(
-    text,
-    host,
-    parse_port_arg(argv_value(argv, "--kh-port"), 0),
-    strict,
-    now,
-  )
+  let p = @knownhosts.KnownHostsPolicy::from_text_at(text, host, kh_port, strict, now)
   // 「给了文本但一条都没解析出来」必须报错,不能安静地变成 skip。
   // `verify` 看到空条目就返回 Skip,而调用方「要求固定」和「忘了固定」在那一层
   // 完全一样——一个看起来跑过的检查比没跑过的检查更危险。
@@ -451,7 +585,7 @@ fn kh_policy(argv : Array[String], port : Int) -> @knownhosts.KnownHostsPolicy {
   // 理由,而真正的原因永远不会被看见。
   if p.entries.length() == 0 {
     println(
-      "known_hosts: --known-hosts-text 解析出 0 条 -- 拒绝继续,而不是把它读成" +
+      "known_hosts: " + source + " 解析出 0 条 -- 拒绝继续,而不是把它读成" +
       "「这个主机没被固定过」",
     )
     abort("known_hosts parsed to nothing")
@@ -502,6 +636,7 @@ fn run_exec(
   command : String,
   stdin_data : FixedArray[Byte],
   envs : Array[@sshclient.EnvVar],
+  kh : KhConfig,
 ) -> Unit {
   let user = find_user(@env.args())
   println("=== Loop #35 exec vs real sshd ===")
@@ -526,7 +661,7 @@ fn run_exec(
         command,
         stdin_data,
         envs,
-        kh_policy(@env.args(), port),
+        kh.policy,
       )
       conn.close()
       match outcome {
@@ -853,6 +988,7 @@ fn run_shell(
   cols : Int,
   rows : Int,
   resize : (Int, Int)?,
+  kh : KhConfig,
 ) -> Unit {
   let user = find_user(@env.args())
   println("=== Loop #36 interactive shell vs real sshd ===")
@@ -881,7 +1017,7 @@ fn run_shell(
         cols,
         rows,
         resize,
-        kh_policy(@env.args(), port),
+        kh.policy,
       )
       conn.close()
       match outcome {
@@ -1025,7 +1161,7 @@ fn split_at_last(spec : String) -> (String, Int) {
    parse_uint(spec.unsafe_substring(start=at + 1, end=spec.length())))
 }
 
-fn sftp_mode(argv : Array[String], port : Int) -> Bool {
+fn sftp_mode(argv : Array[String], port : Int, kh : KhConfig) -> Bool {
   let mut dir : String? = None
   // 可以给多次:`--sftp-read a --sftp-read b` 就是脚本里的两个 ReadFile。
   // 只保留最后一个的话,验证脚本就没法在一次会话里同时读小文件和大文件,而
@@ -1144,7 +1280,7 @@ fn sftp_mode(argv : Array[String], port : Int) -> Bool {
         test_auth_key(),
         subsystem,
         ops,
-        kh_policy(@env.args(), port),
+        kh.policy,
       )
       conn.close()
       print_sftp_outcome(outcome)
@@ -1252,7 +1388,13 @@ fn sftp_error_name(e : @sshclient.SftpError) -> String {
   }
 }
 
-fn main {
+///|
+/// Loop #54: `main` 现在是 async，因为读 `--kh-file` 是 async 的。
+///
+/// 只有 `main` 和 `kh_resolve` 是 async；`run_*` 全部保持**同步**，只是多收一个
+/// `KhConfig`。另一种做法是让每个 `run_*` 自己去解析，于是读文件的代价变成 6 次、
+/// 参数解析也变成 6 次，而且读侧和写侧各拿一份——那正是这个结构最初要消灭的漂移。
+async fn main {
   let argv = @env.args()
   // Loop #38: dump the proposal and exit, without opening a socket.
   //
@@ -1261,24 +1403,29 @@ fn main {
   // HostKeyAlgorithms to ECDSA, so an ECDSA-only proposal and a complete one
   // were indistinguishable from the outside. Asserting on the proposal string
   // is the only way a regression that silently narrows it can be caught.
+  //
+  // 这条路径在解析之前就返回,所以 `--kh-file` 的解析**不会**影响 `--proposal`
+  // 的输出——那是一个纯离线的 dump,读不读文件都该给出同一串字节。
   if proposal_flag(argv) {
     run_proposal()
     return
   }
   let port = find_port(argv)
-  if sftp_mode(argv, port) {
+  // 解析一次,之后读侧和写侧共用这一份。见 `KhConfig` 的说明。
+  let kh = kh_resolve(argv, port)
+  if sftp_mode(argv, port, kh) {
     return
   }
   let (shell_cmd, def_cols, def_rows, _) = shell_mode(argv)
   if shell_cmd != "" {
     let cols = int_flag(argv, "--cols", def_cols)
     let rows = int_flag(argv, "--rows", def_rows)
-    run_shell(port, shell_cmd, cols, rows, resize_flag(argv))
+    run_shell(port, shell_cmd, cols, rows, resize_flag(argv), kh)
     return
   }
   match exec_command(argv) {
     Some(cmd) => {
-      run_exec(port, cmd, stdin_bytes(argv), env_flags(argv))
+      run_exec(port, cmd, stdin_bytes(argv), env_flags(argv), kh)
       return
     }
     None => ()
@@ -1299,7 +1446,7 @@ fn main {
           fixed_x(),
           user,
           test_auth_key(),
-          kh_policy(@env.args(), port),
+          kh.policy,
         )
         conn.close()
         match outcome {
@@ -1316,7 +1463,7 @@ fn main {
             // js-only、浏览器里根本没有文件系统(见 AGENTS.md Loop #48)。所以
             // 「长什么样」由 `src/knownhosts` 决定(两边同一串字节),「写到哪去」
             // 由驱动决定。门禁捕获这一行并落盘,然后用写回来的那份重连。
-            kh_report_tofu(argv, port, r)
+            kh_report_tofu(kh, r)
             println("user: " + r.user)
             println("method: " + r.method)
             println("key_type: " + r.key_type)
@@ -1378,7 +1525,7 @@ fn main {
       }
       Some(conn) => {
         let outcome =
-          @sshclient.live_session(conn, fixed_x(), kh_policy(@env.args(), port))
+          @sshclient.live_session(conn, fixed_x(), kh.policy)
         conn.close()
         match outcome {
           @sshclient.ServiceAccepted(r) => {
@@ -1423,7 +1570,7 @@ fn main {
     }
     Some(conn) => {
       let outcome =
-        @sshclient.live_handshake(conn, fixed_x(), kh_policy(@env.args(), port))
+        @sshclient.live_handshake(conn, fixed_x(), kh.policy)
       conn.close()
       match outcome {
         @sshclient.Established(r) => {

@@ -1,9 +1,0 @@
-///| Known hosts store abstraction — host shim backed
-///|
-/// 同步 host shim 接口:MoonBit 端通过 extern wasm fn 调 host 提供的 store
-/// Loop #19 mock:浏览器 / Node.js 都用 JS Map<handle, {path, lines[]}>
-/// Loop #21+: 真 IndexedDB / SQLite
-import {
-}
-
-pkgtype(kind: "library")

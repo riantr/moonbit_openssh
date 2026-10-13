@@ -1,0 +1,56 @@
+import {
+  // `moonbitlang/async` is imported directly, not just through `fs`. An
+  // `async test` block expands to a driver that calls
+  // `@moonbitlang/async.run_async_main`, and a dependency's dependencies are not
+  // in scope -- so without this line every test in the package fails to compile
+  // with "Cannot use `async test`: package moonbitlang/async is not imported".
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+}
+
+///| Loop #54: where a TOFU write-back actually goes, natively.
+///
+///|
+///
+/// `src/khstore` is the same answer for a browser: the decision is shared, the
+/// destination is the platform's. Loop #52 built the browser half and left the
+/// native half printing the line, which is the failure mode Loop #52's own
+/// title names -- a pin that lives exactly as long as the test that made it.
+///
+///|
+///
+/// **This package knows nothing about what a known_hosts line looks like.**
+/// That is `src/knownhosts`'s business, shared by both transports. What lives
+/// here is bytes-to-a-file and the three ways that can go wrong: absent,
+/// unreadable, unwritable. Keeping the split sharp is what makes the same
+/// append usable from `cmd/ssh_live` and, later, from anything else.
+///
+///|
+///
+/// **`write_file(append=true)` truncates unless told otherwise, and that
+/// combination is silent.** `write_file`'s `create_mode` defaults to
+/// `CreateOrTruncate` while `append` defaults to `false`, and the two defaults
+/// are safe together. Pass `append=true` alone and the file is truncated *and
+/// then* written to -- the entire known_hosts is destroyed and the one line
+/// appended to it. Nothing raises; the next connection simply finds no pins.
+///
+///|
+///
+/// `OpenOrCreate` is the mode that makes append mean append: an existing file
+/// is opened without truncation, and a missing one is created. Every append in
+/// this package passes it explicitly, and the constant is named in the
+/// comment so the next reader does not "simplify" the argument away.
+///
+///|
+///
+/// **native target only**, gated per file for the reason `src/khstore` gives:
+/// a package-level `targets:` would block downstream consumers, so a
+/// wasm-wanting consumer fails loudly at its own compile instead of silently
+/// here. `moonbitlang/async/fs` has no wasm backend to link against.
+
+options(
+  targets: {
+    "store.mbt": [ "native" ],
+    "store_test.mbt": [ "native" ],
+  },
+)

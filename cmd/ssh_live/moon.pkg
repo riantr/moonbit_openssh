@@ -1,5 +1,9 @@
 import {
   "moonbitlang/core/env",
+  // Loop #54: 读 `--kh-file` 是 async 的,`main` 因此变成 async 而 `main` 的驱动
+  // 需要这个包本身(不是只经由 khfile/fs 传递)。
+  "moonbitlang/async",
+  "openssh/openssh_moonbit/src/khfile",
   "openssh/openssh_moonbit/src/tcp",
   "openssh/openssh_moonbit/src/sshclient",
   "openssh/openssh_moonbit/src/knownhosts",

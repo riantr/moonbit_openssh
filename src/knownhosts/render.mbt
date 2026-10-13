@@ -64,6 +64,25 @@ pub fn KnownHostEntry::render(self : KnownHostEntry) -> String {
 }
 
 ///|
+/// `existing` 里是不是已经有**逐字相同**的这一行（不含换行比较）。
+///
+/// Loop #54 把它提出来是因为两个调用点需要同一份判据：`append_line` 走文本，
+/// 原生侧的落盘走文件，而两处各写一遍「split + trim + 比较」迟早会有一处忘了
+/// 跳过空行和注释——而一份全是注释的 known_hosts 会让第一条真正的 TOFU 记录被
+/// 跳过，那正是第一次写回。
+///
+/// `line` 应当是 `to_line` 的产物（不带换行）。比较前两侧都 `trim`，所以传进来
+/// 带不带换行都判得对，但不带换行是这个函数的约定。
+pub fn has_line(existing : String, line : String) -> Bool {
+  for l in existing.split("\n") {
+    if l.trim() == line {
+      return true
+    }
+  }
+  false
+}
+
+///|
 /// 往一段 known_hosts 文本里**追加**一条,末尾补换行。
 ///
 /// 追加而不是覆盖:OpenSSH 的语义是 last-match-wins,新条目加在**后面**才会
@@ -78,17 +97,11 @@ pub fn append_line(
   key_type : String,
   blob : FixedArray[Byte],
 ) -> String {
-  // 走 `render` 的字段顺序(host/key/blob),不是另写一遍拼接:这个顺序就是
-  // OpenSSH 写的顺序,两处各拼一次迟早有一处少个空格,而少个空格的行**仍然
-  // 解析得出来**,只是比对永远命中不了。
-  let line = host_field + " " + key_type + " " + base64_encode(blob)
-  for l in existing.split("\n") {
-    let t = l.trim()
-    // 空行和注释不算「已经有」,否则一份全是注释的 known_hosts 会让第一条真正
-    // 的 TOFU 记录被跳过,而那正是第一次写回。
-    if t == line {
-      return existing
-    }
+  // 走 `to_line` 而不是另拼一遍:这个顺序就是 OpenSSH 写的顺序,两处各拼一次
+  // 迟早有一处少个空格,而少个空格的行**仍然解析得出来**,只是比对永远命中不了。
+  let line = KnownHostEntry::to_line(host_field, key_type, blob)
+  if has_line(existing, line) {
+    return existing
   }
   if existing.length() == 0 {
     return line + "\n"
