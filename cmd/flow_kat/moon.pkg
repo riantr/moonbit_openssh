@@ -1,0 +1,20 @@
+///| cmd/flow_kat -- Loop #62: `flow_on_reply` against real handshake vectors.
+///
+///| Reads `verify_c/kexflow/flow_vectors.txt`, which
+/// `host/gen_flow62_vectors.py` writes. See `main.mbt` for why the verdict is
+/// the contract rather than the bytes.
+///
+///| native only: reading the vector file needs `moonbitlang/async/fs`.
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "openssh/openssh_moonbit/src/hostkey",
+  "openssh/openssh_moonbit/src/kexc25519",
+  "openssh/openssh_moonbit/src/kexflow",
+}
+
+options(
+  targets: { "main.mbt": [ "native" ] },
+)
+
+pkgtype(kind: "executable")

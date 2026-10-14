@@ -1265,6 +1265,111 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #62: `flow_on_reply` completes a real handshake, and the three bugs were in my vectors
+
+Loop #61 ended by naming what it had *not* proved. Quoting itself:
+
+> `flow_on_reply` has no caller and no end-to-end test. Argument order and the
+> derived length are pinned, but "this function can complete a handshake" is not
+> yet a claim anything here can support.
+
+This is that claim, with a vector set behind it.
+
+**Result: 7/7, and the client code changed not at all.** That is the headline,
+and it needs stating plainly because the opposite would have been easier to
+write. `flow_on_reply` was correct once Loop #61 fixed it. What was missing was
+the ability to *know* that — and the three defects I spent most of this loop
+chasing were all in my own vector generator. `from_blob` reporting
+`InvalidFormat` was **right**; the blob I handed it was malformed.
+
+**The vectors are two-blind.** `host/gen_flow62_vectors.py` implements the server
+half independently: X25519 and Ed25519 from Python's `cryptography`, and the
+exchange-hash layout transcribed from kexgen.c:67-82 rather than copied from
+`src/kexc25519/exchange_hash.mbt`. H and the signature are each computed twice by
+code sharing nothing with the tree. The generator's own RFC 7748 implementation
+is cross-checked against `cryptography` — they agree on every seed, and if they
+did not, the generator would not be independent at all.
+
+**The three generator bugs, and how each was found.** None by re-reading RFC
+4253; all three by a probe, because a gate that cannot say *why* a case failed
+is a gate you end up debugging by hand:
+
+1. **K_S was `type ‖ pubkey`** — missing the key's own length prefix.
+   `from_blob` said `InvalidFormat` and it was correct.
+   Probe: `FLOW_PROBE <id> from_blob=<...> ks_len=<n>`, gated on the length being
+   51 so a truncated blob cannot pass as "parsed".
+2. **I_C was a copy of I_S.** The exchange hash covers both, so the signature
+   could never verify. Probe: `FLOW_H <id> h=<hex>`, diffed against the `h =`
+   line the generator wrote. A hash mismatch is unambiguous — exactly one side
+   has the layout wrong, and this says which. Both now agree byte for byte.
+3. **The signature blob had an extra length prefix** around the algorithm name.
+
+I also spent two attempts "fixing" the signature framing by reasoning from memory
+before re-reading `HkCursor::get_cstring`, which settles it: the algorithm name
+*is* a length-prefixed string, because `get_cstring` is built on `get_string`.
+The project's own rule — constants and formats come from sources, never from
+recall — has a cost, and this is what the cost looks like.
+
+**V7 is the case that matters.** The server signs an exchange hash computed over
+a *different* Q_S than the one it transmits: a substituted server public key, the
+classic active attack on curve25519 ECDH. The client recomputes H from its own
+view and rejects it. The vector file records both `h` and `h_signed`, so the gap
+between them is visible in the file rather than only in a failure message.
+
+**What the mutations actually proved: 3 CAUGHT / 2 MISSED / 1 EQUIVALENT.** The
+two MISSED are the most useful output, and they are limits of the gate, not
+defects in it:
+
+- **Hardcoding the derivation length to 64 again is invisible here.** Correct
+  for chacha20-poly1305, which is the only cipher every vector negotiates. A
+  chachapoly-only vector set structurally cannot see it. Loop #61's gate catches
+  it by reading the source, which is the honest division of labour: **a vector
+  set tests behaviour; a source check tests an invariant about code shape.**
+  Closing this properly means an `aes128-ctr` vector, the day the browser path
+  can carry a non-AEAD cipher.
+- **Removing the `session_id == H` assertion is invisible by construction.** The
+  emitter reports a variant name, and both a correct and a wrong session id
+  produce `Established`. Making it observable is a change to the harness.
+
+The caught one worth naming is **C: skip host key verification entirely.** A
+client that never checks the signature reports `Established` for V1/V2 and
+`SignatureInvalid` for V5/V7 — the *same* verdicts as a correct client, because a
+broken signature and an unchecked one look identical from outside. V5 and V7
+catch it. **That is what makes the negative cases worth having.**
+
+Getting C to compile took three attempts, and the first two were caught by the
+**compiler**, which proves nothing about the gate; the script now says so in
+those words. MoonBit rejects a multi-line argument list in a `let` binding that
+it accepts inside `match`, so the working mutation keeps the original statement
+shape and changes one arm.
+
+**Two harness defects, both mine.**
+
+- The drift check used `git status --porcelain`, which reports `??` for a new
+  uncommitted file — so it failed every run for a reason that had nothing to do
+  with reproducibility. **A drift check that cannot tell "changed" from
+  "untracked" is not a drift check.** It compares bytes before and after.
+- The generated vector file was not in the mutation snapshot. The gate
+  regenerates it as its first step, so a generator mutation rewrote it on disk
+  and the *next* mutation started dirty. Not theoretical: mutation F was
+  reported CAUGHT purely because E had left a wrong expectation behind, when F
+  should be EQUIVALENT.
+
+**Tooling, self-inflicted.** Twice more this loop, PowerShell `python -c` with
+multi-line `\n` inside single-quoted strings mangled the replacement text, so
+the anchor matched already-corrupted content and reported a syntax error from a
+line I had never written. Restored with `git checkout --` on a file I was
+mutating on purpose. The rule stands: script files go through the file tools.
+
+**Results.** `verify_loop62.mjs` 35/35, `flow_kat` 7/7, three distinct verdicts
+across the set. `loop53`–`loop61` unchanged. `moon test src/kexflow` 15/15,
+`src/hostkey` 25/25, `src/bpacket` 25/25.
+
+**What this loop does not cover.** `cmd/ssh_full_ws` still calls `flow_start` and
+stops; nothing runs the browser path end to end over a socket. What is now
+proven is that `flow_on_reply` turns a real, independently signed REPLY into the
+right verdict — the framing around it is still untested.
+
 ### Loop #61: the kex and host key axes, and the function that had never been run
 
 Loop #60 left kex and hostkey out of scope and said so. This closes that, and
