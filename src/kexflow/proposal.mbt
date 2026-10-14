@@ -33,7 +33,17 @@ const KEX_STRICT_MARKER_C : String = "kex-strict-c-v00@openssh.com"
 ///
 /// mac 类目按 OpenSSH 默认表前两项发送(AEAD 下协商结果弃用,
 /// 决策 D3);comp none;lang 空;follows 恒 false(决策 D4)。
-pub fn Proposal::default_client(strict_kex : Bool) -> Proposal {
+/// Loop #60: the MAC list is no longer "the first two entries of OpenSSH's
+  /// default table". `hmac-sha2-256-etm@openssh.com` used to lead it, and
+  /// `src/bpacket` has no EtM branch at all (packet_ctx.mbt:32) -- the name was
+  /// harmless only because the cipher below is an AEAD, where the MAC is never
+  /// computed. That is a coincidence, not a property: change one line of
+  /// `enc_ctos` to `aes128-ctr` and `negotiate` hands back the EtM name (its
+  /// first-match scan runs over *our* list), `we_need_for` aborts, and the
+  /// client that was "advertising OpenSSH's defaults" cannot complete a
+  /// handshake it just agreed to. The list now carries only what
+  /// `@bpacket.check_runnable` accepts.
+  pub fn Proposal::default_client(strict_kex : Bool) -> Proposal {
   let kex = if strict_kex {
     "curve25519-sha256,\{KEX_STRICT_MARKER_C}"
   } else {
@@ -44,8 +54,8 @@ pub fn Proposal::default_client(strict_kex : Bool) -> Proposal {
     hostkey_algs: "ssh-ed25519",
     enc_ctos: "chacha20-poly1305@openssh.com",
     enc_stoc: "chacha20-poly1305@openssh.com",
-    mac_ctos: "hmac-sha2-256-etm@openssh.com,hmac-sha2-256",
-    mac_stoc: "hmac-sha2-256-etm@openssh.com,hmac-sha2-256",
+    mac_ctos: "hmac-sha2-256",
+    mac_stoc: "hmac-sha2-256",
     comp_ctos: "none",
     comp_stoc: "none",
     lang_ctos: "",

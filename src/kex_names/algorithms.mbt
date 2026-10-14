@@ -159,33 +159,26 @@ pub fn cipher_alg_to_name(alg : CipherAlg) -> String {
 }
 
 // ============================================================================
-// Canonical name lists (for proposal.mbt default extension)
+// Default proposal lists -- REMOVED in Loop #60
 // ============================================================================
-
-///| Default KEX algorithm list (preferred order)
-pub fn kex_algs_default(strict_kex : Bool) -> String {
-  let base = "curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group-exchange-sha256"
-  if strict_kex {
-    base + ",kex-strict-c-v00@openssh.com"
-  } else {
-    base
-  }
-}
-
-///| Default host key algorithm list
-pub fn hostkey_algs_default() -> String {
-  "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256,ssh-rsa"
-}
-
-///| Default cipher algorithm list (C→S and S→C same)
-pub fn cipher_algs_default() -> String {
-  "chacha20-poly1305@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com"
-}
-
-///| Default MAC algorithm list (AEAD ciphers don't use MAC but listed for negotiation)
-pub fn mac_algs_default() -> String {
-  "hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1"
-}
+//
+// `kex_algs_default` / `hostkey_algs_default` / `cipher_algs_default` /
+// `mac_algs_default` used to live here. Nothing imported them (the same
+// finding as Loop #57's orphan-package inventory, which is what surfaced this
+// file as a third source of truth for algorithm names). They were four
+// proposals for a client that does not exist: of the six ciphers named here,
+// exactly one, `aes128-ctr`, has a `Mode` branch in `src/bpacket`; of the six
+// MACs, exactly one, `hmac-sha2-256`. The two GCM ciphers are the sharpest
+// case -- `src/aes` really does implement AES-GCM, so "the name resolves" and
+// "the transport runs it" look identical from the outside.
+//
+// They were deleted rather than trimmed to the runnable names because a
+// hand-copied list is the defect, not the length of the list. The runnable set
+// now has exactly one home: `src/bpacket::runnable_cipher_names` /
+// `runnable_mac_names`, with `@bpacket.check_runnable` as the gate over it.
+//
+// The name <-> enum mapping above stays: it is a spelling table, it is used by
+// `cmd/aes_test`, and it makes no claim about what can be executed.
 
 // ============================================================================
 // Algorithm counts (for kex-names coverage tests)

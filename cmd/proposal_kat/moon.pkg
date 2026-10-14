@@ -1,0 +1,7 @@
+import {
+  "openssh/openssh_moonbit/src/bpacket",
+  "openssh/openssh_moonbit/src/kexflow",
+  "openssh/openssh_moonbit/src/sshclient",
+}
+
+pkgtype(kind: "executable")

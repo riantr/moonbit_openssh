@@ -159,20 +159,17 @@ pub(all) struct LiveReport {
 /// 统一按这个长度派生,短的那个取前缀——这一点在 kex.c:1155 对 A..F 一视同仁,
 /// 不是只对加密密钥取 key_len。
 pub fn we_need_for(cipher : String, mac : String) -> Int {
-  let (key_len, block_size, iv_len) = match cipher {
-    "aes128-ctr" => (16, 16, 16)
-    "aes192-ctr" => (24, 16, 16)
-    "aes256-ctr" => (32, 16, 16)
-    "chacha20-poly1305@openssh.com" => (64, 8, 0)
-    _ => abort("we_need_for: unsupported cipher " + cipher)
-  }
-  let mac_key_len = match mac {
-    "hmac-sha2-256" => 32
-    "hmac-sha2-512" => 64
-    "hmac-sha1" => 20
-    "hmac-sha1-96" => 20
-    _ => abort("we_need_for: unsupported mac " + mac)
-  }
+  // The parameter table lives in src/bpacket; this must not be a second and
+  // looser copy of it. Loop #60 found four cipher and five MAC names here, of
+  // which only aes128-ctr + hmac-sha2-256 has a packet-layer path. The caller
+  // below truncates the derived key to 16 bytes unconditionally, so an
+  // `aes256-ctr` agreement would have run aes128-ctr with half the key and
+  // reported nothing. Latent -- no live proposal offered it -- but it failed
+  // open rather than closed.
+  let (key_len, block_size, iv_len, mac_key_len) = @bpacket.transport_params(
+    cipher,
+    mac,
+  )
   let m = key_len
   let m = if block_size > m { block_size } else { m }
   let m = if iv_len > m { iv_len } else { m }
@@ -803,6 +800,28 @@ fn handshake_to_session(
   // RFC 4253 §7.3:每一端在**发出** NEWKEYS 后立刻切换自己的发送方向,
   // 在**收到** NEWKEYS 后切换接收方向。上面两个动作都已完成,现在两个方向
   // 都可以切了。
+  // This path builds a `MacEncrypt` context and nothing else. `cipher_needs_mac`
+  // is true for exactly one cipher name (aes128-ctr), so this one check also
+  // catches a cipher with no `Mode` branch at all and an AEAD agreement that
+  // would need the `ChachaPolyCtx` branch. Loop #60: before this, neither case
+  // was checked -- the code built an `AesCtrMacCtx` from whatever names came
+  // out of the negotiation.
+  if !@bpacket.cipher_needs_mac(neg.cipher_ctos) {
+    return (
+      Failed(
+        NoAgreement(
+          "cipher " + neg.cipher_ctos + " is not the MacEncrypt path this code runs",
+        ),
+      ),
+      None,
+    )
+  }
+  if !@bpacket.is_runnable_mac(neg.mac_ctos) {
+    return (
+      Failed(NoAgreement("mac " + neg.mac_ctos + " has no packet-layer path")),
+      None,
+    )
+  }
   let we_need = we_need_for(neg.cipher_ctos, neg.mac_ctos)
   if we_need != we_need_for(neg.cipher_stoc, neg.mac_stoc) {
     return (Failed(NoAgreement("asymmetric key length")), None)
@@ -810,15 +829,19 @@ fn handshake_to_session(
   let keys = @kexc25519.derive_keys(h, k_wire, we_need)
   // 每个方向用自己的 'A'/'B' 计数器与 'C'/'D' 加密密钥;共用一个会让第二个方向
   // 从错误的密钥流偏移开始解密,而且不会报错,只会安静地解出乱码。
+  let (key_len, _block, iv_len, mac_len) = @bpacket.transport_params(
+    neg.cipher_ctos,
+    neg.mac_ctos,
+  )
   let ctos = @bpacket.AesCtrMacCtx::new(
-    head_bytes(keys.enc_key_ctos(), 16),
-    head_bytes(keys.iv_ctos(), 16),
-    keys.mac_key_ctos(),
+    head_bytes(keys.enc_key_ctos(), key_len),
+    head_bytes(keys.iv_ctos(), iv_len),
+    head_bytes(keys.mac_key_ctos(), mac_len),
   )
   let stoc = @bpacket.AesCtrMacCtx::new(
-    head_bytes(keys.enc_key_stoc(), 16),
-    head_bytes(keys.iv_stoc(), 16),
-    keys.mac_key_stoc(),
+    head_bytes(keys.enc_key_stoc(), key_len),
+    head_bytes(keys.iv_stoc(), iv_len),
+    head_bytes(keys.mac_key_stoc(), mac_len),
   )
   s.set_mode(@bpacket.MacEncrypt(ctos))
   r.set_mode(@bpacket.MacEncrypt(stoc))

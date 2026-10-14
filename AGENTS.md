@@ -1265,6 +1265,141 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #60: a client proposal may only name algorithms the packet transport can run
+
+The invariant is one line. Writing it down is most of the work.
+
+**What `src/bpacket` can actually run.** `Mode` has three constructors
+(`packet_ctx.mbt:34-38`), so there are exactly two encrypted transports behind
+them:
+
+| cipher | `Mode` | files |
+|---|---|---|
+| `chacha20-poly1305@openssh.com` | `Aead` | `chacha_*.mbt` + `poly1305_*.mbt` |
+| `aes128-ctr` | `MacEncrypt` | `aes_ctr_mac.mbt` |
+
+and exactly one MAC the `MacEncrypt` branch can compute: `hmac-sha2-256`.
+`packet_ctx.mbt:32` already said EtM is unimplemented; this loop makes that
+statement enforceable instead of documentary.
+
+**Defect 1 — `kexflow::default_client` advertised an algorithm it cannot run.**
+Its MAC list led with `hmac-sha2-256-etm@openssh.com`. Nothing had ever failed,
+because that proposal's cipher is an AEAD and an AEAD never computes the MAC:
+the over-promise was harmless *by coincidence*, and the coincidence is invisible
+to every test that exists. It is not a near-miss of a name either — `mac.c:62`
+and `mac.c:72` are two different rows with `etm=0` and `etm=1`, so EtM is a
+different algorithm, not a spelling variant of the one we implement. The list is
+now `hmac-sha2-256`.
+
+The reason a coincidence is not a property is worth spelling out: change one
+line of `enc_ctos` to `aes128-ctr` and `negotiate` hands back the EtM name,
+because `pf_match_list` scans *our* list first. The client would then have
+agreed to an algorithm it cannot run, in a handshake it just completed.
+
+**Defect 2 — `we_need_for` was a second, looser parameter table.**
+`sshclient/live.mbt` accepted four ciphers and five MACs, and the caller then
+truncated the derived key to 16 bytes and built an `AesCtrMacCtx` regardless of
+what came back. A proposal naming `aes256-ctr` would have run **aes128-ctr with
+the first 16 bytes of a 256-bit key**, and reported nothing. Latent — no live
+proposal offered it — but it failed *open*, and it was one line from live.
+`we_need_for` now delegates to `@bpacket.transport_params`, which aborts on
+anything without a `Mode` branch, and the `16`s are gone from `live.mbt`:
+they come from the table now.
+
+`live.mbt` also gained a routing guard. That path builds a `MacEncrypt` context
+and nothing else, so an AEAD agreement would need the `ChachaPolyCtx` branch and
+has to fail loudly instead of being fed into the wrong constructor.
+
+**Scope is deliberately asymmetric.** A *client* proposal is checked. A *server*
+proposal is not: negotiation takes the intersection, so a peer may name anything
+and the handshake still lands on something we can run. `host/verify_loop23.mjs`'s
+six-cipher list is a **server** proposal and is exempt — that was worth stating
+because it looks exactly like the thing this loop forbids.
+
+The gate proves the exemption still holds, rather than merely not contradicting
+it: `cmd/proposal_kat` emits a deliberately-broken peer fixture (two names with
+no packet layer) and the gate asserts it is still `scope=server` and still
+unjudged. A gate that had quietly widened into "reject every name we do not
+implement" would pass a much simpler test and break connectivity against real
+sshd for no safety gain.
+
+**The third truth source is deleted, not trimmed.** `src/kex_names` had four
+unused `*_default()` functions naming 6 ciphers and 6 MACs — a third place to
+learn algorithm names from, and the part that would most invite the same bug
+back. They are gone; the name↔enum mapping stays, because that is a spelling
+table and makes no claim about what executes. The GCM ciphers are the sharp
+case: `src/aes` really does implement AES-GCM, so "the name resolves" and "the
+transport runs it" look identical from the outside.
+
+**Numbers come from outside this tree.** Every parameter is cross-checked
+against OpenSSH's own tables in the C reference tree, not transcribed:
+`cipher.c:93` / `:105` for `block_size`/`key_len`/`iv_len`/`auth_len`, and
+`mac.c:62` for the MAC. `cipher_ivlen` (cipher.c:170-178) is why chacha20's
+`iv_len` is 0 and aes128-ctr's is 16 — the same column, two different answers.
+Names are cross-checked against `ssh -Q cipher` / `ssh -Q mac`.
+
+That last cross-check earns its keep by including the name we *removed*. If
+`hmac-sha2-256-etm@openssh.com` were not a genuine OpenSSH MAC, deleting it
+would be a typo fix rather than a policy fix, and the two deserve different
+confidence.
+
+**Seven gate failures on first run, all of them real.** Worth recording because
+four were self-inflicted and two were the *correct* kind of catch:
+
+- `verdict_stoc` was initialised to `null` and compared against `undefined`:
+  five confident wrong failures out of a parser that was working.
+- The gate compared OpenSSH's `auth_len` against our `mac_key_len` slot. Two
+  different quantities; the accessor for the right one simply did not exist.
+- That gap then let `authlen_for` ship a wrong answer: it returned 32 for
+  aes128-ctr, where OpenSSH's `auth_len` is **0** and the 32-byte MAC lives in
+  `mac_len`. The C cross-check caught it on the next run. "Looks right" and
+  "is right" are separate properties, and only the outside authority had the
+  second one.
+- One check asserted a test *name* appeared in `moon test` output. moon prints
+  names only for failures, so it could never pass — and looked exactly like a
+  real assertion. This is the same shape as Loop #59's regex that matched
+  nothing.
+
+**The gate does not trust the emitter.** `proposal_kat` tags each name
+`ok` / `NO-PATH`, but the gate keeps its own copy of the runnable set and
+recomputes. Trusting the label would mean the same package evaluating the same
+predicate twice — both sides agree, both are wrong, mutation B would pass. That
+check exists because mutation B is the one most likely to be written by someone
+who "just wanted it to work".
+
+**Results.** `verify_loop60.mjs` 73/73, `loop60_mutations.py` 5 CAUGHT /
+1 EQUIVALENT / 0 MISSED. Gate `loop53`–`loop59` all still ALL PASS;
+`moon test src/kexflow` 14/14, `src/sshconfig` 10/10, `src/knownhosts` 49/49,
+`src/bpacket` 25/25. `src/bpacket` and `src/kexflow` check clean on all four
+targets (native / js / wasm / wasm-gc).
+
+`cmd/ssh_live` does **not** build for js / wasm / wasm-gc, and did not before
+this loop either: Loop #54 gave `--kh-file` real disk writes through
+`moonbitlang/async/fs`, which is native-only. Noted so nobody reads the failure
+as a Loop #60 regression.
+
+**The equivalent mutant is the interesting one.** Short-circuiting the new
+cipher routing guard to `&& false` changes nothing observable, because
+`live_proposal` offers only `aes128-ctr` and the guard never fires. That is a
+correct classification, not a gap in the gate: the guard is dead defence on
+today's inputs and starts mattering the moment a second cipher becomes
+negotiable. Reported as a finding rather than quietly excluded.
+
+**What this loop does not cover.** The invariant is enforced over cipher and
+MAC only. `kex_algs` and `hostkey_algs` have the same shape of problem — a
+client naming an unimplemented kex would fail the same way — and are tagged
+`kind=info` in the emitter so `NO-PATH` always means "over-promising on the
+transport". Widening the gate to kex and hostkey is a separate decision with a
+real connectivity cost, and it is not silently bundled in here.
+
+**Tooling note, self-inflicted.** A PowerShell one-liner intended to add return
+type annotations resolved its path against the *PowerShell* working directory
+rather than the process one, and `WriteAllText` truncated
+`cmd/proposal_kat/main.mbt` to 0 bytes. The project rule against PowerShell file
+editing already covers this; the new datum is that the failure is **silent and
+destructive** rather than an error, and `git status` is the only thing that
+showed the scope was limited to one new file. Recovered by rewriting the file.
+
 ### Loop #59: the client dials what the config says, and pins under the name the user typed
 
 Loop #58 made `cmd/ssh_live` *print* its resolved connection parameters and

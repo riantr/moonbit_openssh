@@ -78,6 +78,11 @@ test "t1_proposal_parse_roundtrip" {
   assert_eq(some.hostkey_algs, "ssh-ed25519")
   assert_eq(some.enc_ctos, "chacha20-poly1305@openssh.com")
   assert_eq(some.enc_stoc, "chacha20-poly1305@openssh.com")
+  // The wire vector above encodes the 43-byte MAC name list
+  // "hmac-sha2-256-etm@openssh.com,hmac-sha2-256". This is a *peer* proposal
+  // being parsed, so the Loop #60 invariant does not apply to it -- a server is
+  // free to offer names we cannot run, and negotiation takes the intersection.
+  // The expected value follows the bytes in the vector, not our own policy.
   assert_eq(some.mac_ctos, "hmac-sha2-256-etm@openssh.com,hmac-sha2-256")
   assert_eq(some.mac_stoc, "hmac-sha2-256-etm@openssh.com,hmac-sha2-256")
   assert_eq(some.comp_ctos, "none")
@@ -230,7 +235,7 @@ test "t7_proposal_serialize_roundtrip" {
   assert_eq(some.kex_algs, "curve25519-sha256")
   assert_eq(some.hostkey_algs, "ssh-ed25519")
   assert_eq(some.enc_ctos, "chacha20-poly1305@openssh.com")
-  assert_eq(some.mac_ctos, "hmac-sha2-256-etm@openssh.com,hmac-sha2-256")
+  assert_eq(some.mac_ctos, "hmac-sha2-256")
   assert_eq(some.comp_ctos, "none")
   assert_eq(some.follows, false)
 }
@@ -266,4 +271,34 @@ test "t9_reserved" {
 ///|
 test "t10_reserved" {
   ()
+}
+
+// ---- T11: Loop #60 invariant ----
+//
+///| A client proposal may only name algorithms the packet transport can run.
+///
+/// The list used to lead with `hmac-sha2-256-etm@openssh.com`, which
+/// `src/bpacket` has no branch for. Under this proposal's AEAD cipher the MAC
+/// is never computed, so the over-promise cost nothing -- and stayed invisible.
+/// That is the whole reason the check belongs on the *proposal* rather than on
+/// whatever the negotiation happens to select.
+test "t11_default_client_only_names_runnable_algs" {
+  let p = Proposal::default_client(false)
+  assert_eq(@bpacket.check_runnable(p.enc_ctos, p.mac_ctos), None)
+  assert_eq(@bpacket.check_runnable(p.enc_stoc, p.mac_stoc), None)
+  // The list as it was before Loop #60.
+  let old = "hmac-sha2-256-etm@openssh.com,hmac-sha2-256"
+  match @bpacket.check_runnable("chacha20-poly1305@openssh.com", old) {
+    None => abort("t11: the EtM name should not be honorable")
+    Some(bad) => assert_eq(bad, "mac:hmac-sha2-256-etm@openssh.com")
+  }
+  // `negotiate` scans the *client's* list first, so under aes128-ctr the first
+  // name here is what a server supporting it would hand us -- and EtM has no
+  // `Mode`. The current list has no such hazard: its first runnable name is
+  // the one the packet layer implements.
+  match @bpacket.selected_mac("aes128-ctr", p.mac_ctos) {
+    Some(m) => assert_eq(m, "hmac-sha2-256")
+    None => abort("t11: aes128-ctr needs a MAC and default_client offers none")
+  }
+  assert_eq(@bpacket.selected_mac("chacha20-poly1305@openssh.com", p.mac_ctos), None)
 }
