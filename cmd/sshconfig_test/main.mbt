@@ -4,9 +4,20 @@
 
 fn main {
   // ============ G1 fnmatch KAT tests ============
-  let fnmatch_pass = fnmatch_tests()
-  let fnmatch_total = 23
-  println("fnmatch_pass: " + fnmatch_pass.to_string() + "/" + fnmatch_total.to_string())
+  //
+  // Loop #57: this block used to hold 25 inline `if` conditions, print how many
+  // passed against a **hardcoded** 23, and exit 0 either way -- so it printed
+  // "23/23" while the arithmetic behind it could not be. Two of its expectations
+  // were also wrong (both checked against `ssh -G`; both are recorded in the
+  // package test below).
+  //
+  // The block is gone rather than fixed. The same 25 expectations now live once,
+  // as a table, in `src/sshconfig/sshconfig_test.mbt` t10, where a mismatch is
+  // counted and asserted rather than printed. Keeping a second copy here is what
+  // let the two drift apart in the first place: one of them was edited and the
+  // other was not, and the copy that drifted was the one a human read.
+  //
+  // Run `moon test src/sshconfig` for the fnmatch cases.
 
   // ============ G2 ssh_config parser ============
   let sample_config = "# Sample ssh_config\n\nHost *.example.com\n    User foo\n    Port 2222\n\nHost *.ngs.fi ngs.fi\n    User bar\n    HostName real.host\n\nHost *\n    ForwardAgent no\n"
@@ -56,55 +67,4 @@ fn main {
     None => "none"
   }
   println("foo.example.com NonExistent: " + no_match)
-}
-
-// ============================================================================
-// fnmatch KAT tests
-// ============================================================================
-
-fn fnmatch_tests() -> Int {
-  let mut pass = 0
-
-  // Basic exact match
-  if @sshconfig.fnmatch("hello", "hello") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("hello", "world") { pass = pass + 1 }
-
-  // ? 匹配单字符
-  if @sshconfig.fnmatch("h?llo", "hello") { pass = pass + 1 }
-  if @sshconfig.fnmatch("h?llo", "hallo") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("h?llo", "heello") { pass = pass + 1 }
-
-  // * 匹配任意长度
-  if @sshconfig.fnmatch("h*o", "hello") { pass = pass + 1 }
-  if @sshconfig.fnmatch("h*o", "ho") { pass = pass + 1 }
-  if @sshconfig.fnmatch("h*o", "haooooooo") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("h*o", "haaa") { pass = pass + 1 }
-
-  // 多个 *
-  if @sshconfig.fnmatch("*.example.com", "foo.example.com") { pass = pass + 1 }
-  if @sshconfig.fnmatch("*.example.com", "a.b.c.example.com") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("*.example.com", "foo.example.org") { pass = pass + 1 }
-
-  // * 通配整个
-  if @sshconfig.fnmatch("*", "") { pass = pass + 1 }
-  if @sshconfig.fnmatch("*", "anything") { pass = pass + 1 }
-  if @sshconfig.fnmatch("*", "a") { pass = pass + 1 }
-
-  // 多 Host pattern (空格分隔的 patterns)
-  if @sshconfig.fnmatch("*.ngs.fi", "ngs.fi") { pass = pass + 1 }
-  if @sshconfig.fnmatch("ngs.fi", "ngs.fi") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("ngs.fi", "foo.ngs.fi") { pass = pass + 1 }
-
-  // 复杂 Host patterns (OpenSSH ssh_config 常用)
-  if @sshconfig.fnmatch("books.*", "books.com") { pass = pass + 1 }
-  if @sshconfig.fnmatch("books.*", "books.org") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("books.*", "mybooks.com") { pass = pass + 1 }
-
-  // 嵌套 *
-  if @sshconfig.fnmatch("a*b*c", "abc") { pass = pass + 1 }
-  if @sshconfig.fnmatch("a*b*c", "aXbYc") { pass = pass + 1 }
-  if @sshconfig.fnmatch("a*b*c", "aXXXXXXXbXXXXXXXc") { pass = pass + 1 }
-  if !@sshconfig.fnmatch("a*b*c", "abdc") { pass = pass + 1 }
-
-  pass
 }

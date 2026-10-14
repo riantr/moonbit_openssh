@@ -1265,6 +1265,145 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #57: ssh_config resolution, diffed against OpenSSH's own `ssh -G`
+
+This loop did not start by auditing `ssh_config`. It started by measuring which
+`src/` packages have **no production importer** -- after Loop #56 left a survey
+script behind. Four qualify: `kex_names`, `sshconfig`, `test_nested`, `wt_socket`.
+
+**The survey's first answer was wrong, and that mattered.** The first run counted
+another `src/` package as a *test* reference rather than a library reference, and
+reported seven "dead" packages including `aes`, `bpacket`, `sha512` and
+`kexc25519`. All four are live -- `src/kexflow/moon.pkg` imports `kexc25519`.
+Building a loop on that number would have been building on a miscount. The lesson
+is the one Loop #40 already wrote down about nested gates: a classifier that is
+silently wrong is worse than no classifier, because it produces a confident
+number.
+
+#### What was actually wrong
+
+`src/sshconfig` is not merely unused. `match_host_option` **searched only the
+first matching `Host` block**:
+
+```
+Host web1
+  User deploy
+Host *
+  Port 2222
+```
+
+`ssh -G web1` answers `user deploy` **and** `port 2222`. The old code answered
+`deploy` and, for `Port`, "no such option". `Host *` at the end of a file is the
+single most common thing in every `~/.ssh/config` on earth. It was never noticed
+because nothing called it -- and because its only test checked a config where the
+keyword happened to be in the first matching block.
+
+Three more parser bugs fell out of checking against the authority rather than the
+spec: options **before** the first `Host` were accumulated into a pattern-less
+section and then **dropped**; `Keyword=Value` became a keyword literally named
+`Port=2202`; and a trailing `# comment` stayed in the value.
+
+#### The rules, each confirmed before it was written down
+
+Nothing here was written from memory. Every line was settled by running
+`ssh -G` on OpenSSH_for_Windows_9.5p2:
+
+1. **All** matching `Host` blocks participate, in file order -- not just the first.
+2. Single-valued keywords keep the **first** value obtained.
+3. Multi-valued keywords **accumulate**. `IdentityFile` is one: two matching
+   `Host x` blocks both survive. This is why arity is per-keyword. A resolver that
+   treats everything as first-wins silently drops a key; one that treats
+   everything as accumulate turns `User` into a list. Both fail quietly.
+4. Options before the first `Host` apply unconditionally, and win over the rest.
+5. One match on a `!` pattern discards **the whole block**, positive patterns
+   included. It is not "that one pattern is skipped".
+6. Keywords are case-insensitive (`readconf.c` uses `strcasecmp`).
+7. `Host` patterns are matched case-**sensitively**. `ssh_config(5)` is ambiguous
+   here, so it was checked rather than assumed: `Host Web1` does not match `web1`.
+
+The last two are the kind of pair that is easy to get backwards and impossible to
+guess from the prose, which is the argument for having an executable authority.
+
+#### The gate: two rules, and the second is the one that matters
+
+`host/verify_loop57.mjs`, 21 checks, two-sided on purpose. Loop #55 needed three
+sides because its authority was a published constant two implementations could
+both misread. Here the authority **executes**, so a third leg could only agree
+with one of the two.
+
+1. **VALUE** -- every keyword MoonBit resolves must equal `ssh -G`'s answer.
+2. **COMPLETENESS** -- every keyword where the fixture *changed* OpenSSH's answer
+   relative to an empty config must be resolved by MoonBit too.
+
+Rule 1 alone passes a resolver that silently drops half the file, because a
+resolver that answers nothing has no wrong answers. Rule 2 is what turns "I found
+User" into "I found Port too, two blocks down". Mutation A restores the original
+bug and is caught **only** by rule 2:
+
+```
+FAIL  case fallback.conf web1 answers every keyword the fixture changes
+      not resolved: port, serveraliveinterval
+```
+
+The changed-keyword set comes from diffing `ssh -G -F <fixture>` against
+`ssh -G -F empty.conf`, so OpenSSH decides what counts as changed rather than this
+gate. That is what lets completeness be checked without hardcoding a list of
+keywords the fixtures happen to set.
+
+#### The fnmatch test that was wrong twice, and hid itself
+
+`cmd/sshconfig_test` counted passing `if` conditions and printed them against a
+**hardcoded** `fnmatch_total = 23`, then exited 0 either way. The block holds 25
+conditions, so it printed `23/23` -- green-looking arithmetic that could not be.
+
+Two of its expectations were wrong, both verified with `ssh -G`:
+
+- `fnmatch("a*b*c", "abdc")` -- it asserted **no** match. OpenSSH matches: `a` +
+  `""` + `b` + `"d"` + `c` is exactly the pattern.
+- `fnmatch("*.ngs.fi", "ngs.fi")` -- it asserted a match. OpenSSH does not match:
+  `*` can match the empty string, but `.ngs.fi` still has to match `ngs.fi`
+  afterwards, and the lengths differ.
+
+Both errors claimed *more* matching than glob gives. **The implementation was
+right and the test was wrong, twice** -- so the fix was to delete the block rather
+than repair it: the same 25 expectations now live once, as a table, in
+`src/sshconfig/sshconfig_test.mbt` t10, where a mismatch is counted and asserted
+and a failure names the case. A second copy is what let the two drift in the first
+place; the copy that drifted was the one a human read.
+
+This also fixes `moon test src/sshconfig`, which reported **`Total tests: 0`** --
+Loop #24 wrote its checks as a printing command, so the package looked exercised
+and was not. It now has 10.
+
+#### Mutations: 5 CAUGHT, 1 EQUIVALENT
+
+| | mutation | caught by |
+|---|---|---|
+| A | first matching block only (the original bug) | completeness rule |
+| B | `!` pattern ignored instead of vetoing its block | value rule |
+| C | keyword lookup case-sensitive | value rule (`user=deploy\|fallback`) |
+| D | pre-`Host` options dropped again | completeness rule |
+| E | `IdentityFile` stops accumulating | **`moon test`, not the gate** |
+| F | gate stops checking case coverage | EQUIVALENT |
+
+E is reported the way it happened. The fixtures give one `IdentityFile` each, so
+the gate cannot see its accumulation; only `t7_multivalued_keywords_accumulate`
+does. Saying otherwise would have meant inventing a fixture the loop did not
+build.
+
+F is a finding: no emitter skips a case on this tree, so the coverage assertion is
+not observable. The claim is bounded to these inputs.
+
+#### Not done
+
+`Match`, `Include`, quoting and escapes are not implemented, and `#` unconditionally
+starts a comment, so an `IdentityFile` containing `#` is truncated. Written down
+rather than papered over. The package is still **not wired into any client** --
+`cmd/ssh_live` does not read a config file. That is the next step, and the reason
+this loop fixed the resolver before wiring it: the bug was worth finding either
+way, but wiring a wrong resolver into a client would have made the user's
+connections fail in a way that is very hard to read back to this.
+
 ### Loop #56: known_hosts, three sides -- and the two references that had fallen behind
 
 The known_hosts chain in `verify_c/` is the oldest in the repository and, until this

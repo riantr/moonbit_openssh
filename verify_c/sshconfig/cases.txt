@@ -1,0 +1,18 @@
+# Loop #57: (fixture, host) pairs. Read by BOTH cmd/sshconfig_kat and
+# host/verify_loop57.mjs, on purpose.
+#
+# Loop #56's lesson: two implementations that are wrong the same way check each
+# other perfectly. This file is the one artifact the gate and the emitter cannot
+# each curate alone -- if a case is not listed here, neither side checks it, and
+# the key-set comparison in the gate is what notices that.
+#
+# One `fixture host` per line. Blank lines and `#` comments ignored.
+
+fallback.conf web1
+leading.conf web1
+negation.conf secret
+negation.conf other
+syntax.conf alpha
+syntax.conf beta
+syntax.conf gamma
+cascade.conf db1.prod.example.com

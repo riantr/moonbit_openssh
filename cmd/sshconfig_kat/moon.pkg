@@ -1,0 +1,48 @@
+///| cmd/sshconfig_kat -- Loop #57: MoonBit's side of the ssh_config cross-check.
+///
+///|
+///
+/// Prints the **resolved** options for each `(fixture, host)` pair in
+/// `verify_c/sshconfig/cases.txt`, as `key = value` lines under a `CASE` header.
+/// The other side of the comparison is OpenSSH itself: `ssh -G -F <fixture> <host>`.
+///
+///|
+///
+/// **Why the verdict and not just the parse.** Loop #24 made `parse_ssh_config`
+/// and `match_host_option` and stopped there. `match_host_option` was wrong, and
+/// wrong in the way that only shows up against a real resolver: it searched the
+/// **first** matching `Host` block and reported "no such option" for anything a
+/// later block set. The idiom it breaks is the single most common thing in every
+/// `~/.ssh/config` on earth:
+///
+/// ```
+/// Host web1
+///   User deploy
+/// Host *
+///   Port 2222
+/// ```
+///
+/// `ssh -G web1` gives `user deploy` and `port 2222`. The old code gave `deploy`
+/// and **nothing at all** for Port. It was never noticed because nothing used it.
+/// So this program prints what the *rules* resolve to, which is the thing that can
+/// disagree with OpenSSH -- a byte-identical parse would not have.
+///
+///|
+///
+/// Multi-valued keywords are joined with `|`. `IdentityFile` accumulates across
+/// matching blocks in OpenSSH (verified: two `Host x` blocks both survive), while
+/// single-valued keywords keep the first. Printing both under one shape means the
+/// gate compares order and multiplicity too, not just set membership.
+///
+/// native only: it reads files, which needs `moonbitlang/async/fs`.
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "openssh/openssh_moonbit/src/sshconfig",
+}
+
+options(
+  targets: { "main.mbt": [ "native" ] },
+)
+
+pkgtype(kind: "executable")
