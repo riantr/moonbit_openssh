@@ -22,7 +22,23 @@ const wsInstances = new Map();
 const wsBuffers = new Map();  // handle → FIFO queue of Uint8Array
 let wsNextHandle = 1;
 
-function ws_wait_for_bytes_sync(handle, n, timeoutMs = 5000) {
+/**
+ * Loop #63: this function had `await` inside a non-async function, so the whole
+ * file failed to parse and **had never been executed by anything** -- there are
+ * no callers, and `moon build` never loads this file, so nothing noticed.
+ *
+ * It is also unreachable from `ws_recv_into`, which deliberately throws on a
+ * short buffer rather than block. That is not an oversight in this file: a wasm
+ * frame is synchronous, the host cannot re-enter the module (wasm-gc exports
+ * only `_start`), and WebSocket data arrives from `onmessage`, which needs the
+ * event loop. Blocking here would deadlock rather than wait.
+ *
+ * Kept, and made correct, rather than deleted: it is the shape the host would
+ * need if the transport could yield, and `verify_loop63.mjs` asserts both the
+ * absence of blocking and the absence of callers, so nobody reads this as a
+ * working path.
+ */
+async function ws_wait_for_bytes(handle, n, timeoutMs = 5000) {
   const buf = wsBuffers.get(handle);
   if (!buf) throw new Error(`ws_wait: invalid handle ${handle}`);
   const start = Date.now();

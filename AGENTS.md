@@ -1265,6 +1265,89 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #63: the browser path has never run, and on this toolchain it cannot
+
+Loops #60, #61 and #62 each found a thing that looked tested and was not — a
+proposal naming an algorithm it cannot run, a function with a swapped argument
+order, a gate that trusted its own emitter. This is the same defect at the
+largest scale in the tree, and it concerns the reason this project exists.
+
+**The claim.** `docs/socket/loop23-summary.md` records Loop #23 as "PASS (with
+caveat)", `host/verify_loop23.mjs` is titled as a verification of
+`cmd/ssh_full_ws`, and across Loops #23–#33 the browser path is described as
+byte-exact verified. The goal — SSH from a browser — rests on it.
+
+**What is true, in four pieces.**
+
+- **`src/sshclient/live.mbt` is the only code that performs a real, verified
+  handshake, and it is bound to `@tcp.TcpConn`.** It does not import
+  `src/ws_socket`. That is native TCP, and it *is* genuinely verified: Loops
+  #54–#59 run it against a real peer.
+- **`cmd/ssh_full_ws` compiles and does not do a handshake.** It reads the
+  server's KEXINIT and KEXDH_REPLY into `let _ =` — discarded — never
+  negotiates, never parses a host key, never verifies a signature, never derives
+  a session key, and continues in plaintext after NEWKEYS. Its `read_n` calls
+  take lengths computed by `make_server_*_reply().length()`: the peer is a
+  hardcoded byte blob, and the client knows in advance how long each answer is.
+  That is the shape of a scripted replay, not of a protocol.
+- **`verify_loop23.mjs` runs no MoonBit code.** Both sides are JavaScript — a
+  Node WebSocket client against a Node mock server, with hand-written algorithm
+  lists standing in for the client's. Its own header says the MoonBit side was
+  checked by compilation only and points at `verify_loop22.mjs`, a `MockSocket`
+  path that is not a socket.
+- **`host/node_host_wasm.mjs`, the host that would run the wasm, has never
+  run.** Zero callers. And it had an `await` inside a non-async function, so
+  the file could not even be parsed — `moon build` never loads it and nothing
+  ever noticed. Its `ws_recv_into` throws on a short buffer, with a comment
+  conceding that blocking is unsupported and MoonBit has no retry.
+
+**Why it cannot be fixed by restructuring the client.** wasm-gc exports exactly
+one symbol, `_start`. There is no way for a host to re-enter the module between
+reads, so a synchronous `Socket::read_n` inside a wasm frame can never yield to
+the event loop that a WebSocket's `onmessage` needs. `cmd/probe_export` exists
+to make that falsifiable rather than a claim in a comment: a plain `pub fn`,
+built and inspected, **does not appear in the export table**. If MoonBit ever
+grows an export mechanism, section A of the gate fails and this reasoning has
+to be revisited — which is exactly why it is a gate and not a paragraph.
+
+The escape that does work is `--target js`, which shares `src/` and supports
+async I/O. That is the next piece of work; this loop establishes what is true
+today so it starts from facts.
+
+**What was fixed here.** The `await` bug, so the file parses. Not the blocking
+limitation — `ws_wait_for_bytes` is now `async` and correctly documented, but
+`ws_recv_into` still refuses to block, and the gate asserts both that refusal
+and the absence of callers, so nobody reads the file as a working path.
+
+**Three gate defects, all mine, and one of them nearly inverted the finding.**
+
+- The syntax check ran `node --check node_host_wasm.mjs` with `cwd` at the repo
+  root. The file is in `host/`, so Node reported a missing-module error that
+  reads exactly like a syntax error. **Asking Node to parse a file that is not
+  there is not a parse.**
+- The "discarded reads" regex used `[^)]*`, so it truncated at the inner `)` of
+  `make_server_kexinit_reply().length()` and concluded the reads were *not*
+  scripted — the opposite of the finding. **A regex that cannot count its own
+  parentheses will confidently agree with anything.**
+- The caller scan matched this gate's own header comment and reported
+  `verify_loop63.mjs` as a caller. It now excludes itself and strips comments
+  before matching, because a comment runs nothing.
+
+**Mutation D was my error, not the gate's.** The first version wired a "caller"
+in by appending a comment naming the host — and the gate reported MISSED,
+correctly, since it strips comments. A mutation that does not change behaviour
+cannot test a behaviour check. Rewritten as a real `execSync` spawn, it is
+caught.
+
+**Results.** `verify_loop63.mjs` 23/23, `loop63_mutations.py` 5 CAUGHT /
+1 EQUIVALENT / 0 MISSED. Loops #53–#62 unchanged.
+
+**What this loop does not do.** It does not build a browser client. It states,
+with evidence, that the browser client does not exist yet — that MoonBit does
+real SSH over native TCP, and compiles to wasm, and that the two have never been
+joined. The next honest step is the transport abstraction that would join them,
+or the `--target js` route that sidesteps the blocking read entirely.
+
 ### Loop #62: `flow_on_reply` completes a real handshake, and the three bugs were in my vectors
 
 Loop #61 ended by naming what it had *not* proved. Quoting itself:
