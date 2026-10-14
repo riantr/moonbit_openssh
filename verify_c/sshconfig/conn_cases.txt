@@ -1,0 +1,33 @@
+# Loop #58: (config, target, overrides) triples. Read by host/verify_loop58.mjs only;
+# the client is driven with whatever this file says, so nothing here is curated by
+# the code under test.
+#
+#   line = <fixture|NONE> <target> [Key=Value,Key=Value,...] [arguser=NAME]
+#
+# The third field becomes `-o Key=Value` arguments on the client and the same `-o`
+# arguments on `ssh -G`, so OpenSSH decides the answer rather than this gate.
+# The fourth is a real `--user` flag, which outranks `-o` -- that is the one step
+# of the precedence chain `ssh -G` cannot be asked about, since it has no `--user`.
+#
+# `NONE` means "no --config at all" -- the client must then resolve nothing and
+# invent nothing, which is the state every pre-Loop-58 invocation is in.
+
+fallback.conf web1
+leading.conf web1
+negation.conf secret
+syntax.conf alpha
+cascade.conf db1.prod.example.com
+# command line beats the file, for keywords the file sets
+fallback.conf web1 User=cliu,Port=2200
+# command line beats the file, for a keyword the file does not set
+syntax.conf alpha User=cliu
+# command line beats the file, on HostName
+fallback.conf web1 HostName=cli.example.com
+# IdentityFile accumulates; the -o value is obtained first so it comes first
+syntax.conf alpha IdentityFile=/cli/key
+cascade.conf db1.prod.example.com IdentityFile=/cli/key
+# no config: nothing resolved, nothing invented
+NONE web1
+# `--user` beats `-o`, which beats the file: the whole chain in one case
+fallback.conf web1 User=from_o arguser=from_flag
+syntax.conf alpha arguser=from_flag

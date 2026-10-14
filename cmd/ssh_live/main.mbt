@@ -227,6 +227,13 @@ fn parse_port(s : String, fallback : Int) -> Int {
 fn find_port(argv : Array[String]) -> Int {
   let mut i = 1
   while i < argv.length() {
+    // Loop #58: 跳过取值的那个 token。`--target 2222` 里的 2222 是主机名位置上的
+    // 字符串,不是端口;`-o Port=2222` 同理。之前没有这些参数时不存在这个歧义,
+    // 现在有了,扫描就必须知道哪个参数会吃掉下一个 token。
+    if argv[i] == "--target" || argv[i] == "-o" || argv[i] == "-F" {
+      i = i + 2
+      continue
+    }
     match parse_port(argv[i], 0) {
       0 => ()
       p => return p
@@ -1394,6 +1401,243 @@ fn sftp_error_name(e : @sshclient.SftpError) -> String {
 /// 只有 `main` 和 `kh_resolve` 是 async；`run_*` 全部保持**同步**，只是多收一个
 /// `KhConfig`。另一种做法是让每个 `run_*` 自己去解析，于是读文件的代价变成 6 次、
 /// 参数解析也变成 6 次，而且读侧和写侧各拿一份——那正是这个结构最初要消灭的漂移。
+///|
+/// Loop #58: connection parameters resolved from an ssh_config file.
+///
+/// src/sshconfig existed since Loop #24 with nothing outside its own test command
+/// calling it, and by Loop #57 its resolver was proven against OpenSSH's `ssh -G`
+/// while still having no user. That is the state Loop #57's own findings describe:
+/// correct code nobody reaches rots the way wrong code does.
+///
+/// **Precedence, and it is the whole point.** OpenSSH takes the first value
+/// obtained for each keyword, and the command line is read before any file. So:
+/// `--user` / an explicit port argument > `-o Key=Value` > the config file > this
+/// client's built-in defaults. Checked against OpenSSH: `ssh -G -F fallback.conf
+/// -o User=cliu -o Port=2200 web1` answers `user cliu`, `port 2200` -- the command
+/// line wins over a file that sets both.
+///
+/// If the file were consulted only when the caller said nothing, then a user with
+/// a config file could never override one from the command line, which is the
+/// everyday case. That is why `-o` is here and not left for later.
+///
+/// **Nothing changes without `--config`.** Every field is empty unless a file was
+/// given, and `main` substitutes only non-empty ones. Every existing gate dials
+/// 127.0.0.1:22222 and passes `--user` explicitly; none of them pass `--config`,
+/// so none of them can move.
+pub struct ConnConfig {
+  /// 配置文件路径;空串 = 没给 `-F`/`--config`
+  config_path : String
+  /// 要匹配的 Host 模式的目标名
+  target : String
+  /// `HostName`
+  hostname : String
+  /// `User`
+  user : String
+  /// `Port`
+  port : String
+  /// `IdentityFile`(多值,按文件顺序)
+  identity_files : Array[String]
+}
+
+///|
+fn config_path_arg(argv : Array[String]) -> String {
+  let long = argv_value(argv, "--config")
+  if long != "" {
+    return long
+  }
+  let mut i = 1
+  while i + 1 < argv.length() {
+    if argv[i] == "-F" {
+      return argv[i + 1]
+    }
+    i = i + 1
+  }
+  ""
+}
+
+///|
+fn config_effective_flag(argv : Array[String]) -> Bool {
+  has_switch(argv, "--config-effective")
+}
+
+///|
+fn target_arg(argv : Array[String]) -> String {
+  let given = argv_value(argv, "--target")
+  if given != "" {
+    return given
+  }
+  kh_host_name(argv)
+}
+
+///| 收下所有 `-o Key=Value`,大小写不敏感地存成 key→value。
+fn o_overrides(argv : Array[String]) -> Array[(String, String)] {
+  let out : Array[(String, String)] = []
+  let mut i = 1
+  while i + 1 < argv.length() {
+    if argv[i] == "-o" {
+      let spec = argv[i + 1]
+      let mut eq = -1
+      let mut k = 0
+      while k < spec.length() {
+        if spec[k].to_int() == 61 {
+          eq = k
+          break
+        }
+        k = k + 1
+      }
+      if eq > 0 {
+        let key = ci_lower(cc_slice(spec, 0, eq))
+        let value = cc_trim(cc_slice(spec, eq + 1, spec.length()))
+        let mut replaced = false
+        let mut j = 0
+        while j < out.length() {
+          if out[j].0 == key {
+            out[j] = (key, value)
+            replaced = true
+          }
+          j = j + 1
+        }
+        if !replaced {
+          out.push((key, value))
+        }
+      }
+    }
+    i = i + 1
+  }
+  out
+}
+
+///|
+fn o_lookup(overrides : Array[(String, String)], key : String) -> String {
+  let k = ci_lower(key)
+  let mut i = 0
+  while i < overrides.length() {
+    if overrides[i].0 == k {
+      return overrides[i].1
+    }
+    i = i + 1
+  }
+  ""
+}
+
+///|
+fn ci_lower(s : String) -> String {
+  let b = StringBuilder()
+  let mut i = 0
+  while i < s.length() {
+    let c = s[i].to_int()
+    b.write_char(if c >= 65 && c <= 90 { (c + 32).unsafe_to_char() } else { s[i].unsafe_to_char() })
+    i = i + 1
+  }
+  b.to_string()
+}
+
+///|
+fn cc_slice(s : String, from : Int, to : Int) -> String {
+  let b = StringBuilder()
+  let mut i = from
+  let hi = if to > s.length() { s.length() } else { to }
+  while i < hi {
+    b.write_char(s[i].unsafe_to_char())
+    i = i + 1
+  }
+  b.to_string()
+}
+
+///|
+fn cc_trim(s : String) -> String {
+  let mut a = 0
+  let mut b = s.length()
+  while a < b && cc_space(s[a].to_int()) { a = a + 1 }
+  while b > a && cc_space(s[b - 1].to_int()) { b = b - 1 }
+  cc_slice(s, a, b)
+}
+
+///|
+fn cc_space(c : Int) -> Bool { c == 32 || c == 9 || c == 13 }
+
+///|
+/// 读一次配置文件、解析一次、算出最终参数。判定侧和拨号侧共用这一份——
+/// 和 `KhConfig` 同一个理由：两个调用点各自解析，答案就会漂。
+async fn cfg_resolve(argv : Array[String]) -> ConnConfig {
+  let path = config_path_arg(argv)
+  let target = target_arg(argv)
+  let overrides = o_overrides(argv)
+  // 整条优先级链在这里一次算完:`--user` > `-o` > 配置文件。分散在拨号侧算的话,
+  // `--config-effective` 就只能反映其中一段,而"命令行压过文件"这条规则正是本轮
+  // 要证明的东西——证明它的那条路径必须能看到全部三段。
+  let explicit_user = find_user(argv)
+  let o_user = o_lookup(overrides, "user")
+  let hostname = o_lookup(overrides, "hostname")
+  let port = o_lookup(overrides, "port")
+  let ids : Array[String] = []
+  let user = if explicit_user != "<no-user-given>" {
+    explicit_user
+  } else {
+    o_user
+  }
+  if path == "" {
+    // 没有配置文件：只有命令行给的那些。
+    let o_id = o_lookup(overrides, "identityfile")
+    if o_id != "" {
+      ids.push(o_id)
+    }
+    return { config_path: "", target, hostname, user, port, identity_files: ids }
+  }
+  let text = try { (@fs.read_file(path)).text() } catch { _ => abort("cannot read config " + path) }
+  let sections = @sshconfig.parse_ssh_config(text)
+  // `-o` 赢过文件，所以先问命令行，问不到再问文件。
+  let hostname = if hostname != "" { hostname } else { @sshconfig.resolved_value(target, sections, "HostName") }
+  let user = if user != "" { user } else { @sshconfig.resolved_value(target, sections, "User") }
+  let port = if port != "" { port } else { @sshconfig.resolved_value(target, sections, "Port") }
+  let file_ids = @sshconfig.resolved_values(target, sections, "IdentityFile")
+  let o_id = o_lookup(overrides, "identityfile")
+  if o_id != "" {
+    // `IdentityFile` 在 OpenSSH 里是累积的多值关键字，`-o` 给的是最先得到的值，
+    // 所以它排在文件给的前面而不是替换掉整个列表。
+    ids.push(o_id)
+    let mut i = 0
+    while i < file_ids.length() {
+      ids.push(file_ids[i])
+      i = i + 1
+    }
+  } else {
+    let mut i = 0
+    while i < file_ids.length() {
+      ids.push(file_ids[i])
+      i = i + 1
+    }
+  }
+  { config_path: path, target, hostname, user, port, identity_files: ids }
+}
+
+///|
+/// `--config-effective`:打印最终生效的连接参数然后退出,不建 socket。
+///
+/// 和 Loop #38 的 `--proposal` 同一个理由——「连接成功了」看不出**用了哪份配置**,
+/// 所以必须有一条纯离线的路径把答案本身印出来。放在任何拨号之前返回,
+/// 所以它不受也不影响 `--kh-file` 的解析。
+fn print_conn_effective(cfg : ConnConfig) -> Unit {
+  println("=== ssh_config effective ===")
+  println("config: " + (if cfg.config_path == "" { "(none)" } else { cfg.config_path }))
+  println("target: " + cfg.target)
+  if cfg.hostname != "" { println("hostname = " + cfg.hostname) }
+  if cfg.user != "" { println("user = " + cfg.user) }
+  if cfg.port != "" { println("port = " + cfg.port) }
+  if cfg.identity_files.length() > 0 {
+    let b = StringBuilder()
+    let mut i = 0
+    while i < cfg.identity_files.length() {
+      if i > 0 { b.write_char('|') }
+      b.write_string(cfg.identity_files[i])
+      i = i + 1
+    }
+    println("identityfile = " + b.to_string())
+  }
+  println("=== end ===")
+}
+
+///|
 async fn main {
   let argv = @env.args()
   // Loop #38: dump the proposal and exit, without opening a socket.
@@ -1410,7 +1654,23 @@ async fn main {
     run_proposal()
     return
   }
-  let port = find_port(argv)
+  // Loop #58: 纯离线的配置解析 dump,和 `--proposal` 一样在任何拨号之前返回。
+  if config_effective_flag(argv) {
+    print_conn_effective(cfg_resolve(argv))
+    return
+  }
+  // Loop #58: 解析一次,之后拨号侧和打印侧共用这一份。没有 `--config` 时每个字段
+  // 都是空的,`find_port` / `find_user` 的缺省原样保留——既有门禁一个都没传
+  // `--config`,所以它们看到的字节不会变。
+  let cfg = cfg_resolve(argv)
+  let port = if cfg.port != "" {
+    match parse_port(cfg.port, 0) {
+      0 => find_port(argv)
+      p => p
+    }
+  } else {
+    find_port(argv)
+  }
   // 解析一次,之后读侧和写侧共用这一份。见 `KhConfig` 的说明。
   let kh = kh_resolve(argv, port)
   if sftp_mode(argv, port, kh) {
@@ -1431,7 +1691,10 @@ async fn main {
     None => ()
   }
   if auth_mode(argv) {
-    let user = find_user(argv)
+    // Loop #58: 整条优先级链已经在 `cfg_resolve` 里算完了(`--user` > `-o` > 文件)。
+    // 这里只做一件事:把空字符串换成 `find_user` 那个刻意的标记,而不是默认值——
+    // 「配置文件里也没有 User」必须仍然表现为 `<no-user-given>`。
+    let user = if cfg.user != "" { cfg.user } else { find_user(argv) }
     println("=== Loop #34 publickey auth vs real sshd ===")
     println("port: " + port.to_string())
     println("user: " + user)

@@ -1265,6 +1265,111 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #58: ssh_config on the client's path, and the rule that decides whether it is usable
+
+Loop #57 ended with `src/sshconfig` proven correct against `ssh -G` and still
+called by nothing. That is not a resting state. It is the exact condition the
+first-block-only bug survived in for thirty loops: correct-looking code with no
+caller rots the way wrong code does, because nothing ever exercises it.
+
+So this loop wires it into `cmd/ssh_live` and checks the thing that decides
+whether the feature is worth having at all -- **precedence**.
+
+#### The rule
+
+OpenSSH takes the first value obtained for each keyword, and the command line is
+read before any file:
+
+```
+--user / -o Key=Value   >   the config file   >   the client's built-in default
+```
+
+Checked, not assumed: `ssh -G -F fallback.conf -o User=cliu -o Port=2200 web1`
+answers `user cliu`, `port 2200` -- the command line wins over a file that sets
+both, and also over a file that sets neither.
+
+If the file were consulted only when the caller said nothing, then anyone with a
+config file could never override it from the command line, which is the everyday
+case. That is why `-o` is here rather than deferred.
+
+**The whole chain is computed once, in `cfg_resolve`.** `--proposal` already
+existed for the same reason (Loop #38): "the connection succeeded" does not show
+*which* configuration was used, so there has to be an offline path that prints the
+answer. `--config-effective` is that path, and it returns before anything dials.
+
+The `--user` step is asserted **against the client's own rule, not against
+`ssh -G`**, because `ssh -G` has no `--user`. It is labelled as such in the gate
+output so nobody later reads it as a cross-check. That gap was in the first draft
+of this loop: `--config-effective` originally showed only `-o` and the file, so
+the top of the chain was claimed but unobservable.
+
+#### Two rules again, and the second is still the one that matters
+
+1. **VALUE** -- every keyword the client resolved must equal `ssh -G`'s answer.
+2. **COMPLETENESS** -- every keyword the config or the overrides *moved* must be
+   resolved. The moved set comes from diffing `ssh -G` with and without the
+   fixture, so OpenSSH decides what counts as changed.
+
+Rule 1 alone passes a client that resolves nothing. Mutation B (ignore `--config`
+entirely) is caught **only** by rule 2:
+
+```
+FAIL  case cascade.conf db1.prod.example.com answers everything the config changes
+      not resolved: hostname, user, port, identityfile
+```
+
+`ssh -G` also prints every compiled-in default, so comparing all four keywords
+unconditionally would be asking the client to invent `port 22` and seven default
+`IdentityFile` paths. The first draft of the gate did exactly that and produced
+six confident, wrong failures.
+
+#### `IdentityFile` ordering
+
+`-o IdentityFile=` is the first value obtained, and `IdentityFile` accumulates, so
+the override **precedes** the file's entries rather than replacing the list. The
+gate compares the ordered `|`-joined list for this reason: mutation C produces
+the same *set* in the wrong order, and a membership check would have called that
+correct.
+
+#### `find_port` learned about arguments that take a value
+
+`find_port` scans argv for the first all-digits token. `--target 2222` and
+`-o Port=2220` put a digits-only string in argv for a reason unrelated to the
+port, and the scan would happily dial the wrong one. It now skips the token after
+`--target`, `-o` and `-F`. This was not a bug before this loop -- there were no
+such arguments -- and it would have become one the moment the feature landed.
+
+**Nothing moves without `--config`.** Every `ConnConfig` field is empty unless a
+file was given, and `main` substitutes only non-empty ones. Every existing gate
+passes no `--config` and dials `127.0.0.1:22222`, so none of them can have moved;
+`--proposal` is asserted byte-identical in the gate as the concrete form of that
+claim.
+
+#### Mutations: 4 CAUGHT, 1 EQUIVALENT
+
+| | mutation | caught by |
+|---|---|---|
+| A | `-o` loses to the file | value rule (4 cases) |
+| B | `--config` ignored entirely | **completeness rule only** |
+| C | `-o IdentityFile` appended last | value rule, by ordering |
+| D | `--user` loses to `-o` | the `--user` assertion |
+| F | gate stops checking the no-config run | EQUIVALENT |
+
+C was first written as "replace the list" and was caught by a **compile error**,
+not by an assertion -- `Array::remove_at` does not exist in this MoonBit version.
+A mutation caught by a broken compiler is not evidence, so it was rewritten as an
+append-last mutation that compiles, and the CAUGHT it produces is the ordered
+comparison doing its job.
+
+#### Still not done
+
+`cmd/ssh_live` dials `127.0.0.1:22222` by construction; it is a test client
+against a local sshd, not a general SSH CLI. `HostName`/`User`/`Port`/`IdentityFile`
+are now resolved and printable, but the resolved `hostname` is **not** yet the
+dial target -- wiring that means this client stops being a fixed-target harness,
+which is a larger change than a config flag and is left for its own loop.
+`Match`, `Include` and quoting remain unimplemented, as in Loop #57.
+
 ### Loop #57: ssh_config resolution, diffed against OpenSSH's own `ssh -G`
 
 This loop did not start by auditing `ssh_config`. It started by measuring which
