@@ -1265,6 +1265,86 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #59: the client dials what the config says, and pins under the name the user typed
+
+Loop #58 made `cmd/ssh_live` *print* its resolved connection parameters and
+checked those against `ssh -G`. Printing the right thing and connecting to the
+right thing are different claims, and only the first one had been proven. A
+`HostName` that resolves correctly in the dump while the socket still goes to
+`127.0.0.1` would have passed every check in Loop #58.
+
+So this loop runs the client against a real SSH peer -- `host/sftp_mitm.py`, the
+one Loop #54 uses -- with **no port argument at all**. If it authenticates, the
+host and the port came out of the config file, because there is nowhere else for
+them to have come from.
+
+#### `HostName` decides where to connect. It does not decide what to pin under.
+
+This was the one thing worth getting right, and it is worth stating because the
+wrong answer is invisible. `add_host_to_hostfile(filename, host, key, store_hash)`
+takes exactly **one** host, and `write_host_entry(f, host, NULL, ...)` passes
+`ip = NULL` (hostfile.c:542 / :476) -- `HostName` never enters the key. Pinning
+under the resolved name means the next connection *by alias* looks up a name that
+is not in the file, so every connection looks like a first connection and TOFU
+fires forever. That failure never errors; it just never remembers.
+
+`--kh-host` therefore now defaults to `--target`, not to a hardcoded `127.0.0.1`.
+The gate asserts the *absence* of a `127.0.0.1` line, not just the presence of
+the alias line, because a client that wrote both would pass the first check.
+
+#### The `find_user` re-parse that Loop #54 had already declared dead
+
+`run_exec` and `run_shell` each called `find_user(@env.args())` themselves. That
+is precisely the "both sides ask the question separately" drift Loop #54 removed
+from the known_hosts path -- and it had a consequence Loop #58 could not see:
+the user resolved from the config never reached either function. `main` now
+computes the user once, alongside host and port, and passes it down; both
+functions lost their private `argv` re-parse.
+
+Six `TcpConn::connect("127.0.0.1", port)` call sites became
+`connect(host, port)`. Loop #54's own precedent is "they just take one more
+parameter", so this is threading rather than a refactor into a session struct.
+
+#### What step 1 does **not** prove
+
+The fixture's `HostName` is `127.0.0.1` and the client's fallback is also
+`127.0.0.1`, so step 1 cannot distinguish "dialed the configured host" from
+"dialed the default". The **port** is what proves the config drove the dial: it
+is absent from argv entirely. The host half is covered by `--config-effective`
+against `ssh -G` (Loop #58), and the alias-keying rule is covered by mutation A.
+A hostname that resolves differently from `127.0.0.1` would have made the check
+*look* stronger than it is; it is written down instead.
+
+#### A gate defect worth the two runs it cost
+
+The known_hosts checks first spelled the key type as `ssh-`. The peer presents
+`ecdsa-sha2-nistp256`, so:
+
+- "pin is keyed by the alias" **failed against a correct file**, and
+- "pin is NOT keyed by the resolved HostName" **passed vacuously**.
+
+A regex that never matches anything is indistinguishable from a regex proving an
+absence, so the second check was decoration that read as evidence. Both now match
+`\S+`. The gate also dumps the file's contents on failure -- Loop #40's rule that
+the failure and its evidence land together -- because "no line keyed by
+loop59-pin" costs a re-run with a debug print to diagnose, and there were three
+plausible explanations.
+
+#### Mutations: 3 CAUGHT, 1 EQUIVALENT
+
+| | mutation | caught by |
+|---|---|---|
+| A | pin keyed by the resolved `HostName` | both keying checks, with the file dumped |
+| B | the port from the config is ignored | step 1 cannot connect |
+| C | the user from the config is ignored | step 1's reported user |
+| D | gate stops checking `--proposal` | EQUIVALENT |
+
+#### Process discipline
+
+Loop #53's rule, kept because it is the reason a failure stays a failure: the
+peers are killed and `.loop59` removed in a `finally`, so a failure part-way
+through cannot leave a peer listening that the *next* gate connects to.
+
 ### Loop #58: ssh_config on the client's path, and the rule that decides whether it is usable
 
 Loop #57 ended with `src/sshconfig` proven correct against `ssh -G` and still

@@ -470,7 +470,19 @@ async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
 /// 起点。
 fn kh_host_name(argv : Array[String]) -> String {
   let given = argv_value(argv, "--kh-host")
-  if given == "" { "127.0.0.1" } else { given }
+  // Loop #59: `--target` 给了就用它,而不是硬编码的 127.0.0.1。
+  //
+  // 记的是**用户输入的那个名字**,不是 `HostName` 解析出来的那个。OpenSSH 的
+  // `add_host_to_hostfile(filename, host, key, store_hash)` 只收一个 host,
+  // `write_host_entry(f, host, NULL, ...)` 的 ip 恒为 NULL
+  // (hostfile.c:542 / :476)——`HostName` 根本不参与 pin 的键。记成解析后的名字,
+  // 下一次用同一个别名连就查不到,于是每次都像第一次。
+  if given == "" {
+    let target = argv_value(argv, "--target")
+    if target == "" { "127.0.0.1" } else { target }
+  } else {
+    given
+  }
 }
 
 ///|
@@ -639,13 +651,14 @@ fn exec_command(argv : Array[String]) -> String? {
 /// SHA-256 摘要。验证脚本要比的是字节数与摘要,不是人眼读一遍——后者在输出
 /// 里混进 ANSI 序列或非 ASCII 时会骗人。
 fn run_exec(
+  host : String,
   port : Int,
   command : String,
   stdin_data : FixedArray[Byte],
   envs : Array[@sshclient.EnvVar],
+  user : String,
   kh : KhConfig,
 ) -> Unit {
-  let user = find_user(@env.args())
   println("=== Loop #35 exec vs real sshd ===")
   println("port: " + port.to_string())
   println("user: " + user)
@@ -654,7 +667,7 @@ fn run_exec(
   for i = 0; i < envs.length(); i = i + 1 {
     println("env: " + envs[i].name + "=" + envs[i].value)
   }
-  match @tcp.TcpConn::connect("127.0.0.1", port) {
+  match @tcp.TcpConn::connect(host, port) {
     None => {
       println("result: CONNECT_FAILED")
       return
@@ -990,14 +1003,16 @@ fn resize_flag(argv : Array[String]) -> (Int, Int)? {
 ///|
 /// Loop #36:开一个交互式 shell(带 pty),敲一条命令,可选地 resize,再退出。
 fn run_shell(
+  host : String,
   port : Int,
   command : String,
   cols : Int,
   rows : Int,
   resize : (Int, Int)?,
+  user : String,
   kh : KhConfig,
 ) -> Unit {
-  let user = find_user(@env.args())
+  let user = user
   println("=== Loop #36 interactive shell vs real sshd ===")
   println("port: " + port.to_string())
   println("user: " + user)
@@ -1008,7 +1023,7 @@ fn run_shell(
     Some((c, r)) => println("resize: " + c.to_string() + "x" + r.to_string())
     None => println("resize: none")
   }
-  match @tcp.TcpConn::connect("127.0.0.1", port) {
+  match @tcp.TcpConn::connect(host, port) {
     None => {
       println("result: CONNECT_FAILED")
       return
@@ -1168,7 +1183,13 @@ fn split_at_last(spec : String) -> (String, Int) {
    parse_uint(spec.unsafe_substring(start=at + 1, end=spec.length())))
 }
 
-fn sftp_mode(argv : Array[String], port : Int, kh : KhConfig) -> Bool {
+fn sftp_mode(
+  argv : Array[String],
+  host : String,
+  port : Int,
+  user : String,
+  kh : KhConfig,
+) -> Bool {
   let mut dir : String? = None
   // 可以给多次:`--sftp-read a --sftp-read b` 就是脚本里的两个 ReadFile。
   // 只保留最后一个的话,验证脚本就没法在一次会话里同时读小文件和大文件,而
@@ -1274,7 +1295,7 @@ fn sftp_mode(argv : Array[String], port : Int, kh : KhConfig) -> Bool {
     script.push(@sftp.SftpOp::Stat(no_such_path()))
   }
   let ops = script
-  match @tcp.TcpConn::connect("127.0.0.1", port) {
+  match @tcp.TcpConn::connect(host, port) {
     None => {
       println("result: CONNECT_FAILED")
       return true
@@ -1663,6 +1684,17 @@ async fn main {
   // 都是空的,`find_port` / `find_user` 的缺省原样保留——既有门禁一个都没传
   // `--config`,所以它们看到的字节不会变。
   let cfg = cfg_resolve(argv)
+  // Loop #59: 拨号目标也来自配置。`HostName` 解析出来的是**连哪里**,而
+  // known_hosts 记的仍然是**用户输入的那个名字**——OpenSSH 的
+  // `add_host_to_hostfile(filename, host, key, ...)` 只收一个 host 参数,
+  // `write_host_entry(f, host, NULL, ...)` 的 ip 恒为 NULL(hostfile.c:542/476),
+  // 所以 `HostName` 根本不参与 pin 的键。记成解析后的名字会让下一次连接查不到。
+  let host = if cfg.hostname != "" { cfg.hostname } else { "127.0.0.1" }
+  // Loop #59: user 也在 main 里算一次,给所有会话路径。之前 `run_exec` /
+  // `run_shell` 各自 `find_user(@env.args())` 重新解析一遍——Loop #54 明确
+  // 消灭过这种「读侧写侧各问一次」的漂移,而 Loop #58 解析出来的 user 到不了
+  // 那两条路径。空串仍然换成 `find_user` 那个刻意的标记而不是默认值。
+  let user = if cfg.user != "" { cfg.user } else { find_user(argv) }
   let port = if cfg.port != "" {
     match parse_port(cfg.port, 0) {
       0 => find_port(argv)
@@ -1673,32 +1705,28 @@ async fn main {
   }
   // 解析一次,之后读侧和写侧共用这一份。见 `KhConfig` 的说明。
   let kh = kh_resolve(argv, port)
-  if sftp_mode(argv, port, kh) {
+  if sftp_mode(argv, host, port, user, kh) {
     return
   }
   let (shell_cmd, def_cols, def_rows, _) = shell_mode(argv)
   if shell_cmd != "" {
     let cols = int_flag(argv, "--cols", def_cols)
     let rows = int_flag(argv, "--rows", def_rows)
-    run_shell(port, shell_cmd, cols, rows, resize_flag(argv), kh)
+    run_shell(host, port, shell_cmd, cols, rows, resize_flag(argv), user, kh)
     return
   }
   match exec_command(argv) {
     Some(cmd) => {
-      run_exec(port, cmd, stdin_bytes(argv), env_flags(argv), kh)
+      run_exec(host, port, cmd, stdin_bytes(argv), env_flags(argv), user, kh)
       return
     }
     None => ()
   }
   if auth_mode(argv) {
-    // Loop #58: 整条优先级链已经在 `cfg_resolve` 里算完了(`--user` > `-o` > 文件)。
-    // 这里只做一件事:把空字符串换成 `find_user` 那个刻意的标记,而不是默认值——
-    // 「配置文件里也没有 User」必须仍然表现为 `<no-user-given>`。
-    let user = if cfg.user != "" { cfg.user } else { find_user(argv) }
     println("=== Loop #34 publickey auth vs real sshd ===")
     println("port: " + port.to_string())
     println("user: " + user)
-    match @tcp.TcpConn::connect("127.0.0.1", port) {
+    match @tcp.TcpConn::connect(host, port) {
       None => {
         println("result: CONNECT_FAILED")
         return
@@ -1781,7 +1809,7 @@ async fn main {
   if wants_session(argv) {
     println("=== Loop #33 encrypted session vs real sshd ===")
     println("port: " + port.to_string())
-    match @tcp.TcpConn::connect("127.0.0.1", port) {
+    match @tcp.TcpConn::connect(host, port) {
       None => {
         println("result: CONNECT_FAILED")
         return
@@ -1826,7 +1854,7 @@ async fn main {
   }
   println("=== Loop #31 live SSH handshake vs real sshd ===")
   println("port: " + port.to_string())
-  match @tcp.TcpConn::connect("127.0.0.1", port) {
+  match @tcp.TcpConn::connect(host, port) {
     None => {
       println("result: CONNECT_FAILED")
       return
