@@ -442,6 +442,11 @@ def c_header_template(vec):
         ('V10_PRESENTED_BLOB', vec['V10_presented_blob_hex']),
         ('V11_PRESENTED_BLOB', vec['V11_presented_blob_hex']),
         ('V12_PRESENTED_BLOB', vec['V12_presented_blob_hex']),
+        # Loop #56: @cert-authority 用例。C1/C3 出示的不是 CA 自己那把钥匙，
+        # C3 出示的**正是** CA 条目里那把——修 Loop #51 之前后者会返回 Ok。
+        ('C1_PRESENTED_BLOB', vec['C1_presented_blob_hex']),
+        ('C2_PRESENTED_BLOB', vec['C2_presented_blob_hex']),
+        ('C3_PRESENTED_BLOB', vec['C3_presented_blob_hex']),
     ]
     lines = []
     lines.append('/**')
@@ -480,6 +485,9 @@ def c_header_template(vec):
         ('V10_HOST', vec['V10_host']),
         ('V11_HOST', vec['V11_host']),
         ('V12_HOST', vec['V12_host']),
+        ('C1_HOST', vec['C1_host']),
+        ('C2_HOST', vec['C2_host']),
+        ('C3_HOST', vec['C3_host']),
     ]
     for name, s in str_vecs:
         # C 字符串字面量
@@ -503,6 +511,10 @@ def c_header_template(vec):
         ('V10_STATUS', int(vec['V10_expected_status'])),
         ('V11_STATUS', int(vec['V11_expected_status'])),
         ('V12_STATUS', int(vec['V12_expected_status'])),
+        # Loop #56: 4 = CertAuthority
+        ('C1_STATUS', int(vec['C1_expected_status'])),
+        ('C2_STATUS', int(vec['C2_expected_status'])),
+        ('C3_STATUS', int(vec['C3_expected_status'])),
         ('V9_PORT', int(vec['V9_port'])),
         ('V10_PORT', int(vec['V10_port'])),
         ('V11_PORT', int(vec['V11_port'])),
@@ -511,7 +523,9 @@ def c_header_template(vec):
     for name, v in int_vecs:
         lines.append(f'#define {name} {v}')
     lines.append('')
-    lines.append('/* HOST_OK=0 HOST_MISMATCH=1 HOST_UNKNOWN=2 HOST_INVALID=3 */')
+    lines.append('/* HOST_OK=0 HOST_MISMATCH=1 HOST_UNKNOWN=2 HOST_INVALID=3')
+    lines.append(' * HOST_CERT_AUTHORITY=4  (Loop #56; src/knownhosts has it since #51)')
+    lines.append(' */')
     lines.append('')
 
     # known_hosts 整行(test 给 harness 用)
@@ -526,6 +540,12 @@ def c_header_template(vec):
         ('V10_KH_LINE', vec['V10_knownhosts_line']),
         ('V11_KH_LINE', vec['V11_knownhosts_line']),
         ('V12_KH_LINE', vec['V12_knownhosts_line']),
+        # Loop #56: @cert-authority。C2 是**两行**（直接条目 + CA 条目），向量文件里
+        # 因此是两个键而不是一个带换行的值——向量文件是行式的。
+        ('C1_KH_LINE', vec['C1_knownhosts_line']),
+        ('C2_KH_LINE', vec['C2_knownhosts_line']),
+        ('C2_KH_LINE_CA', vec['C2_knownhosts_line_ca']),
+        ('C3_KH_LINE', vec['C3_knownhosts_line']),
     ]
     for name, s in line_vecs:
         byte_seq = ', '.join(str(ord(c)) for c in s)

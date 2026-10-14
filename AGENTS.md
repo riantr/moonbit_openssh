@@ -1265,6 +1265,172 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #56: known_hosts, three sides -- and the two references that had fallen behind
+
+The known_hosts chain in `verify_c/` is the oldest in the repository and, until this
+loop, nothing ran any of it automatically:
+
+```
+knownhosts_python_ref.py   42 self-checks against hashlib / hmac
+      |                    -> writes _knownhosts_ref_out.txt   (the vector file)
+      v
+gen_knownhosts_test.py     sanity-checks against FIPS 180-4 and RFC 2202
+                           -> emits src/knownhosts/knownhosts_test.mbt
+                           -> emits verify_c/_knownhosts_kat.h
+      |
+      v
+knownhosts_harness.c       28 assertions, built by build_knownhosts.bat
+```
+
+`knownhosts_test.mbt` asserting against vectors that the generator wrote from a file
+that Python wrote is a closed loop: a mistake anywhere inside it is invisible to it.
+**Two things are done here that nothing did before.**
+
+**One: the sides emit verdicts, not just bytes.** The new `cmd/knownhosts_kat` and
+the Python reference both print the *decision* each reaches for every vector --
+`0=Ok 1=Mismatch 2=Unknown 3=Invalid 4=CertAuthority` -- in the vector file's own
+`key = value` shape, so `host/verify_loop56.mjs` can line them up by name. The point
+is that a disagreement about what a pinning rule **means** shows up here; a
+disagreement about SHA-1 arithmetic is not the interesting one, and that has
+published constants.
+
+**Two: drift is an assertion.** The two generated files are compared byte for byte
+against what the generator produces right now. They were regenerated once by hand
+and then left alone, and a generator change nobody re-ran would otherwise sit there
+looking fine.
+
+#### The finding: two references still had the Loop #51/#53 fail-open
+
+Only `src/knownhosts` had the fix. `knownhosts_harness.c` and
+`knownhosts_python_ref.py` were both still on the Loop #14 rule, where a
+`@cert-authority` entry takes part in last-match-wins. Comparing a CA entry's blob
+against the presented host key is meaningless -- it holds the **CA's** public key,
+not this host's -- and **equal is fail-open**: a peer presenting the CA's own key
+as its host key used to be accepted. The vector set predated the fix, so **neither
+reference side had a single CA vector to notice**. Loop #51 fixed the bug and
+Loop #53 wrote down why; nobody noticed that fixing it in one place out of three is
+not a fix. Both sides are corrected here, `HOST_CERT_AUTHORITY = 4` is added to both,
+and C1-C3 pin it:
+
+| case | what it is | expected |
+|---|---|---|
+| C1 | CA entry covers the host, no direct entry | `4` CertAuthority |
+| C2 | direct entry **and** CA entry for the same host | `0` Ok -- the direct one speaks |
+| C3 | presenting the CA entry's **own** key | `4`, never `0` |
+
+C3 is the load-bearing one: it is the case that returned `Ok` before the fix.
+
+`CertAuthority` is not `Unknown` and the difference is operational, not cosmetic:
+"nobody has pinned this host" means *add a line*, "pinned via a CA and we do not
+verify certificates" means *get a new CA or re-sign*. Both refuse; they must not
+report the same thing. `check_host_key_strict` deliberately does **not** upgrade
+`CertAuthority` to `InvalidEntry` -- that would merge it with "the entry is broken".
+
+#### The case table is not uniform, and that is the trap
+
+The vectors do not spell themselves out by id. V2 is a wildcard match *of V1's line*
+and has no line of its own; V3/V6/V7 present `V1_blob_hex`, not their own
+`V*_blob_hex`; V7 is the strict path; V10 is two cases sharing one expected value;
+V8 is marker parsing and has no verdict at all. The first version of the emitter
+derived every key name as `<id>_knownhosts_line` / `<id>_presented_blob_hex`, which
+fed an **empty entry list** into four cases -- and `parse_file` on nothing returns
+no entries, which is a real verdict, `Unknown`, so those cases *passed*. That is the
+whole failure mode this loop is about, and it is now a hard abort:
+`assert_full_coverage` fails if the vector file carries an `_expected_status` that no
+row claims.
+
+That guard earned its keep immediately, on the author: the suffix length was written
+as 15 instead of 16, so `V1_expected_status` sliced down to `V1_`, and the guard
+reported "V1 has no row in the case table" -- an error that looks correct and is
+not. The suffix is a named constant now.
+
+**C2 is two known_hosts lines.** They were first written as one `key = value` whose
+value contained a newline, which quietly breaks the vector file itself: it is
+line-oriented, and both `pairs()` in the MoonBit emitter and `parse_kv` in Python
+read a second key out of a value that does not exist. It is two keys now
+(`C2_knownhosts_line`, `C2_knownhosts_line_ca`) and the generator splits them into
+`C2_KH_LINE` / `C2_KH_LINE_CA` for the C harness, whose `parse_kh_line` takes one
+line at a time.
+
+#### The gate, and four things it caught in its own first run
+
+`host/verify_loop56.mjs`, 41 checks. It refuses to overwrite a key it has already
+parsed, and it checks the **key sets** match before comparing values -- a case that
+exists on one side only does not error, it just stops being checked.
+
+- `V10_expected_status` was printed once per sub-case. A duplicate key, correctly
+  refused. The emitters now print it once, and the gate compares each sub-case to it.
+- The `*_strict_got_status` row was a duplicate wearing a different prefix: V7 *is*
+  the strict case. Both sides dropped it.
+- `^\s*fail\b` was case-sensitive and the harness prints `FAIL` in caps, so the
+  counter was always zero -- dead code shaped like a working second opinion. The
+  `Total:` line was doing the real work.
+- `build_knownhosts.bat` had CJK in `REM` comments. cmd reads a `.bat` in the OEM
+  code page, so the multibyte comment was split into byte sequences cmd then tried
+  to **execute**: the build still succeeded, but three `'...' is not recognized as
+  an internal or external command` lines landed in the middle of the output. That
+  noise is what made a real 24/28 regression read as a build break. The comments are
+  ASCII now, with a note saying why, and the script deletes the previous `.exe`
+  before compiling (the `build_ed25519.bat` rule from Loop #55).
+
+#### Coverage the emitters cannot supply between them
+
+Both emitters have `assert_full_coverage`, but two implementations that are wrong in
+the same way check each other perfectly. Delete the C3 row from **both** tables and
+their key sets stay identical while one case quietly stops being decided at all.
+The gate therefore reads `_knownhosts_ref_out.txt` itself -- the one artifact neither
+emitter gets to curate -- and fails if any `*_expected_status` in it has no verdict.
+`host/loop56_mutations.py` mutation E deletes the row from both tables *and* switches
+the emitter's guard off, and the gate's own check is what catches it.
+
+**Representation, not semantics.** Python's `marker` is the raw token (`@revoked`)
+and its two internal callers compare against `'@revoked'`; C's `kh_entry_t.marker`
+and MoonBit's `Marker` enum both carry the bare name. Three sides first met here and
+disagreed -- on representation, not on what a marker means -- so it is normalized at
+the emitter boundary rather than by rewriting the Python reference's internals.
+
+#### What the C side can and cannot contribute
+
+`knownhosts_harness.c` asserts `s == V*_STATUS`, so it yields a boolean, not a
+verdict. MoonBit and Python are compared **by value**; C is compared on whether it
+agreed with the pinned number. That asymmetry is the harness's, not the gate's, and
+it is written down rather than papered over.
+
+#### Mutations: 5 CAUGHT, 1 EQUIVALENT
+
+| | mutation | verdict |
+|---|---|---|
+| A | MoonBit lets CA entries back into last-match-wins | CAUGHT (C1/C2/C3 + 12 unit failures) |
+| B | the C harness stops treating a CA entry as "not a pin" | CAUGHT (24/28, four named assertions) |
+| C | the Python reference does the same | CAUGHT (three case disagreements) |
+| D | a generated file is hand-edited | CAUGHT by the drift check |
+| E | the C3 row is deleted from both tables, guard off | CAUGHT by the vector-file coverage check |
+| F | the gate's `parseKeyed` drops its `=` line guard | **EQUIVALENT** |
+
+F is a finding, not a failure: no line either emitter prints begins with `=`, so the
+guard cannot be observed here. The claim is bounded -- *on these outputs* -- and the
+distinction from `MISSED` is a verdict rather than a comment, because `MISSED` is an
+accusation and conflating the two makes both useless.
+
+**The mutation harness had a bug, and it is worth recording because it produced a
+confident wrong answer.** Its first version wrote each edit from the pristine text,
+so for a mutation with two edits to the *same* file the later one silently undid the
+earlier. Mutation E therefore never deleted the C3 row from `main.mbt` at all -- it
+only disabled the coverage guard, and it reported a crisp `CAUGHT` about a key-set
+mismatch that had nothing to do with what it claimed to test. Reading the current
+file content per edit fixes it. `python host/loop56_mutations.py E` now runs one
+mutation by label prefix, which is what made the discrepancy findable at all: the
+same mutation in isolation behaved differently from the same mutation in sequence.
+
+**Workspace note, not a project fact:** the `edit` tool in this workspace could not
+round-trip CJK inside `old_string` and reported "could not find the exact text" on
+lines that were present and unchanged. One attempt to fix a stray `")` that way
+wrote that line back as **invalid UTF-8**, which Python then refused to parse and
+which `edit` could still not match -- the one repair had to go through a script.
+Use **ASCII-only anchors** in `edit`, and in the mutation script too: an anchor that
+fails to match on an encoding round-trip reports `NOBUILD`, which reads as "nothing
+proven" rather than "the script is broken".
+
 ### Loop #55: a second pair of eyes, runnable
 
 `verify_c/` has held nine C harnesses and seven Python references since the

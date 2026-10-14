@@ -466,10 +466,23 @@ static int check_host_key_v2(kh_entry_t *entries, int n_entries,
             return 1;  /* Mismatch */
         }
     }
-    /* 3. last-match-wins: Revoked 不参与 host 选择 */
+    /* 3. last-match-wins: 只有**直接**条目参与。
+     *
+     * Loop #56: 这里原来只 `continue` 掉 "revoked"，@cert-authority 照常参与——
+     * 而 CA 条目里存的是 CA 的公钥，不是这台主机的主机密钥。拿它和出示的主机密钥
+     * 比相等是无意义的比较，**而且相等时是 fail-open**：对端出示 CA 的公钥当主机
+     * 密钥就过。src/knownhosts/check.mbt 从 Loop #51 起就没这个洞；本 harness 和
+     * knownhosts_python_ref.py 都还停在 Loop #14 的四值状态，是 Loop #56 建 C1-C3
+     * 用例时才发现两侧早已落后。
+     *
+     * `ca_hit` 用来在最后区分「没人 pin 过」(2) 和「用 CA pin 的、而我们不验签」
+     * (4)。二者都是拒绝，但处置相反：前者该加一行，后者该换 CA 或重签。
+     */
     int found = -1;
+    int ca_hit = 0;
     for (int i = 0; i < n_entries; i++) {
         if (strcmp(entries[i].marker, "revoked") == 0) continue;
+        int is_ca = strcmp(entries[i].marker, "cert-authority") == 0;
         /* 遍历该 entry 的 host_patterns(逗号分隔) */
         const char *p = entries[i].host_raw;
         int hit = 0;
@@ -502,9 +515,12 @@ static int check_host_key_v2(kh_entry_t *entries, int n_entries,
             if (hit) break;
             p = comma ? comma + 1 : p + plen;
         }
-        if (hit) found = i;
+        if (hit) {
+            if (is_ca) ca_hit = 1;  /* 记下来,但不当 pin 用 */
+            else found = i;
+        }
     }
-    if (found < 0) return 2;  /* Unknown */
+    if (found < 0) return ca_hit ? 4 : 2;  /* CertAuthority : Unknown */
     if (entries[found].key_blob_len == presented_len &&
         memcmp(entries[found].key_blob, presented_blob, presented_len) == 0)
         return 0;  /* Ok */
@@ -720,6 +736,51 @@ int main(void) {
         int s = check_host_key_v2(entries, ne, V12_HOST, V12_PORT,
                                  V12_PRESENTED_BLOB, V12_PRESENTED_BLOB_len);
         ok("L14 V12 @revoked + A presented -> Mismatch", s == V12_STATUS);
+    }
+
+    /* === Loop #56: C1-C3 @cert-authority === */
+    {
+        /* C1 只有 CA 条目，出的钥匙跟 CA 无关 → CertAuthority(4)，不是 Unknown(2)。
+         * 二者都是拒绝，但处置相反：该加一行 vs 该换 CA。 */
+        kh_entry_t entries[1];
+        int ne = 0;
+        char *line = slurp(C1_KH_LINE, C1_KH_LINE_len);
+        if (parse_kh_line(line, &entries[ne])) ne++;
+        free(line);
+        int s = check_host_key_v2(entries, ne, C1_HOST, 0,
+                                 C1_PRESENTED_BLOB, C1_PRESENTED_BLOB_len);
+        ok("C56 C1 CA covers host, no direct entry -> CertAuthority",
+           s == C1_STATUS);
+    }
+    {
+        /* C2 同一主机上直接条目 + CA 条目并存 → 拿直接条目说话 */
+        kh_entry_t entries[2];
+        int ne = 0;
+        char *l1 = slurp(C2_KH_LINE, C2_KH_LINE_len);
+        if (parse_kh_line(l1, &entries[ne])) ne++;
+        free(l1);
+        char *l2 = slurp(C2_KH_LINE_CA, C2_KH_LINE_CA_len);
+        if (parse_kh_line(l2, &entries[ne])) ne++;
+        free(l2);
+        ok("C56 C2a both entries parsed", ne == 2);
+        int s = check_host_key_v2(entries, ne, C2_HOST, 0,
+                                 C2_PRESENTED_BLOB, C2_PRESENTED_BLOB_len);
+        ok("C56 C2 direct entry wins over CA -> Ok", s == C2_STATUS);
+    }
+    {
+        /* C3 **承重的一条**：出示的正是 CA 条目里那把钥匙。
+         * 本 block 存在之前，last-match-wins 会选中 CA 条目、blob 相等、返回 Ok——
+         * 也就是「对端拿 CA 的公钥当主机密钥就能连上」。src/knownhosts 从 Loop #51
+         * 起拒绝，本 harness 跟 Python ref 到 Loop #56 才跟上。 */
+        kh_entry_t entries[1];
+        int ne = 0;
+        char *line = slurp(C3_KH_LINE, C3_KH_LINE_len);
+        if (parse_kh_line(line, &entries[ne])) ne++;
+        free(line);
+        int s = check_host_key_v2(entries, ne, C3_HOST, 0,
+                                 C3_PRESENTED_BLOB, C3_PRESENTED_BLOB_len);
+        ok("C56 C3 presenting the CA's own key must NOT be Ok", s == C3_STATUS);
+        ok("C56 C3 ... and must be CertAuthority", s == 4);
     }
 
     printf("\nTotal: %d/%d passed\n", checks_passed, checks_total);

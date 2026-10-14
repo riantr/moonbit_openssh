@@ -1,0 +1,25 @@
+///| cmd/knownhosts_kat -- Loop #56: MoonBit's side of the known_hosts KAT.
+///
+///|
+///
+/// Prints the pinning *decisions* for the vectors in
+/// `verify_c/_knownhosts_ref_out.txt`, in that file's own `key = value` shape, so
+/// `verify_loop56` can compare them against the C harness and against Python
+/// without a second parser.
+///
+///|
+///
+/// native only: it reads the vector file, and that needs `moonbitlang/async/fs`.
+/// Gated per file rather than per package, for the reason `src/khfile` gives.
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/core/env",
+  "openssh/openssh_moonbit/src/knownhosts",
+}
+
+options(
+  targets: { "main.mbt": [ "native" ] },
+)
+
+pkgtype(kind: "executable")

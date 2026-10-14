@@ -274,6 +274,9 @@ HOST_OK = 0
 HOST_MISMATCH = 1
 HOST_UNKNOWN = 2
 HOST_INVALID = 3
+# Loop #56 补齐。src/knownhosts 在 Loop #51/#53 就有这个状态，C harness 和本文件
+# 却一直停在 Loop #14 的四值上——见 find_last_match_v2 的注释。
+HOST_CERT_AUTHORITY = 4
 
 
 def is_hashed_host(s: str) -> bool:
@@ -356,12 +359,20 @@ def match_host_pattern(host: str, pattern_list: str) -> bool:
 
 def find_last_match_v2(entries: List[dict], host_only: str, port: int):
     """Loop #14: 端口感知的 last-match-wins。
-    跳过 marker=Revoked 的条目(全局扫在 caller 中做)。
+
+    **Loop #56: 补上 `@cert-authority` 的排除。** 之前这里只跳过 `@revoked`，
+    而 `src/knownhosts/check.mbt` 从 Loop #51 起就不让 CA 条目参与 last-match-wins。
+    本文件是 Loop #14 之后没再跟进的第三侧，于是两边对同一个 known_hosts 给出不同
+    答案，而向量集里没有任何一条 CA 用例——分歧因此一直静默。
+
+    为什么这条重要：CA 条目存的是**CA 的公钥**，不是这台主机的主机密钥。拿它去和
+    出示的主机密钥比相等，其一是无意义的比较，其二是 **fail-open**——对端出示 CA
+    的公钥当主机密钥就会过。Loop #53 记录的实测就是这样。
     """
     found = None
     for e in entries:
-        if e['marker'] == '@revoked':
-            continue  # Revoked 全局后置,这里不参与 host match
+        if e['marker'] is not None:
+            continue  # Revoked 与 CertAuthority 都不是主机密钥的 pin
         # e['host_patterns'] 含每个 pattern 的 host_only
         for hp in e.get('host_patterns', []):
             if isinstance(hp, tuple):
@@ -407,13 +418,39 @@ def check_host_key(entries: List[dict], host_str: str, port: int,
     # last-match-wins 找 host+port 命中
     found = find_last_match_v2(entries, host_only_caller, port_caller)
     if found is None:
+        # Loop #56: 没有直接条目,但主机名被 @cert-authority 覆盖，是一个我们答不上来的
+        # 问题——既不是"没被 pin 过",也不是"钥匙变了"。
+        for e in entries:
+            if e['marker'] == '@cert-authority' and _entry_matches(
+                    e, host_only_caller, port_caller):
+                return HOST_CERT_AUTHORITY
         return HOST_UNKNOWN
     return HOST_OK if found['key_blob'] == presented_blob else HOST_MISMATCH
+
+
+def _entry_matches(e: dict, host_only: str, port: int) -> bool:
+    """单个 entry 是否命中 (host_only, port)。从 find_last_match_v2 里抽出来共用。"""
+    for hp in e.get('host_patterns', []):
+        if isinstance(hp, tuple):
+            pat_host_only, pat_port = hp
+        else:
+            pat_host_only, pat_port = hp, None
+        if pat_port is not None and pat_port != port:
+            continue
+        if is_hashed_host(pat_host_only):
+            if match_hashed_host(host_only, pat_host_only):
+                return True
+            continue
+        if match_pattern_nfa(host_only, pat_host_only):
+            return True
+    return False
 
 
 def check_host_key_strict(entries: List[dict], host_str: str, port: int,
                           presented_blob: bytes, strict_kex: bool) -> int:
     r = check_host_key(entries, host_str, port, presented_blob)
+    # Loop #56: 只把 Unknown 升级。CertAuthority 已经是一个拒绝了,升级成 Invalid 会把
+    # "用 CA pin 的"和"条目坏了"混成一类——与 check.mbt:180 的处置一致。
     if r == HOST_UNKNOWN and strict_kex:
         return HOST_INVALID
     return r
@@ -778,19 +815,227 @@ def emit_kats() -> None:
         L.append('V12_expected_status = ' + str(HOST_MISMATCH))
     L.append('')
 
+    # ------------------------------------------------------------------
+    # Loop #56: `@cert-authority` 用例。
+    #
+    # 这三条**在修好之前是通过的**——C harness 和本文件都还停在 Loop #14 的
+    # 四值状态，CA 条目照常参与 last-match-wins。向量集里没有 CA 用例，所以
+    # 那处 fail-open 从 Loop #51 到 Loop #55 一路静默。加它们不是为了覆盖新功能,
+    # 是为了让"第三侧和 C 侧早就落后于 src/"这件事变成可执行的断言。
+    # ------------------------------------------------------------------
+    if _HAS_CRYPTO:
+        b64a = _b64.b64encode(BLOB_A).decode().rstrip('=')
+        b64b = _b64.b64encode(BLOB_B).decode().rstrip('=')
+
+        L.append('[C1 @cert-authority covers host, no direct entry '
+                 '-> CertAuthority (4)]')
+        L.append('C1_host = ca.example.com')
+        L.append('C1_port = 0')
+        L.append('C1_presented_blob_hex = ' + BLOB_A.hex())
+        L.append('C1_knownhosts_line = '
+                 f'@cert-authority ca.example.com ssh-ed25519 {b64b}')
+        L.append('C1_expected_status = ' + str(HOST_CERT_AUTHORITY))
+        L.append('')
+
+        # 直接条目排在 CA 条目前面:拿直接条目说话——那才是"我们钉过这把钥匙"。
+        #
+        # 两条 known_hosts 行拆成两个键,不合并成一个值:向量文件是行式的
+        # `key = value`，把换行塞进值里会让 MoonBit 发射器的 pairs() 和这里的
+        # parse_kv 都读不出第二个键——错得很像对，所以拆开。
+        L.append('[C2 direct entry beats @cert-authority for the same host '
+                 '-> Ok (0)]')
+        L.append('C2_host = ca2.example.com')
+        L.append('C2_port = 0')
+        L.append('C2_presented_blob_hex = ' + BLOB_A.hex())
+        L.append('C2_knownhosts_line = '
+                 f'ca2.example.com ssh-ed25519 {b64a}')
+        L.append('C2_knownhosts_line_ca = '
+                 f'@cert-authority ca2.example.com ssh-ed25519 {b64b}')
+        L.append('C2_expected_status = ' + str(HOST_OK))
+        L.append('')
+
+        # **这条是承重的。** 出示的正好就是 CA 条目里那把钥匙。Loop #51 之前
+        # last-match-wins 会选中这条 CA 条目、blob 相等,于是返回 Ok——对端拿 CA 的
+        # 公钥当主机密钥就能连上。修好之后必须是 CertAuthority。
+        L.append('[C3 presenting the CA entry\'s own key must NOT be Ok '
+                 '-> CertAuthority (4); this is the fail-open case]')
+        L.append('C3_host = ca3.example.com')
+        L.append('C3_port = 0')
+        L.append('C3_presented_blob_hex = ' + BLOB_B.hex())
+        L.append('C3_knownhosts_line = '
+                 f'@cert-authority ca3.example.com ssh-ed25519 {b64b}')
+        L.append('C3_expected_status = ' + str(HOST_CERT_AUTHORITY))
+        L.append('')
+
     out = '\n'.join(L) + '\n'
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             '_knownhosts_ref_out.txt')
     with open(out_path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(out)
     print(f'wrote {out_path} ({len(out)} bytes, {len(L)} lines)')
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Loop #56: 判定发射（Python 侧）
+#
+# verify_loop56 比的是**判定值**（0=Ok 1=Mismatch 2=Unknown 3=Invalid），
+# 不是"测试有没有过"。C harness 只断言 `s == V*_STATUS`，只能给出布尔；
+# MoonBit 和 Python 都发判定值，三方才能对同一份规则得出同一个结论。
+#
+# 这张表与 cmd/knownhosts_kat/main.mbt 的 `cases`、以及
+# verify_c/knownhosts_harness.c 的 block 逐行对应。三处各写一遍是刻意的：
+# 它们是三份独立实现，任何一份抄错都会在门禁上表现为分歧，而不是安静地一起错。
+# ---------------------------------------------------------------------------
+
+# (id, line_key, blob_key, host_key, port_key, strict)
+# `key:X` 从向量文件取，`lit:X` 是字面量。
+VERDICT_CASES = [
+    # V1 single host match
+    ('V1', 'key:V1_knownhosts_line', 'key:V1_blob_hex',
+     'key:V1_host', 'lit:0', False, ''),
+    # V2 wildcard host —— 复用 V1 的行和 blob
+    ('V2', 'key:V1_knownhosts_line', 'key:V1_blob_hex',
+     'key:V2_host', 'lit:0', False, ''),
+    # V3 `!` 前缀不影响其它匹配
+    ('V3', 'key:V3_knownhosts_line', 'key:V1_blob_hex',
+     'key:V3_host', 'lit:0', False, ''),
+    # V4 `|1|` HMAC-SHA1 哈希主机
+    ('V4', 'key:V4_knownhosts_line', 'key:V4_blob_hex',
+     'key:V4_host', 'lit:0', False, ''),
+    # V5 命中主机但公钥不同
+    ('V5', 'key:V5_knownhosts_line', 'key:V5_presented_blob_hex',
+     'key:V5_host', 'lit:0', False, ''),
+    # V6 未知主机
+    ('V6', 'key:V6_knownhosts_line', 'key:V1_blob_hex',
+     'key:V6_host', 'lit:0', False, ''),
+    # V7 strict：Unknown 升级成 Invalid
+    ('V7', 'key:V7_knownhosts_line', 'key:V1_blob_hex',
+     'key:V7_host', 'lit:0', True, ''),
+    # V9 明文主机 + 默认端口
+    ('V9', 'key:V9_knownhosts_line', 'key:V9_presented_blob_hex',
+     'key:V9_host', 'key:V9_port', False, ''),
+    # V10 `[host]:port` 两种写法
+    ('V10a', 'key:V10_knownhosts_line', 'key:V10_presented_blob_hex',
+     'key:V10_host', 'lit:0', False, ''),
+    ('V10b', 'key:V10_knownhosts_line', 'key:V10_presented_blob_hex',
+     'lit:foo.example.com', 'key:V10_port', False, ''),
+    # V11 端口不符
+    ('V11', 'key:V11_knownhosts_line', 'key:V11_presented_blob_hex',
+     'key:V11_host', 'key:V11_port', False, ''),
+    # V12 `@revoked` 命中
+    ('V12', 'key:V12_knownhosts_line', 'key:V12_presented_blob_hex',
+     'key:V12_host', 'key:V12_port', False, ''),
+    # Loop #56 `@cert-authority`。C 侧对应 knownhosts_harness.c 的 C1-C3 block。
+    # 第 7 项是**可选**的第二条 known_hosts 行（'' = 没有）。C2 需要它：一个主机上
+    # 直接条目和 CA 条目同时存在时，谁说话才是这轮要比的东西。
+    ('C1', 'key:C1_knownhosts_line', 'key:C1_presented_blob_hex',
+     'key:C1_host', 'key:C1_port', False, ''),
+    ('C2', 'key:C2_knownhosts_line', 'key:C2_presented_blob_hex',
+     'key:C2_host', 'key:C2_port', False, 'key:C2_knownhosts_line_ca'),
+    ('C3', 'key:C3_knownhosts_line', 'key:C3_presented_blob_hex',
+     'key:C3_host', 'key:C3_port', False, ''),
+]
+
+
+def _vval(vec: dict, spec: str) -> str:
+    """`key:X` 取向量文件，`lit:X` 用字面量。和 MoonBit 发射器同一个约定。"""
+    kind, _, body = spec.partition(':')
+    if kind == 'key':
+        return vec[body]
+    if kind == 'lit':
+        return body
+    raise ValueError(f'bad spec, want key: or lit: -> {spec}')
+
+
+def _base_id(cid: str) -> str:
+    """V10a / V10b 去掉子案后缀。"""
+    return cid[:-1] if cid[-1] in 'ab' else cid
+
+
+def parse_kv(text: str) -> dict:
+    """把向量文件读回 dict。跳过 `[小节]` 标题和空行。"""
+    out = {}
+    for raw in text.splitlines():
+        t = raw.strip()
+        if not t or t.startswith('[') or t.startswith('#') or t.startswith('='):
+            continue
+        if '=' not in t:
+            continue
+        k, _, v = t.partition('=')
+        out[k.strip()] = v.strip()
+    return out
+
+
+def emit_verdicts(text: str) -> None:
+    """把 Python 侧的判定打成 key = value，和 MoonBit 发射器同一形状。"""
+    vec = parse_kv(text)
+    L: List[str] = []
+    L.append('[V0 primitives: SHA-1 / HMAC-SHA1, keyed as in knownhosts_harness.c]')
+    L.append('V0a_sha1_empty_hex = ' + sha1(b'').hex())
+    L.append('V0b_sha1_abc_hex = ' + sha1(b'abc').hex())
+    L.append('V0c_sha1_long_hex = ' +
+             sha1(b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq').hex())
+    L.append('V0d_hmac_case1_hex = ' + hmac_sha1(b'\x0b' * 20, b'Hi There').hex())
+    L.append('V0e_hmac_case2_hex = ' +
+             hmac_sha1(b'Jefe', b'what do ya want for nothing?').hex())
+    L.append('V4a_hmac_hex = ' +
+             hmac_sha1(bytes.fromhex(vec['V4_salt_hex']),
+                       vec['V4_host'].encode('utf-8')).hex())
+    L.append('')
+
+    L.append('[V1-V12 + C1-C3 pinning decisions]')
+    for (cid, line_key, blob_key, host_key, port_key, strict,
+         extra_key) in VERDICT_CASES:
+        content = _vval(vec, line_key) + '\n'
+        if extra_key:
+            content += _vval(vec, extra_key) + '\n'
+        entries = parse_file(content)
+        blob = bytes.fromhex(_vval(vec, blob_key))
+        port = int(_vval(vec, port_key))
+        host = _vval(vec, host_key)
+        status = (check_host_key_strict(entries, host, port, blob, True)
+                  if strict else check_host_key(entries, host, port, blob))
+        base = _base_id(cid)
+        L.append(f'{cid}_got_status = {status}')
+        # 只在 base id 自己那行（或子案的 a 行）打一次期望值：V10a / V10b 共用同一
+        # 个被钉住的值，打两次就是重复键，门禁的解析器故意拒绝重复键。也不发
+        # `_strict_got_status`——V7 本来就是 strict 案，那行只是前缀不同的自我重复。
+        if not cid.endswith('b'):
+            L.append(f'{base}_expected_status = {vec[base + "_expected_status"]}')
+    L.append('')
+
+    L.append('[V8 markers: not a check_host_key verdict]')
+    v1 = vec['V1_knownhosts_line']
+    for tag, marker in (('revoked', 'revoked'), ('certauth', 'cert-authority')):
+        es = parse_file('@' + marker + ' ' + v1 + '\n')
+        L.append(f'V8{"a" if tag == "revoked" else "c"}_{tag}_parsed = '
+                 + ('1' if len(es) == 1 else '0'))
+        got = es[0]['marker'] if len(es) == 1 else 'none'
+        # 本文件的 `marker` 是原始 token（含 `@`），C 的 kh_entry_t.marker 和
+        # MoonBit 的 Marker 枚举都不含。三方在这里第一次真正撞上,说明分歧是**表示**
+        # 不是语义——所以在发射边界归一化,而不是改本文件的内部表示:find_last_match_v2
+        # 和 check_host_key 都按 '@revoked' 比,改了会连带动两处。
+        L.append(f'V8{"b" if tag == "revoked" else "d"}_{tag}_marker = '
+                 + ('none' if got == 'none' else got.lstrip('@')))
+    L.append('')
+
+    L.append('[E1 empty entries -> Unknown; C checks this inline against a literal]')
+    L.append('E1_empty_entries_got_status = ' +
+             str(check_host_key([], 'any.host', 0,
+                                bytes.fromhex(vec['V1_blob_hex']))))
+    L.append('')
+
+    for line in L:
+        print(line)
 
 
 def main() -> int:
     if not selfcheck():
         print('SELF-CHECK FAILED; aborting before KAT emit')
         return 1
-    emit_kats()
+    text = emit_kats()
+    emit_verdicts(text)
     return 0
 
 
