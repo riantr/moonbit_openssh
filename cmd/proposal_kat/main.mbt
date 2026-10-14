@@ -78,6 +78,10 @@ fn main {
   // Emitted so the gate can assert they stay deleted without grepping the tree.
   println("DEFAULTS_REMOVED 4")
 
+  // Loop #61: the two axes Loop #60 left as `info`.
+  println("RUNNABLE_KEX " + join_list(@kexflow.runnable_kex_names()))
+  println("RUNNABLE_HOSTKEY " + join_list(@kexflow.runnable_hostkey_names()))
+
   // --- a peer proposal, for the scope check only ---
   // Deliberately carries two names with no packet-layer path. If the gate ever
   // stops classifying this as server scope, the rule has widened.
@@ -105,8 +109,8 @@ fn emit_server(label : String, enc : String, mac : String) -> Unit {
 
 fn emit(label : String, scope : String, p : @kexflow.Proposal) -> Unit {
   println("PROPOSAL \{label} scope=\{scope}")
-  emit_list("  kex", p.kex_algs, "info")
-  emit_list("  hostkey", p.hostkey_algs, "info")
+  emit_list("  kex", p.kex_algs, "kex")
+  emit_list("  hostkey", p.hostkey_algs, "hostkey")
   emit_list("  enc", p.enc_ctos, "enc")
   emit_list("  mac", p.mac_ctos, "mac")
   // enc_stoc/mac_stoc are separate wire categories with their own strings; a
@@ -123,7 +127,16 @@ fn emit(label : String, scope : String, p : @kexflow.Proposal) -> Unit {
     None => ()
     Some(name) => println("  verdict_stoc=UNRUNNABLE(\{name})")
   }
-  if bad is None && bad2 is None {
+  // Loop #61: kex and hostkey used to be tagged `info` here, i.e. emitted with
+  // no verdict at all. That was the gap Loop #60 declared out loud. Both axes
+  // turned out to be honest -- so the tags now carry real verdicts and the gate
+  // can prove they stay that way.
+  let bad3 = @kexflow.check_proposal_runnable(p)
+  match bad3 {
+    None => ()
+    Some(name) => println("  verdict_full=UNRUNNABLE(\{name})")
+  }
+  if bad is None && bad2 is None && bad3 is None {
     println("  verdict=honorable")
   }
   // What a peer supporting our first runnable name would hand us. Reported, not
@@ -136,21 +149,50 @@ fn emit(label : String, scope : String, p : @kexflow.Proposal) -> Unit {
 }
 
 ///|
-/// One list, one name per line. `kind` is `enc`, `mac`, or `info`: `info` marks
-/// the categories the packet layer does not gate (kex, hostkey), so `NO-PATH`
-/// always means "this client would be over-promising on the transport" and
-/// never "we happen not to implement that kex yet".
+/// One list, one name per line. `kind` is `kex`, `hostkey`, `enc`, or `mac`.
+/// `info` is still accepted and means "emitted, not judged" -- the peer fixture
+/// uses it for categories that are exempt. Loop #61 replaced the old blanket
+/// `info` on kex and hostkey, which had been emitting those two categories with
+/// no verdict at all.
 fn emit_list(prefix : String, list : String, kind : String) -> Unit {
   let names = split_alg_list(list)
   for n in names {
-    let ok = if kind == "info" {
-      true
+    // Three outcomes, not two. `MARKER` is a name that is not an algorithm at
+    // all (`ssh -Q kex` does not list it); `POLICY-GATED` is a real category
+    // this client handles by refusing rather than by implementing
+    // (`ssh -Q key-cert` lists these separately). Folding either into `ok` would
+    // be a lie, and into `NO-PATH` would be wrong -- the first version of this
+    // file did the latter and the gate caught two false positives on its first
+    // honest run.
+    let tag = if kind == "info" {
+      "info"
+    } else if kind == "kex" && @kexflow.is_pseudo_kex_alg(n) {
+      "MARKER"
+    } else if kind == "hostkey" && @kexflow.is_cert_hostkey_alg(n) {
+      "POLICY-GATED"
     } else if kind == "mac" {
-      @bpacket.is_runnable_mac(n)
+      if @bpacket.is_runnable_mac(n) {
+        "ok"
+      } else {
+        "NO-PATH"
+      }
+    } else if kind == "kex" {
+      if @kexflow.is_runnable_kex(n) {
+        "ok"
+      } else {
+        "NO-PATH"
+      }
+    } else if kind == "hostkey" {
+      if @kexflow.is_runnable_hostkey(n) {
+        "ok"
+      } else {
+        "NO-PATH"
+      }
+    } else if @bpacket.is_runnable_cipher(n) {
+      "ok"
     } else {
-      @bpacket.is_runnable_cipher(n)
+      "NO-PATH"
     }
-    let tag = if ok { "ok" } else { "NO-PATH" }
     println("\{prefix} name=\{n} kind=\{kind} \{tag}")
   }
 }

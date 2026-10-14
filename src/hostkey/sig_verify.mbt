@@ -180,6 +180,69 @@ pub fn HostKey::describe(self : HostKey) -> (String, Int) {
 }
 
 ///|
+/// Loop #61: the algorithm-name lists live here, once.
+///
+/// `agrees_with_alg` used to spell its names inline. That was fine while the
+/// only consumer was the pairwise question "does this key match this name",
+/// but it left no way to answer the set question -- "which names can this
+/// client actually verify?" -- without a second hand-written list, which is
+/// exactly the drift Loop #60 removed from `src/kex_names`. So the names are
+/// named, and `verifiable_alg_names` below is their union.
+///
+/// `ssh-rsa` is absent on purpose: `rsa_digest_of_sigtype` maps it to SHA-1,
+/// which this project does not have. Advertising it and failing later at
+/// verify time would blame an algorithm that was never selected.
+fn ed25519_alg_names() -> Array[String] {
+  ["ssh-ed25519"]
+}
+
+fn ecdsa_p256_alg_names() -> Array[String] {
+  ["ecdsa-sha2-nistp256"]
+}
+
+fn ecdsa_p384_alg_names() -> Array[String] {
+  ["ecdsa-sha2-nistp384"]
+}
+
+///| RFC 8332 names only -- the blob's own type string `ssh-rsa` is not here.
+fn rsa_alg_names() -> Array[String] {
+  ["rsa-sha2-256", "rsa-sha2-512"]
+}
+
+///|
+/// Every host key algorithm name this client can verify, in a stable order.
+///
+/// This is the union of the four lists above, not an independent list. If a
+/// key type ever gains a name, exactly one place changes.
+pub fn verifiable_alg_names() -> Array[String] {
+  let out : Array[String] = []
+  for n in ed25519_alg_names() {
+    out.push(n)
+  }
+  for n in ecdsa_p256_alg_names() {
+    out.push(n)
+  }
+  for n in ecdsa_p384_alg_names() {
+    out.push(n)
+  }
+  for n in rsa_alg_names() {
+    out.push(n)
+  }
+  out
+}
+
+///|
+/// Is `alg` a host key algorithm name this client can verify?
+pub fn is_verifiable_alg(alg : String) -> Bool {
+  for n in verifiable_alg_names() {
+    if n == alg {
+      return true
+    }
+  }
+  false
+}
+
+///|
 /// 这个密钥与协商出的算法名 `alg` 是否配对。
 ///
 /// 这是两条传输层驱动原来**各自**抄了一份的规则,而 RFC 8332 正好把它变成
@@ -191,15 +254,13 @@ pub fn HostKey::describe(self : HostKey) -> (String, Int) {
 /// 映射到本项目没有的 SHA-1。
 pub fn HostKey::agrees_with_alg(self : HostKey, alg : String) -> Bool {
   match self {
-    Ed25519Key(_) => alg == "ssh-ed25519"
-    EcdsaKey(bits, _) => {
-      let want = if bits == 256 {
-        "ecdsa-sha2-nistp256"
+    Ed25519Key(_) => ed25519_alg_names().contains(alg)
+    EcdsaKey(bits, _) =>
+      if bits == 256 {
+        ecdsa_p256_alg_names().contains(alg)
       } else {
-        "ecdsa-sha2-nistp384"
+        ecdsa_p384_alg_names().contains(alg)
       }
-      alg == want
-    }
     RsaKey(_, _) =>
       match rsa_digest_of_keyname(alg) {
         Some(_) => true

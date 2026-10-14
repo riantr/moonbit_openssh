@@ -161,10 +161,21 @@ async function main() {
   // gate therefore keeps its own copy of the runnable set and recomputes.
   const gateCiphers = new Set(["chacha20-poly1305@openssh.com", "aes128-ctr"]);
   const gateMacs = new Set(["hmac-sha2-256"]);
+  // Loop #61 widened the emitter to four verdicts and to the kex/hostkey
+  // categories. This gate's claim is cipher and MAC only -- the AGENTS.md entry
+  // for Loop #60 says so in as many words -- so it recomputes those two
+  // categories and, for the other two, asserts that it is *not* judging them.
+  //
+  // The first version recomputed every non-`info` kind against the cipher/MAC
+  // sets, which turned `ssh-ed25519` and `curve25519-sha256` into five
+  // confident failures. Out-of-scope is not the same as passing, and it has to
+  // be stated rather than left to happen.
+  const OUT_OF_SCOPE_KINDS = new Set(["kex", "hostkey"]);
   for (const c of clients) {
     const disagree = c.names
       .filter((n) => n.kind !== "info")
       .filter((n) => {
+        if (OUT_OF_SCOPE_KINDS.has(n.kind)) return false;
         const want = n.kind === "mac" ? gateMacs.has(n.name) : gateCiphers.has(n.name);
         return n.tag !== (want ? "ok" : "NO-PATH");
       })
@@ -173,6 +184,17 @@ async function main() {
       `client proposal ${c.label}: the gate's own table agrees with the emitter`,
       disagree.length === 0,
       disagree.join(", "),
+    );
+  }
+  for (const c of clients) {
+    const judgedWrong = c.names
+      .filter((n) => OUT_OF_SCOPE_KINDS.has(n.kind))
+      .filter((n) => n.tag === "NO-PATH")
+      .map((n) => `${n.name}=NO-PATH`);
+    expect(
+      `client proposal ${c.label}: this gate does not judge kex/hostkey`,
+      judgedWrong.length === 0,
+      judgedWrong.join(", "),
     );
   }
 

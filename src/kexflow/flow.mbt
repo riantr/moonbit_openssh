@@ -19,13 +19,31 @@ pub const KX_MSG_KEX_ECDH_REPLY : Byte = b'\x1f'
 pub const KX_MSG_NEWKEYS : Byte = b'\x15'
 
 ///|
-/// chachapoly 鏂瑰悜瀵嗛挜鎬婚暱(cipher.c 琛?key_len=64=chacha32+poly澶?2;
-/// AEAD 涓?iv_len=0銆乵ac 涓嶇敤 鈫?we_need=64,kex.c choose_enc MAXIMUM 閫昏緫)
-const FLOW_WE_NEED : Int = 64
-
-///|
 /// 娴佺▼閿欒(鎵佸钩涓冨€?Loop #13 鏂板 HostKeyMismatch/HostKeyUnknown)
 pub(all) enum FlowError {
+  /// Loop #61: the proposal names a KEX or host key algorithm this client
+  /// cannot execute.
+  ///
+  /// This used to be reported as `ProtocolError`, which means "the peer's
+  /// bytes are malformed". The two send you to completely different places:
+  /// one to a packet capture, the other to the algorithm tables. The tree
+  /// already made this split once, for `@cert-authority` -- `HostKeyCertAuthority`
+  /// is its own variant precisely because reporting it as `HostKeyMismatch`
+  /// walks the user straight into `--kh-tofu`, which is the opposite of the fix.
+  /// Same rule, second application.
+  ///
+  /// Direction matters: this says **our** proposal over-promised. A *peer*
+  /// naming something we lack is fine -- `negotiate` takes the intersection and
+  /// lands on something we can run, so it never reaches here. The variant
+  /// exists so the defect fails in development rather than the first time
+  /// somebody runs a handshake in production.
+  AlgorithmNotRunnable(String)
+  /// Loop #61: the negotiated cipher or MAC has no packet-layer path.
+  ///
+  /// Kept separate from `AlgorithmNotRunnable` because the owner differs: this
+  /// one is fixed in `src/bpacket`, the other by changing a proposal. Merging
+  /// them would erase the question of *who* has to act.
+  CipherNotRunnable(String)
   /// 鎻愭/娑堟伅缁撴瀯闂(鐭?buffer銆佸熬闅忔畫浣欍€乵sg type 閿欍€佸崗鍟嗙粨鏋滈潪鏈瓙闆?
   ProtocolError
   /// 瀵圭鎻愭涓庢垜鏂规棤鍏叡绠楁硶(navigator 搂1 match_list 鍒嗙被)
@@ -166,6 +184,14 @@ pub fn flow_on_reply(
   reply_msg : FixedArray[Byte],
 ) -> ReplyOutcome {
   // ---- kex_input_kexinit + kex_choose_conf(REPLY 鍓嶇殑鏃跺簭)----
+  // Loop #61: check the *proposal* before using anything it says. The old code
+  // only checked the negotiated outcome, and only for kex and hostkey -- so an
+  // unrunnable cipher survived all the way to key derivation, where the
+  // hardcoded FLOW_WE_NEED below quietly produced a chacha-length key.
+  match check_proposal_runnable(my) {
+    None => ()
+    Some(bad) => return Failed(AlgorithmNotRunnable(bad))
+  }
   let peer_init = match parse_kexinit(peer_ic_payload) {
     Some(p) => p
     None => return Failed(ProtocolError)
@@ -175,8 +201,27 @@ pub fn flow_on_reply(
     Err(e) => return Failed(NoAgreement(e))
   }
   // 瀛愰泦鍗曠畻娉?鍗忓晢鍑虹殑 hostkey 蹇呴』鏄湰瀹炵幇鏀寔鐨?ssh-ed25519
-  if neg.kex_alg != "curve25519-sha256" || neg.hostkey_alg != "ssh-ed25519" {
-    return Failed(ProtocolError)
+  // Loop #61: this flow implements exactly one KEX and exactly one host key
+  // algorithm, so anything else is a capability gap on our side, not a
+  // protocol violation by the peer. `AlgorithmNotRunnable`, not
+  // `ProtocolError`.
+  if neg.kex_alg != "curve25519-sha256" {
+    return Failed(AlgorithmNotRunnable("kex:" + neg.kex_alg))
+  }
+  if neg.hostkey_alg != "ssh-ed25519" {
+    return Failed(AlgorithmNotRunnable("hostkey:" + neg.hostkey_alg))
+  }
+  // Loop #61: the negotiated cipher and MAC have to be ones `src/bpacket` can
+  // actually run. `transport_params` aborts on anything else, so the check has
+  // to come first -- and it is a separate error because the fix lives in a
+  // different package.
+  if !@bpacket.cipher_needs_mac(neg.cipher_ctos) &&
+    !@bpacket.is_runnable_cipher(neg.cipher_ctos) {
+    return Failed(CipherNotRunnable(neg.cipher_ctos))
+  }
+  if @bpacket.cipher_needs_mac(neg.cipher_ctos) &&
+    !@bpacket.is_runnable_mac(neg.mac_ctos) {
+    return Failed(CipherNotRunnable(neg.mac_ctos))
   }
   // ---- input_kex_gen_reply ----
   // msg type 瀛楄妭蹇呴』涓?31(:135 dispatch 淇濊瘉;姝ゅ鏄惧紡鏍￠獙)
@@ -239,7 +284,33 @@ pub fn flow_on_reply(
     }
   }
   // :212-213 kex_derive_keys(initial:session_id=H)+ NEWKEYS 缁勫寘
-  let keys = @kexc25519.derive_keys(shared_mpint, h, FLOW_WE_NEED)
+  // Loop #61: the derivation length comes from the packet layer's parameter
+  // table, not from a constant. `FLOW_WE_NEED` was 64 -- correct for
+  // chacha20-poly1305 and silently wrong for anything else, and it was the
+  // reason an unrunnable cipher produced a *successful* `Established` with a
+  // key of the wrong length rather than an error.
+  let (we_key, _we_block, _we_iv, we_mac) = @bpacket.transport_params(
+    neg.cipher_ctos,
+    neg.mac_ctos,
+  )
+  let mut we_need = we_key
+  if we_mac > we_need {
+    we_need = we_mac
+  }
+  // Loop #61: argument order. `derive_keys(hash, shared_secret_mpint, we_need)`
+  // and internally `derive_single` concatenates K || H || letter || session_id
+  // (RFC 4253 7.2). This call site passed them the other way round, so K1 was
+  // HASH(H || K || letter || H) and `session_id` came back as the shared secret.
+  // The `session_id == h` invariant two lines below then always failed, and the
+  // failure was reported as `ProtocolError` -- "the peer's bytes are malformed"
+  // -- for a bug that is entirely ours.
+  //
+  // Nothing caught it because this function has no caller. `ssh_full_ws` calls
+  // `flow_start` and stops there. A function that has never run cannot have
+  // been tested, and its three defects -- this one, the hardcoded FLOW_WE_NEED,
+  // and the absent cipher guard -- are the reason. The type system cannot help
+  // either: both parameters are `FixedArray[Byte]`.
+  let keys = @kexc25519.derive_keys(h, shared_mpint, we_need)
   if !kf_bytes_eq(keys.session_id, h) {
     // initial 鍦烘櫙鎭掔瓑;闃插尽鎬ф柇瑷€(娲剧敓灞傚绾︽紓绉诲嵆鏆撮湶)
     return Failed(ProtocolError)

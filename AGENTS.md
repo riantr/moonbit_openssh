@@ -1265,6 +1265,121 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #61: the kex and host key axes, and the function that had never been run
+
+Loop #60 left kex and hostkey out of scope and said so. This closes that, and
+the reason it was left out is where the real defect turned out to be.
+
+**`flow_on_reply` could never succeed.** It called
+`derive_keys(shared_mpint, h, we_need)`. The signature is
+`derive_keys(hash, shared_secret_mpint, we_need)`, and `derive_single`
+concatenates `K ‖ H ‖ letter ‖ session_id` (RFC 4253 §7.2), so the call site had
+the two operands swapped: K1 was computed as HASH(H ‖ K ‖ letter ‖ H), and
+`session_id` came back as the shared secret. The `session_id == h` assertion two
+lines below therefore failed every single time, and reported
+`Failed(ProtocolError)` — "the peer's bytes are malformed" — for a bug that is
+entirely ours. `cmd/sshclient/live.mbt` calls the same function the other way
+round, and that path is validated against a real sshd, which is what makes the
+disagreement decidable.
+
+Nothing caught it because **the function has no caller**. `cmd/ssh_full_ws`
+calls `flow_start` and stops. A function that has never run cannot have been
+tested, and the other two defects were sitting in the same unlit room:
+
+- **`FLOW_WE_NEED = 64` hardcoded.** Right for chacha20-poly1305, silently the
+  wrong length for anything else — which is how an unrunnable cipher could still
+  produce a *successful* `Established`. Now derived from
+  `@bpacket.transport_params`.
+- **"We cannot answer this algorithm" was reported as `ProtocolError`.** Two
+  new variants, `AlgorithmNotRunnable` and `CipherNotRunnable`, kept separate
+  because the owner differs: the first is fixed by changing a proposal, the
+  second by adding to `src/bpacket`. The tree had already made this split once,
+  for `@cert-authority`, precisely because reporting it as `HostKeyMismatch`
+  walks the user into `--kh-tofu`.
+
+**The argument swap is now pinned by a test, not by reading code.** Both
+parameters are `FixedArray[Byte]`, so MoonBit cannot see a swap — a compile
+error would have been the cheapest possible defence and does not exist. `t12`
+asserts that `session_id` is the hash argument and that `K‖H` and `H‖K` derive
+different keys.
+
+**What I suspected and found clean, before writing anything.** I expected the
+host key list to be the real problem — a client advertising RSA and ECDSA host
+keys it cannot verify would be a genuine security defect. It is not:
+`HostKey::verify` does ed25519 and ECDSA, and `verify_with_alg` adds the RSA
+path (Loop #38) precisely because RFC 8332 means the negotiated name is not the
+blob's type string. All five names are backed. Recorded because "I checked and
+it was fine" is a result, and because the next person should not redo it.
+
+I also expected `cmd/ssh_full_ws` to carry a hand-copied proposal literal
+still naming the EtM MAC Loop #60 removed. It does not — it calls
+`Proposal::default_client(false)`, and its `make_server_kexinit_reply` is a mock
+*server*, exempt by design. Two of my three suspicions this loop were wrong,
+and both were caught by reading the source instead of the grep hit.
+
+**Two false positives, and what they were really telling me.** The first honest
+run reported `default_client/strict=true` and `live_proposal_with_certs=true` as
+over-promising. Both wrong, and the reasons matter:
+
+- `kex-strict-c-v00@openssh.com` **is not a key exchange**. OpenSSH appends it
+  in `kex_proposal_populate_entries` to signal strict-KEX, and `ssh -Q kex`
+  lists twelve algorithms that do not include it. Treating it as unimplemented
+  makes the gate demand the marker's removal — and the fix anyone reaches for
+  under that pressure is to drop it and turn off strict KEX. **A gate that
+  demands a security property be deleted is a security regression wearing the
+  costume of a failing test.**
+- `ssh-ed25519-cert-v01@openssh.com` is gated by **policy**, not by
+  implementation: Loop #53 parses and validates certificate structure but
+  deliberately refuses certificates as host keys. `ssh -Q key-plain` and
+  `ssh -Q key-cert` are two disjoint lists, which is the authority saying
+  exactly this.
+
+So a name list is not a uniform list of algorithms. The emitter now has four
+verdicts — `ok`, `NO-PATH`, `MARKER`, `POLICY-GATED` — and the gate asserts the
+classification rather than the binary, so a checker that answered `ok` for both
+would fail.
+
+**Gate defects found, all of them mine.** Four, and one of them a repeat:
+
+- The check used `ssh -Q key-plain` for all five host key names and failed on
+  `rsa-sha2-256` / `rsa-sha2-512`. It was right to fail: those are *signature*
+  algorithm names (RFC 8332), not key types, and `key-plain` lists `ssh-rsa`.
+  I made the RFC 8332 conflation in the very checker that exists to prevent it.
+  The category is `ssh -Q key-sig`.
+- `verdictFull === undefined` against a `null` initialiser — **the exact same
+  bug Loop #60 made with `verdict_stoc`**, five confident wrong failures. Same
+  gate-author, consecutive loops, same defect class: the process needs a rule,
+  not just the fix. In these emitters every optional field starts `null`, so the
+  test is `!field`, never `=== undefined`.
+- The source-text checks read my own explanatory comments. The comment
+  documenting the swap contains `derive_keys(hash, shared_secret_mpint, ...)`,
+  and the one documenting `FLOW_WE_NEED` says "`FLOW_WE_NEED` was 64" — three
+  confident failures caused by the gate reading its own documentation. **A
+  comment explaining a bug will always contain the bug's text**, so every
+  textual gate now runs on comment-stripped source.
+- Mutation B **slipped through**: `expect(...flowBody.includes("@bpacket.transport_params"))`
+  was satisfied by a leftover mention while the length was hardcoded. That is the
+  hollow-check shape again, and the mutation is now `let we_need : Int = 64`
+  with the mention removed, caught by asserting the *assignment* — seeded from
+  `we_key`, raised by `we_mac`, never bound to a numeric literal.
+
+**Results.** `verify_loop61.mjs` 62/62, `loop61_mutations.py` 5 CAUGHT /
+1 EQUIVALENT / 0 MISSED. `verify_loop60.mjs` unchanged at 73/73 and `loop53`–
+`loop59` still ALL PASS. `moon test src/kexflow` 15/15, `src/hostkey` 25/25,
+`src/sshconfig` 10/10, `src/knownhosts` 49/49, `src/bpacket` 25/25.
+`src/kexflow` and `src/hostkey` check clean on all four targets.
+
+The equivalent mutant is `flow_on_reply`'s new cipher guard short-circuited to
+`&& false`: unobservable today because every client proposal offers only
+chacha20-poly1305, so an unrunnable cipher is never negotiated. Dead defence
+now; live the moment a second cipher enters a proposal.
+
+**Still open, and named so it is not mistaken for done.** `flow_on_reply` has
+no caller and no end-to-end test — a real handshake vector through the browser
+path would be the next thing worth building. Argument order and the derived
+length are pinned, but "this function can complete a handshake" is not yet a
+claim anything here can support.
+
 ### Loop #60: a client proposal may only name algorithms the packet transport can run
 
 The invariant is one line. Writing it down is most of the work.

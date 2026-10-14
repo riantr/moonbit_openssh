@@ -302,3 +302,46 @@ test "t11_default_client_only_names_runnable_algs" {
   }
   assert_eq(@bpacket.selected_mac("chacha20-poly1305@openssh.com", p.mac_ctos), None)
 }
+
+fn kex_bytes_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
+  if a.length() != b.length() {
+    return false
+  }
+  for i = 0; i < a.length(); i = i + 1 {
+    if a[i] != b[i] {
+      return false
+    }
+  }
+  true
+}
+
+// ---- T12: Loop #61 -- the argument order nothing in the type system catches ----
+
+///|
+/// `derive_keys(hash, shared_secret_mpint, we_need)` puts K first and H second
+/// on the wire (RFC 4253 7.2: `K1 = HASH(K || H || letter || session_id)`).
+///
+/// Both parameters are `FixedArray[Byte]`, so swapping them compiles silently
+/// and runs silently -- and `flow_on_reply` had them swapped, which is why it
+/// could never return `Established` even though nothing had ever called it. This
+/// test exists to make the swap observable from the outside.
+test "t12_derive_keys_argument_order" {
+  let h : FixedArray[Byte] = FixedArray::make(32, b'\x11')
+  let k : FixedArray[Byte] = FixedArray::make(32, b'\x22')
+  let good = @kexc25519.derive_keys(h, k, 64)
+  let swapped = @kexc25519.derive_keys(k, h, 64)
+  if !kex_bytes_eq(good.session_id, h) {
+    abort("t12: session_id is the hash argument, by definition")
+  }
+  if kex_bytes_eq(swapped.session_id, h) {
+    abort("t12: the swapped call returned H as its session_id")
+  }
+  // Without this the two calls could agree on everything that matters and the
+  // test would still be saying something true.
+  if kex_bytes_eq(good.enc_key_ctos, swapped.enc_key_ctos) {
+    abort("t12: K||H and H||K must not derive the same encryption key")
+  }
+  if kex_bytes_eq(good.enc_key_stoc, good.enc_key_ctos) {
+    abort("t12: C and D are different letters and must differ")
+  }
+}
