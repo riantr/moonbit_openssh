@@ -92,3 +92,8 @@ src/wtlive/pkg.generated.mbti
 
 # === Third-party vendored source (keep) ===
 # Do NOT ignore *.c, *.h, *.py, *.json in src/ and verify_c/ etc.
+
+# === CI run artifacts (a report from one run, not source) ===
+# ci/artifacts/ci.json changes on every run; committing it turns a
+# CI report into a diff in an unrelated loop.
+ci/artifacts/
