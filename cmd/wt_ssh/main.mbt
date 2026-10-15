@@ -1028,7 +1028,7 @@ async fn main {
         println("result: USERAUTH_SUCCESS")
         cfg_report_tofu(r)
         println("user: " + r.user)
-        println("method: " + r.method)
+        println("method: " + r.auth_method)
         println("key_type: " + r.key_type)
         // Loop #38: the negotiated host key algorithm, the key type it turned
         // out to be, and the key size.  Mirrors `cmd/ssh_live --auth` exactly,

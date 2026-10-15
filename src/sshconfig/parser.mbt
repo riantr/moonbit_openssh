@@ -10,26 +10,6 @@
 /// 输出: Array[SshConfigSection] (按文件中出现顺序)
 
 ///|
-/// FixedArray[Byte] → String (ASCII)
-fn bytes_to_ascii_string(bytes : FixedArray[Byte]) -> String {
-  let sb = StringBuilder()
-  for i = 0; i < bytes.length(); i = i + 1 {
-    sb.write_char(bytes[i].to_int().unsafe_to_char())
-  }
-  sb.to_string()
-}
-
-///|
-/// ASCII string → FixedArray[Byte]
-fn ascii_bytes(s : String) -> FixedArray[Byte] {
-  let arr : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
-  for i = 0; i < s.length(); i = i + 1 {
-    arr[i] = s[i].to_int().to_byte()
-  }
-  arr
-}
-
-///|
 /// 字符串是否以 prefix 开头 (大小写敏感)
 fn starts_with(s : String, prefix : String) -> Bool {
   if s.length() < prefix.length() {
@@ -218,7 +198,6 @@ pub fn parse_ssh_config(content : String) -> Array[SshConfigSection] {
   let sections : Array[SshConfigSection] = []
   let mut current_patterns : Array[String] = []
   let mut current_options : Array[SshConfigOption] = []
-  let mut in_section = false
   let mut saw_any = false
 
   let mut start = 0
@@ -251,7 +230,6 @@ pub fn parse_ssh_config(content : String) -> Array[SshConfigSection] {
           let rest = sb2.to_string()
           current_patterns = split_whitespace(rest)
           current_options = []
-          in_section = true
           saw_any = true
         } else {
           let (keyword, value) = split_option(line)

@@ -4,6 +4,12 @@ import {
   // `@moonbitlang/async.run_async_main`, and a dependency's dependencies are not
   // in scope -- so without this line every test in the package fails to compile
   // with "Cannot use `async test`: package moonbitlang/async is not imported".
+  //
+  // `moon check --deny-warn` calls this import `unused_package`. It is not: the
+  // consumer is the compiler's `async test` expansion, which leaves no textual
+  // reference for the unused-import analysis to find. Loop #66 measured this by
+  // deleting the line -- 8 hard errors, one per `async test` block -- and put it
+  // back. Do not "clean it up".
   "moonbitlang/async",
   "moonbitlang/async/fs",
 }

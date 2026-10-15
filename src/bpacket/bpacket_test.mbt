@@ -87,7 +87,7 @@ fn bp_manual_frame(
 ///|
 /// 断言事件为 Packet 并返回内容
 fn bp_expect_packet(
-  res : RecvResult,
+  res : @bpacket.RecvResult,
   want_seqnr : UInt,
   want_type : Byte,
   want_payload : FixedArray[Byte],
@@ -121,8 +121,8 @@ fn bp_expect_packet(
 ///|
 /// 断言事件为指定错误
 fn bp_expect_error(
-  res : RecvResult,
-  pred : (PacketError) -> Bool,
+  res : @bpacket.RecvResult,
+  pred : (@bpacket.PacketError) -> Bool,
   label : String,
 ) -> Unit {
   match res.event {
@@ -150,8 +150,8 @@ fn bp_slice(
 
 ///|
 test "t1_plain_roundtrip" {
-  let s = SendCtx::new()
-  let r = RecvCtx::new()
+  let s = @bpacket.SendCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let payload = bp_payload(10, b'\x42')
   match s.emit(b'\x14', payload, bp_pad_src(32)) {
     Ok(sp) => {
@@ -172,7 +172,7 @@ test "t1_plain_roundtrip" {
 ///|
 test "t2_plain_framing_math" {
   // n=10:len_for_pad=16,padlen=8,total=24,packlen=20
-  let s = SendCtx::new()
+  let s = @bpacket.SendCtx::new()
   match s.emit(b'\x14', bp_payload(10, b'\x01'), bp_pad_src(32)) {
     Ok(sp) => {
       let f = sp.frame
@@ -209,8 +209,8 @@ test "t2_plain_framing_math" {
 ///|
 test "t3_aead_roundtrip_and_alignment" {
   let key = bp_key64()
-  let s = SendCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
-  let r = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+  let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
   let payload = bp_payload(10, b'\x42')
   match s.emit(b'\x14', payload, bp_pad_src(32)) {
     Ok(sp) => {
@@ -249,8 +249,8 @@ test "t3_aead_roundtrip_and_alignment" {
 ///|
 test "t5_pipelined_stream" {
   let key = bp_key64()
-  let s = SendCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
-  let r = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+  let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
   let mut stream : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   for round = 0; round < 3; round = round + 1 {
     match
@@ -301,8 +301,8 @@ test "t6_fragmented_delivery" {
   // plain 与 aead 各来一轮
   for variant = 0; variant < 2; variant = variant + 1 {
     let key = bp_key64()
-    let s = SendCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
-    let r = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+    let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
     let payload = bp_payload(9, b'\x77')
     match s.emit(b'\x04', payload, bp_pad_src(32)) {
       Ok(sp) => {
@@ -331,8 +331,8 @@ test "t6_fragmented_delivery" {
 ///|
 test "t7_tamper_body_auth_fail" {
   let key = bp_key64()
-  let s = SendCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
-  let r = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+  let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
   match s.emit(b'\x05', bp_payload(8, b'\x11'), bp_pad_src(32)) {
     Ok(sp) => {
       sp.wire[10] = sp.wire[10] ^ b'\x01'
@@ -357,8 +357,8 @@ test "t8_tamper_header_three_outcomes" {
   ]
   for flip in flips {
     let (pos, mask, name) = flip
-    let s = SendCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
-    let r = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+    let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
     match s.emit(b'\x06', bp_payload(8, b'\x22'), bp_pad_src(32)) {
       Ok(sp) => {
         sp.wire[pos] = sp.wire[pos] ^ mask
@@ -394,7 +394,7 @@ test "t9_bad_padlen_lower_bound" {
   // packlen=12 对齐(4+12=16%8==0),padlen=3 < 4
   let body = bp_payload(8, b'\x33')
   let frame = bp_manual_frame(12, 3, body)
-  let r = RecvCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let res = r.recv(frame)
   bp_expect_error(res, fn(err) { err is BadPadlen(_) }, "t9")
 }
@@ -404,7 +404,7 @@ test "t10_pad_overflow" {
   // packlen=12 对齐,padlen=12 > packlen-1
   let body = bp_payload(8, b'\x44')
   let frame = bp_manual_frame(12, 12, body)
-  let r = RecvCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let res = r.recv(frame)
   match res.event {
     Failed(PadOverflow(v)) =>
@@ -417,7 +417,7 @@ test "t10_pad_overflow" {
 
 ///|
 test "t11_bad_length_bounds" {
-  let r = RecvCtx::new()
+  let r = @bpacket.RecvCtx::new()
   // 下界:packlen=4 < 5
   let tiny = bp_manual_frame(4, 4, bp_payload(0, b'\x00'))
   // 注意 bp_manual_frame 会写 4+packlen=8 字节,body 写不下不覆盖
@@ -455,7 +455,7 @@ test "t11_bad_length_bounds" {
 test "t12_empty_payload" {
   // packlen=12 对齐,padlen=11 吃光 payload 区 → payload_len=0
   let frame = bp_manual_frame(12, 11, bp_payload(4, b'\x55'))
-  let r = RecvCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let res = r.recv(frame)
   bp_expect_error(res, fn(err) { err is EmptyPayload }, "t12")
 }
@@ -465,7 +465,7 @@ test "t13_bad_type_zero" {
   // packlen=12,padlen=7,payload_len=4,type=0x00
   let body : FixedArray[Byte] = FixedArray::make(4, b'\x00') // 全零 ⇒ type=0
   let frame = bp_manual_frame(12, 7, body)
-  let r = RecvCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let res = r.recv(frame)
   bp_expect_error(res, fn(err) { err is BadType(_) }, "t13")
 }
@@ -475,16 +475,16 @@ test "t13_bad_type_zero" {
 ///|
 test "t14_mode_switch_keeps_seqnr" {
   let key = bp_key64()
-  let s = SendCtx::new()
-  let r = RecvCtx::new()
+  let s = @bpacket.SendCtx::new()
+  let r = @bpacket.RecvCtx::new()
   let payload1 = bp_payload(6, b'\x66')
   match s.emit(b'\x15', payload1, bp_pad_src(32)) {
     Ok(sp) => bp_expect_packet(r.recv(sp.wire), 0U, b'\x15', payload1, "t14-p1")
     SeqnrWrapFatal => abort("t14: unexpected wrap")
   }
   // 模拟 NEWKEYS 后切换(ssh_set_newkeys 不重置 seqnr)
-  s.set_mode(Aead(ChachaPolyCtx::new64(key)))
-  r.set_mode(Aead(ChachaPolyCtx::new64(key)))
+  s.set_mode(Aead(@bpacket.ChachaPolyCtx::new64(key)))
+  r.set_mode(Aead(@bpacket.ChachaPolyCtx::new64(key)))
   if s.seqnr() != 1U || r.seqnr() != 1U {
     abort("t14: seqnr should be 1 after first packet")
   }
@@ -500,8 +500,8 @@ test "t14_mode_switch_keeps_seqnr" {
 ///|
 test "t15_strict_kex_newkeys_reset" {
   // strict 组
-  let s = SendCtx::make(Unencrypted, 0U, true, true)
-  let r = RecvCtx::make(Unencrypted, 0U, true, true)
+  let s = @bpacket.SendCtx::make(Unencrypted, 0U, true, true)
+  let r = @bpacket.RecvCtx::make(Unencrypted, 0U, true, true)
   // 先走两个普通包把 seqnr 推到 2
   for i = 0; i < 2; i = i + 1 {
     match s.emit(b'\x02', bp_payload(3, bp_byte(i)), bp_pad_src(32)) {
@@ -548,8 +548,8 @@ test "t15_strict_kex_newkeys_reset" {
     SeqnrWrapFatal => abort("t15: unexpected wrap")
   }
   // 非 strict 对照组:NEWKEYS 不归零
-  let s2 = SendCtx::new()
-  let r2 = RecvCtx::new()
+  let s2 = @bpacket.SendCtx::new()
+  let r2 = @bpacket.RecvCtx::new()
   match s2.emit(b'\x15', bp_payload(0, b'\x00'), bp_pad_src(32)) {
     Ok(sp) => {
       if s2.seqnr() != 1U {
@@ -575,13 +575,13 @@ test "t15_strict_kex_newkeys_reset" {
 ///|
 test "t16_seqnr_wrap" {
   // 发送方向:initial_kex=true → fatal
-  let s_init = SendCtx::make(Unencrypted, 0xFFFFFFFFU, false, true)
+  let s_init = @bpacket.SendCtx::make(Unencrypted, 0xFFFFFFFFU, false, true)
   match s_init.emit(b'\x01', bp_payload(2, b'\x0A'), bp_pad_src(32)) {
     Ok(_) => abort("t16: initial wrap should be fatal")
     SeqnrWrapFatal => ()
   }
   // 发送方向:initial_kex=false → 正常回绕到 0
-  let s_rekey = SendCtx::make(Unencrypted, 0xFFFFFFFFU, false, false)
+  let s_rekey = @bpacket.SendCtx::make(Unencrypted, 0xFFFFFFFFU, false, false)
   match s_rekey.emit(b'\x01', bp_payload(2, b'\x0A'), bp_pad_src(32)) {
     Ok(_) =>
       if s_rekey.seqnr() != 0U {
@@ -590,7 +590,7 @@ test "t16_seqnr_wrap" {
     SeqnrWrapFatal => abort("t16: non-initial wrap must not be fatal")
   }
   // 接收方向对称
-  let r_init = RecvCtx::make(Unencrypted, 0xFFFFFFFFU, false, true)
+  let r_init = @bpacket.RecvCtx::make(Unencrypted, 0xFFFFFFFFU, false, true)
   let frame = bp_manual_frame(12, 7, bp_payload(4, b'\x88'))
   bp_expect_error(
     r_init.recv(frame),
@@ -598,7 +598,7 @@ test "t16_seqnr_wrap" {
     "t16-rx-init",
   )
   // 非 initial:正常解析,seqnr_used=0xFFFFFFFF,推进后归 0
-  let r_rekey = RecvCtx::make(Unencrypted, 0xFFFFFFFFU, false, false)
+  let r_rekey = @bpacket.RecvCtx::make(Unencrypted, 0xFFFFFFFFU, false, false)
   // body 4 字节从 [5] 起:type=0x41,payload 区=[42,43,44](payload_len=packlen-1-padlen=4)
   let frame2 = bp_manual_frame(12, 7, bp_payload(4, b'\x41'))
   bp_expect_packet(
@@ -623,8 +623,8 @@ test "t17_property_sweep" {
   ]
   for n in sizes {
     // plain
-    let sp = SendCtx::new()
-    let rp = RecvCtx::new()
+    let sp = @bpacket.SendCtx::new()
+    let rp = @bpacket.RecvCtx::new()
     let pay = bp_payload(n, b'\x99')
     match sp.emit(bp_byte(100 + n % 50), pay, bp_pad_src(32)) {
       Ok(pkt) => {
@@ -654,8 +654,8 @@ test "t17_property_sweep" {
       SeqnrWrapFatal => abort("t17: unexpected wrap")
     }
     // aead
-    let sa = SendCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
-    let ra = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+    let sa = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let ra = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
     match sa.emit(bp_byte(150 + n % 50), pay, bp_pad_src(32)) {
       Ok(pkt) => {
         let f = pkt.frame
@@ -716,7 +716,7 @@ fn bp_v3_payload(rnd : Int) -> FixedArray[Byte] {
 test "t18_python_kat_vectors" {
   // ---- V1:plain 帧(type=20,n=10,payload=00..09)----
   let pay1 = bp_payload(10, b'\x00')
-  let s1 = SendCtx::new()
+  let s1 = @bpacket.SendCtx::new()
   match s1.emit(b'\x14', pay1, bp_pad_src(32)) {
     Ok(sp) =>
       bp_assert_bytes(
@@ -734,8 +734,8 @@ test "t18_python_kat_vectors" {
   ]
   for sq = 0; sq < 3; sq = sq + 1 {
     // 方向一:MoonBit emit == Python wire
-    let se = SendCtx::make(
-      Aead(ChachaPolyCtx::new64(key)),
+    let se = @bpacket.SendCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
       bp_byte(sq).to_uint(),
       false,
       true,
@@ -745,8 +745,8 @@ test "t18_python_kat_vectors" {
       SeqnrWrapFatal => abort("V2-\{sq}: unexpected wrap")
     }
     // 方向二:Python wire 被 MoonBit recv 解回
-    let r = RecvCtx::make(
-      Aead(ChachaPolyCtx::new64(key)),
+    let r = @bpacket.RecvCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
       bp_byte(sq).to_uint(),
       false,
       true,
@@ -763,7 +763,7 @@ test "t18_python_kat_vectors" {
   // ---- V3:三包拼接流逐包消费 ----
   let stream_hex = "94450e4911e24236a3f3ba74b7c6fac00fe0ec8adf1e66d1ca95d141dd568e2b12a3e73dc922a7b561077dd13e1ca55e88d5d98912b4b4b0587d43062f4ed25affca4710776192703cc39c034a96b2fe1a6a7971e19b1c6a6b51e9bbf09fb6c83e1042377227b2b06b6d1c71"
   let stream = bp_hex(stream_hex)
-  let rs = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+  let rs = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
   let mut off = 0
   for rnd = 0; rnd < 3; rnd = rnd + 1 {
     let res = rs.recv(bp_slice(stream, off, stream.length()))
@@ -782,8 +782,8 @@ test "t18_python_kat_vectors" {
   // 同时验证 MoonBit 自产三包流与 V3 拼接一致
   let mut built : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   for rnd = 0; rnd < 3; rnd = rnd + 1 {
-    let s3 = SendCtx::make(
-      Aead(ChachaPolyCtx::new64(key)),
+    let s3 = @bpacket.SendCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
       bp_byte(rnd).to_uint(),
       false,
       true,
@@ -819,7 +819,7 @@ test "t18_python_kat_vectors" {
   ]
   for case in cases {
     let (hexstr, want) = case
-    let rt = RecvCtx::make(Aead(ChachaPolyCtx::new64(key)), 0U, false, true)
+    let rt = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
     let res = rt.recv(bp_hex(hexstr))
     let ok = match res.event {
       Failed(AuthFailed) => want == "auth" || want == "auth2"

@@ -49,7 +49,7 @@ test "rfc7748_alice" {
   let expected = hex_to_bytes(
     "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
   )
-  let actual = x25519(scalar, point)
+  let actual = @x25519.x25519(scalar, point)
   let mut diff_count : Int = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
@@ -73,7 +73,7 @@ test "rfc7748_bob" {
   let expected = hex_to_bytes(
     "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
   )
-  let actual = x25519(scalar, point)
+  let actual = @x25519.x25519(scalar, point)
   let mut diff_count : Int = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
@@ -91,8 +91,8 @@ test "deterministic" {
   let point = hex_to_bytes(
     "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
   )
-  let a = x25519(scalar, point)
-  let b = x25519(scalar, point)
+  let a = @x25519.x25519(scalar, point)
+  let b = @x25519.x25519(scalar, point)
   let mut diff = false
   for i = 0; i < 32; i = i + 1 {
     if a[i] != b[i] {
@@ -106,6 +106,6 @@ test "deterministic" {
 test "output_is_32_bytes" {
   let scalar : FixedArray[Byte] = FixedArray::make(32, 0x42)
   let point : FixedArray[Byte] = FixedArray::make(32, 0x09)
-  let out = x25519(scalar, point)
+  let out = @x25519.x25519(scalar, point)
   assert_eq(out.length(), 32)
 }

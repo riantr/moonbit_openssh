@@ -11,8 +11,6 @@
 
 import {
   "openssh/openssh_moonbit/src/sshclient",
-  "openssh/openssh_moonbit/src/socket",
-  "openssh/openssh_moonbit/src/sshwire",
 }
 
 pkgtype(kind: "executable")

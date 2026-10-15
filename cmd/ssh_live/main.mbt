@@ -1756,7 +1756,7 @@ async fn main {
             // 由驱动决定。门禁捕获这一行并落盘,然后用写回来的那份重连。
             kh_report_tofu(kh, r)
             println("user: " + r.user)
-            println("method: " + r.method)
+            println("method: " + r.auth_method)
             println("key_type: " + r.key_type)
             // Loop #38: which host key algorithm was negotiated, which key type
             // it turned out to be, and how big that key is.  Printed here as

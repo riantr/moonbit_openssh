@@ -215,23 +215,16 @@ pub fn hmac_sha1(key : FixedArray[Byte], msg : FixedArray[Byte], msg_len : Int) 
 ///| 标准 base64 解码（与 OpenSSH b64_pton 兼容；不含 padding 时也接受）
 pub fn b64_decode(s : String) -> FixedArray[Byte]? {
   let bytes : StringView = s
-  try {
-    let result = @base64.decode(bytes, ignore_whitespace=false) catch {
-      _ => return None
-    }
-    let arr : FixedArray[Byte] = FixedArray::make(result.length(), b'\x00')
-    for i = 0; i < result.length(); i = i + 1 {
-      arr[i] = result[i]
-    }
-    Some(arr)
-  } catch {
-    _ => None
+  let result = @base64.decode(bytes, ignore_whitespace=false) catch {
+    _ => return None
   }
+  let arr : FixedArray[Byte] = FixedArray::make(result.length(), b'\x00')
+  for i = 0; i < result.length(); i = i + 1 {
+    arr[i] = result[i]
+  }
+  Some(arr)
 }
 
-///| 长度常量：|1| 条目的 salt 与 hash 都是 SHA-1 输出长度
-const HASH_LEN : Int = 20
-const HASH_MAGIC : String = "|1|"
 ///| 分隔符 `|` 的 ASCII 码（UInt16 形式的 char code）
 const HASH_DELIM_CODE : Int = 0x7C  // '|'
 
@@ -254,8 +247,8 @@ pub fn match_hashed_host(expected_host : String, hashed_pattern : String) -> Boo
     i = i + 1
   }
   if sep_pos < 0 { return false }
-  let salt_b64 = hashed_pattern.substring(start=3, end=sep_pos)
-  let hash_b64 = hashed_pattern.substring(start=sep_pos + 1, end=hashed_pattern.length())
+  let salt_b64 = hashed_pattern[3:sep_pos].to_owned()
+  let hash_b64 = hashed_pattern[sep_pos + 1:hashed_pattern.length()].to_owned()
   let salt = match b64_decode(salt_b64) {
     Some(b) => b
     None => return false
@@ -352,12 +345,12 @@ pub fn match_host_pattern(host : String, pattern_list : String) -> Bool {
   while i <= pattern_list.length() {
     if i == pattern_list.length() || pattern_list[i] == ',' {
       if i > start {
-        let pat = pattern_list.substring(start=start, end=i)
+        let pat = pattern_list[start:i].to_owned()
         let trimmed = trim_ws(pat)
         if trimmed.length() > 0 {
           // 跳过 `!` 否定前缀（语义跳过，不强制）
           let real = if trimmed.length() > 0 && trimmed[0].to_int() == '!'.to_int() {
-            trimmed.substring(start=1, end=trimmed.length())
+            trimmed[1:trimmed.length()].to_owned()
           } else {
             trimmed
           }
@@ -392,7 +385,7 @@ fn trim_ws(s : String) -> String {
     end = end - 1
   }
   if start >= end { return "" }
-  s.substring(start=start, end=end)
+  s[start:end].to_owned()
 }
 
 ///|
@@ -410,9 +403,9 @@ fn split_host_str(s : String) -> (String, Int?) {
       j = j + 1
     }
     if close > 0 {
-      let host_inner = s.substring(start=1, end=close)
+      let host_inner = s[1:close].to_owned()
       if close + 1 < s.length() && s[close + 1].to_int() == ':'.to_int() {
-        let port_str = s.substring(start=close + 2, end=s.length())
+        let port_str = s[close + 2:s.length()].to_owned()
         // 复用 parse_int_str 解析端口数字
         match parse_int_str(port_str) {
           Some(n) => (host_inner, Some(n))

@@ -119,7 +119,7 @@ pub fn is_cert_type_name(name : String) -> Bool {
 /// 证书类型名 → 内层算法名
 pub fn plain_type_of_cert(name : String) -> String {
   if name.has_suffix(CERT_SUFFIX) {
-    name.substring(start=0, end=name.length() - CERT_SUFFIX.length())
+    name[: name.length() - CERT_SUFFIX.length()].to_owned()
   } else {
     name
   }

@@ -15,55 +15,55 @@ test "t1_first_obtained_wins_across_matching_blocks" {
   // The bug this loop is about: `Host *` at the end of a file is invisible to a
   // resolver that only looks at the first matching block.
   let cfg = "Host web1\n  User deploy\n\nHost *\n  User fallback\n  Port 2222\n"
-  let s = parse_ssh_config(cfg)
-  assert_eq(resolved_value("web1", s, "User"), "deploy")
+  let s = @sshconfig.parse_ssh_config(cfg)
+  assert_eq(@sshconfig.resolved_value("web1", s, "User"), "deploy")
   // Used to be "": `Port` only appears in the *second* matching block.
-  assert_eq(resolved_value("web1", s, "Port"), "2222")
+  assert_eq(@sshconfig.resolved_value("web1", s, "Port"), "2222")
 }
 
 test "t2_options_before_the_first_host_apply_globally" {
   // Used to be dropped entirely: the parser flushed a section with no patterns
   // only when `in_section` was set, which is false before the first `Host`.
   let cfg = "User topuser\nPort 2200\n\nHost web1\n  HostName h\n\nHost *\n  ServerAliveInterval 30\n"
-  let s = parse_ssh_config(cfg)
-  assert_eq(resolved_value("web1", s, "User"), "topuser")
-  assert_eq(resolved_value("web1", s, "Port"), "2200")
-  assert_eq(resolved_value("web1", s, "ServerAliveInterval"), "30")
+  let s = @sshconfig.parse_ssh_config(cfg)
+  assert_eq(@sshconfig.resolved_value("web1", s, "User"), "topuser")
+  assert_eq(@sshconfig.resolved_value("web1", s, "Port"), "2200")
+  assert_eq(@sshconfig.resolved_value("web1", s, "ServerAliveInterval"), "30")
 }
 
 test "t3_negated_pattern_vetoes_the_whole_block" {
   // Not "that one pattern is skipped": one match on a `!` pattern discards the
   // block, positive patterns included.
   let cfg = "Host !secret *\n  Compression yes\n\nHost *\n  Compression no\n"
-  let s = parse_ssh_config(cfg)
-  assert_eq(resolved_value("secret", s, "Compression"), "no")
-  assert_eq(resolved_value("other", s, "Compression"), "yes")
+  let s = @sshconfig.parse_ssh_config(cfg)
+  assert_eq(@sshconfig.resolved_value("secret", s, "Compression"), "no")
+  assert_eq(@sshconfig.resolved_value("other", s, "Compression"), "yes")
 }
 
 test "t4_keyword_is_case_insensitive_and_duplicate_takes_the_first" {
   // readconf.c uses strcasecmp. Used to compare keywords with `==`.
   let cfg = "HOST alpha\n  USER u1\n  user u2\n  PoRt 2202\n"
-  let s = parse_ssh_config(cfg)
-  assert_eq(resolved_value("alpha", s, "User"), "u1")
-  assert_eq(resolved_value("alpha", s, "user"), "u1")
-  assert_eq(resolved_value("alpha", s, "PORT"), "2202")
+  let s = @sshconfig.parse_ssh_config(cfg)
+  assert_eq(@sshconfig.resolved_value("alpha", s, "User"), "u1")
+  assert_eq(@sshconfig.resolved_value("alpha", s, "user"), "u1")
+  assert_eq(@sshconfig.resolved_value("alpha", s, "PORT"), "2202")
 }
 
 test "t5_equals_separator_and_inline_comment" {
   // Used to fail both: `Port=2202` became a keyword literally named
   // "Port=2202", and `bob # note` became the value "bob # note".
   let cfg = "Host gamma\n  User bob # trailing comment\n  ConnectTimeout=7\n"
-  let s = parse_ssh_config(cfg)
-  assert_eq(resolved_value("gamma", s, "User"), "bob")
-  assert_eq(resolved_value("gamma", s, "ConnectTimeout"), "7")
+  let s = @sshconfig.parse_ssh_config(cfg)
+  assert_eq(@sshconfig.resolved_value("gamma", s, "User"), "bob")
+  assert_eq(@sshconfig.resolved_value("gamma", s, "ConnectTimeout"), "7")
 }
 
 test "t6_host_pattern_matching_is_case_sensitive" {
   // ssh_config(5) is ambiguous here; this was checked rather than assumed.
   // `Host Web1` does NOT match host `web1` (verified with ssh -G).
-  let s = parse_ssh_config("Host Web1\n  User up\n")
-  assert_eq(resolved_value("web1", s, "User"), "")
-  assert_eq(resolved_value("Web1", s, "User"), "up")
+  let s = @sshconfig.parse_ssh_config("Host Web1\n  User up\n")
+  assert_eq(@sshconfig.resolved_value("web1", s, "User"), "")
+  assert_eq(@sshconfig.resolved_value("Web1", s, "User"), "up")
 }
 
 test "t7_multivalued_keywords_accumulate" {
@@ -72,40 +72,40 @@ test "t7_multivalued_keywords_accumulate" {
   // drops the second key -- and one that treats everything as accumulate turns
   // `User` into a list. So the arity has to be per-keyword.
   let cfg = "Host x\n  IdentityFile /one\nHost y\n  IdentityFile /two\nHost x\n  IdentityFile /three\n"
-  let s = parse_ssh_config(cfg)
-  let ids = resolved_values("x", s, "IdentityFile")
+  let s = @sshconfig.parse_ssh_config(cfg)
+  let ids = @sshconfig.resolved_values("x", s, "IdentityFile")
   assert_eq(ids.length(), 2)
   assert_eq(ids[0], "/one")
   assert_eq(ids[1], "/three")
   // Single-valued in the same file still keeps only the first.
-  let mixed = parse_ssh_config("Host x\n  User u1\nHost *\n  User u2\n")
-  assert_eq(resolved_value("x", mixed, "User"), "u1")
+  let mixed = @sshconfig.parse_ssh_config("Host x\n  User u1\nHost *\n  User u2\n")
+  assert_eq(@sshconfig.resolved_value("x", mixed, "User"), "u1")
 }
 
 test "t8_fallback_cascades_through_several_blocks" {
   let cfg = "Host *.prod.example.com\n  User u1\n  HostName h1\n\nHost *.example.com\n  Port 2223\n\nHost *\n  IdentityFile /k/three\n  ConnectTimeout 9\n"
-  let s = parse_ssh_config(cfg)
+  let s = @sshconfig.parse_ssh_config(cfg)
   let h = "db1.prod.example.com"
-  assert_eq(resolved_value(h, s, "User"), "u1")
-  assert_eq(resolved_value(h, s, "HostName"), "h1")
+  assert_eq(@sshconfig.resolved_value(h, s, "User"), "u1")
+  assert_eq(@sshconfig.resolved_value(h, s, "HostName"), "h1")
   // Two levels of fall-through: neither is in the first matching block.
-  assert_eq(resolved_value(h, s, "Port"), "2223")
-  assert_eq(resolved_value(h, s, "ConnectTimeout"), "9")
+  assert_eq(@sshconfig.resolved_value(h, s, "Port"), "2223")
+  assert_eq(@sshconfig.resolved_value(h, s, "ConnectTimeout"), "9")
   // A host that matches only the last block still gets everything from it.
   let other = "plain.example.org"
-  assert_eq(resolved_value(other, s, "ConnectTimeout"), "9")
-  assert_eq(resolved_value(other, s, "User"), "")
+  assert_eq(@sshconfig.resolved_value(other, s, "ConnectTimeout"), "9")
+  assert_eq(@sshconfig.resolved_value(other, s, "User"), "")
 }
 
 test "t9_match_host_option_agrees_with_the_resolver" {
   // The Loop #24 entry point now delegates, so it cannot drift from the rules.
   let cfg = "Host web1\n  User deploy\n\nHost *\n  Port 2222\n"
-  let s = parse_ssh_config(cfg)
-  match match_host_option("web1", s, "Port") {
+  let s = @sshconfig.parse_ssh_config(cfg)
+  match @sshconfig.match_host_option("web1", s, "Port") {
     Some(v) => assert_eq(v, "2222")
     None => fail("match_host_option lost the Host * fallback")
   }
-  match match_host_option("web1", s, "Nothing") {
+  match @sshconfig.match_host_option("web1", s, "Nothing") {
     Some(_) => fail("a keyword that is in no block should not resolve")
     None => ()
   }
@@ -165,7 +165,7 @@ test "t10_fnmatch_agrees_with_openssh_on_every_loop24_case" {
   let mut i = 0
   while i < cases.length() {
     let (pat, s, expect) = cases[i]
-    let got = fnmatch(pat, s)
+    let got = @sshconfig.fnmatch(pat, s)
     if got != expect {
       mismatched = mismatched + 1
       println(

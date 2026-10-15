@@ -48,7 +48,7 @@ fn hk_eq(
 }
 
 ///|
-fn hk_err_name(e : KeyError) -> String {
+fn hk_err_name(e : @hostkey.KeyError) -> String {
   match e {
     InvalidFormat => "InvalidFormat"
     UnsupportedType => "UnsupportedType"
@@ -68,7 +68,7 @@ fn hk_err_name(e : KeyError) -> String {
 }
 
 ///|
-fn hk_parse_name(res : ParseResult) -> String {
+fn hk_parse_name(res : @hostkey.ParseResult) -> String {
   match res {
     Parsed(Ed25519Key(_)) => "Parsed(ed25519)"
     Parsed(RsaKey(_, _)) => "Parsed(rsa)"
@@ -82,7 +82,7 @@ fn hk_parse_name(res : ParseResult) -> String {
 }
 
 ///|
-fn hk_verify_name(res : VerifyResult) -> String {
+fn hk_verify_name(res : @hostkey.VerifyResult) -> String {
   match res {
     Accepted => "Accepted"
     Rejected(e) => hk_err_name(e)
@@ -95,14 +95,14 @@ fn hk_check_parse(
   want : String,
   label : String,
 ) -> Unit {
-  let got = hk_parse_name(HostKey::from_blob(blob))
+  let got = hk_parse_name(@hostkey.HostKey::from_blob(blob))
   if got != want {
     abort("\{label}: got \{got}, want \{want}")
   }
 }
 
 ///|
-fn hk_check_verify(res : VerifyResult, want : String, label : String) -> Unit {
+fn hk_check_verify(res : @hostkey.VerifyResult, want : String, label : String) -> Unit {
   let got = hk_verify_name(res)
   if got != want {
     abort("\{label}: got \{got}, want \{want}")
@@ -110,8 +110,8 @@ fn hk_check_verify(res : VerifyResult, want : String, label : String) -> Unit {
 }
 
 ///|
-fn hk_ed25519_key(blob_hex : String, label : String) -> HostKey {
-  match HostKey::from_blob(hk_hex(blob_hex)) {
+fn hk_ed25519_key(blob_hex : String, label : String) -> @hostkey.HostKey {
+  match @hostkey.HostKey::from_blob(hk_hex(blob_hex)) {
     Parsed(Ed25519Key(pk)) => Ed25519Key(pk)
     other => abort("\{label}: unexpected \{hk_parse_name(other)}")
   }
@@ -193,7 +193,7 @@ test "t1_parse_ed25519_key_a" {
   let blob = hk_hex(
     "0000000b7373682d6564323535313900000020ffb3b57c2f8bd3bb1fc072037fbf02d1a091c3a9ff80d23715ff5acd743c278d",
   )
-  match HostKey::from_blob(blob) {
+  match @hostkey.HostKey::from_blob(blob) {
     Parsed(Ed25519Key(pk)) =>
       hk_eq(
         pk,
@@ -204,7 +204,7 @@ test "t1_parse_ed25519_key_a" {
       )
     other => abort("t1: unexpected \{hk_parse_name(other)}")
   }
-  let fp = fingerprint_text(blob)
+  let fp = @hostkey.fingerprint_text(blob)
   if fp != "SHA256:JX5PbRhflNv0JVcf8P8IVbqwcOZH9GOVafQPvzd6fq4" {
     abort("t1: fingerprint \{fp}")
   }
@@ -214,7 +214,7 @@ test "t1_parse_ed25519_key_a" {
 /// T2:Loop #7 ed25519 与 cryptography 的确定性交叉锚点
 /// (RFC 8032:同 seed 必得同 pk/签名)
 test "t2_loop7_seed_crosscheck" {
-  let (pk_a, sk_a) = keypair_from_seed(
+  let (pk_a, sk_a) = @hostkey.keypair_from_seed(
     hk_hex("112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f20"),
   )
   hk_eq(
@@ -223,7 +223,7 @@ test "t2_loop7_seed_crosscheck" {
     "t2 pk_a",
   )
   hk_eq(
-    sign(
+    @hostkey.sign(
       hk_hex(
         "4d6f6f6e426974204c6f6f702023313120686f73746b657920766572696669636174696f6e2070726f6265",
       ),
@@ -234,7 +234,7 @@ test "t2_loop7_seed_crosscheck" {
     ),
     "t2 sig_a",
   )
-  let (pk_b, sk_b) = keypair_from_seed(
+  let (pk_b, sk_b) = @hostkey.keypair_from_seed(
     hk_hex("a7aaadb0b3b6b9bcbfc2c5c8cbced1d4d7dadde0e3e6e9eceff2f5f8fbfe0104"),
   )
   hk_eq(
@@ -243,7 +243,7 @@ test "t2_loop7_seed_crosscheck" {
     "t2 pk_b",
   )
   hk_eq(
-    sign(
+    @hostkey.sign(
       hk_hex(
         "4d6f6f6e426974204c6f6f702023313120686f73746b657920766572696669636174696f6e2070726f6265",
       ),
@@ -272,7 +272,7 @@ test "t3_verify_accept" {
     ),
   )
   hk_check_verify(res, "Accepted", "t3")
-  if !(res is Accepted) || !is_verified(res) {
+  if !(res is Accepted) || !@hostkey.is_verified(res) {
     abort("t3: is_verified inconsistent")
   }
 }
@@ -387,7 +387,7 @@ test "t5_malformed_blob_matrix" {
 /// 若实现反序,首块 0xC7 前缀会触发 BigNumNegative / 模长检查错位。
 test "t6_rsa_parse_matrix" {
   match
-    HostKey::from_blob(
+    @hostkey.HostKey::from_blob(
       hk_hex(
         "000000077373682d727361000000030100010000010100c72d9f20d0fe16f4cff2f8958e4daa6dab9580c7fbfeb41cde96221d5d35c97f0822028a92857e612891010f966ee05519e73b3602d8fb3f0f558a97899a55ca1db703547bf872f0b015769e441f50771325f030eca9eb70ebc53ad1961db8b8ba845ad5036d2c795e180f9b0f7834a891e6570e3188bc87697fea26fdd42a22d720be65a3fde2d42a30845d7092c2c28cc327274a8ea55c811b52eb35d7e3e16d24e95dd3c0cdd90df58d3bde85339bfb541ad3aed3e0c82c312a79b7401bcc742791130acd2561fe01e190d169c00dd731e66ad56fa4a162582a29fa2509bbe2c370e1c03d2343f6e93ab1c2569fef17f14544387929c11a290952779fe786",
       ),
@@ -462,7 +462,7 @@ test "t7_verify_preconditions" {
     "t7 empty sig",
   )
   // msg 超上限(>1<<20)
-  let big : FixedArray[Byte] = FixedArray::make(MAX_SIGN_DATA_SIZE + 1, b'\x41')
+  let big : FixedArray[Byte] = FixedArray::make(@hostkey.MAX_SIGN_DATA_SIZE + 1, b'\x41')
   hk_check_verify(
     key.verify(
       big,
@@ -474,7 +474,7 @@ test "t7_verify_preconditions" {
     "t7 oversized msg",
   )
   // 边界:恰等于上限 → 过前置,进密码学验证必败
-  let edge : FixedArray[Byte] = FixedArray::make(MAX_SIGN_DATA_SIZE, b'\x42')
+  let edge : FixedArray[Byte] = FixedArray::make(@hostkey.MAX_SIGN_DATA_SIZE, b'\x42')
   hk_check_verify(
     key.verify(
       edge,
@@ -527,7 +527,7 @@ test "t8_sig_structure_errors" {
   hk_check_verify(key.verify(msg, trail), "TrailingData", "t8 trailing")
   // RSA 密钥收到形态合法的 sig:密码学验证范围外 → 显式 Unavailable
   let rk = match
-    HostKey::from_blob(
+    @hostkey.HostKey::from_blob(
       hk_hex(
         "000000077373682d727361000000030100010000010100c72d9f20d0fe16f4cff2f8958e4daa6dab9580c7fbfeb41cde96221d5d35c97f0822028a92857e612891010f966ee05519e73b3602d8fb3f0f558a97899a55ca1db703547bf872f0b015769e441f50771325f030eca9eb70ebc53ad1961db8b8ba845ad5036d2c795e180f9b0f7834a891e6570e3188bc87697fea26fdd42a22d720be65a3fde2d42a30845d7092c2c28cc327274a8ea55c811b52eb35d7e3e16d24e95dd3c0cdd90df58d3bde85339bfb541ad3aed3e0c82c312a79b7401bcc742791130acd2561fe01e190d169c00dd731e66ad56fa4a162582a29fa2509bbe2c370e1c03d2343f6e93ab1c2569fef17f14544387929c11a290952779fe786",
       ),
@@ -553,7 +553,7 @@ test "t9_key_b_roundtrip" {
   let blob_b = hk_hex(
     "0000000b7373682d656432353531390000002027ca11763a2d91b23f6426d83031e6bc51eed538566c90cbf82fe3f9e2525230",
   )
-  match HostKey::from_blob(blob_b) {
+  match @hostkey.HostKey::from_blob(blob_b) {
     Parsed(Ed25519Key(pk)) =>
       hk_eq(
         pk,
@@ -564,7 +564,7 @@ test "t9_key_b_roundtrip" {
       )
     other => abort("t9: unexpected \{hk_parse_name(other)}")
   }
-  let fp = fingerprint_text(blob_b)
+  let fp = @hostkey.fingerprint_text(blob_b)
   if fp != "SHA256:A6ELrt9LQi77fouexEwyX5hg0fn2ZBZMeAVP1FISXKA" {
     abort("t9: fingerprint \{fp}")
   }

@@ -1339,6 +1339,140 @@ the two gates specifically. Three broken mutations are recorded in
 `host/loop65_mutations.py` rather than deleted: **a mutation that cannot fail is
 more dangerous than no mutation at all.**
 
+### Loop #66: the warnings were hiding each other, and the collector was hiding the warnings
+
+Loop #66 set out to turn the four red qa rows green. It closed one of them and
+found, on the way, that the tool used to measure the others had been lying in a
+way that made every earlier count wrong.
+
+#### The headline: `moon check --deny-warn` is not a set of warnings, it is a snapshot
+
+The first measurement said the tree had 15 warning sites. It actually had 318.
+Then 62. Then 12. Then 3. Nothing was added to the tree between those numbers --
+the *same* command was reporting fewer things each time, because fixing one kind
+of diagnostic made another kind visible.
+
+`src/hostkey` is the clean example. While `cert.mbt` still contained one
+`deprecated` call, `moon check src/hostkey --deny-warn` reported exactly that
+call and nothing else. Fixing it -- changing `.substring(start=0, end=n)` to
+`n[:len].to_owned()` -- made **105** `test_unqualified_package` warnings appear
+in the same package, in the same command, with no file touched except the one
+that had just been fixed. Three consecutive runs on the repaired tree returned
+105, 105 and 105, so the result is stable; it is just *not* stable against the
+act of fixing something else.
+
+The operational consequence is the part worth keeping: **a static-analysis gate
+built on one measurement pass cannot work here, and a number read off a single
+pass is a floor rather than a total.** The loop measured, fixed, re-measured and
+repeated until one full pass produced no new sites. That fixpoint is 3.
+
+#### Two independent reasons an import can look unused, and only one of them is fixable
+
+`unused_package` fired on 19 sites. They split cleanly, and the split is the
+useful part:
+
+| Cause | Example | Verdict |
+|---|---|---|
+| Files gated per target | `src/wt`, `src/khstore`, `src/khfile`, `cmd/wt_probe`, `cmd/knownhosts_kat` | false positive |
+| Consumed by a compiler expansion | `src/khfile`'s `moonbitlang/async` | false positive |
+| Genuinely dead | `src/tcp`'s `moonbitlang/core/bytes` | removed |
+
+The first is handled **derived, not by allowlist**. `options(targets: {...})`
+leaves an import with no textual reference whenever the files that use it are
+gated away, so `host/collect_warnings.py` intersects `unused_package` across all
+four targets and keeps only what fires everywhere. That alone removed 15 sites,
+and it has teeth: the real `src/tcp` case fires on all four and was caught by it.
+
+The second is the one the intersection **cannot** reach, and finding that is the
+loop's sharpest result. `moonbitlang/async` is consumed by the compiler's
+`async test` expansion, which emits a call to `@moonbitlang/async.run_async_main`
+-- generated code, so no source line references the package. It looks unused on
+*every* target, and the gate would otherwise tell the next reader to delete a
+line whose deletion produces eight hard errors, one per `async test` block,
+reproducing verbatim the message the package comment had predicted. The gate
+therefore asserts the import is **present**, and the comment now says "do not
+clean it up". The lesson generalises: *an intersection over configurations cannot
+detect a consumer that is not in the source text at all.*
+
+#### What was removed
+
+- `src/tcp`: `moonbitlang/core/bytes`. `Bytes` is prelude, so four files using
+  the type never needed the import.
+- `src/sshclient`: `src/tcp`. This is Loop #64's payoff, finally visible as a
+  deleted line -- the Transport impl moved to the transport side and took the last
+  `@tcp.` reference with it, so the dependency arrow the loop argued about is
+  gone rather than merely pointing the other way.
+- `cmd/main`, `cmd/ssh_full`: three dead imports.
+- Dead code: `eq_at`, `bytes_to_ascii_string`, `ascii_bytes`, `byte_to_hex`,
+  the whole `PfCursor` reader, the write-only `in_section`, a `key_kat256_dbg`
+  that was byte-identical to the `key_kat256` below it, and `HASH_LEN` /
+  `HASH_MAGIC`.
+- 19 deprecated `.substring(start=A, end=B)` calls rewritten to `[A:B].to_owned()`.
+  Two of the intermediate forms compile-fail rather than misbehave, which is
+  what made it safe to try: a bare `s[:n]` is a `StringView` where a `String` is
+  wanted, and `.to_string()` *on a StringView* is itself deprecated. Only
+  `.to_owned()` satisfies both.
+- `AuthReport.method` → `auth_method`, because the word is reserved. The printed
+  label stays `method:` -- that is RFC 4252's term, and `verify_loop34` asserts
+  on it. Renaming the field but not the label is the whole point: the toolchain
+  objected to an identifier, not to the protocol vocabulary.
+
+#### Two instruments that were themselves wrong
+
+`host/collect_warnings.py` keyed results as `path -> {line: kind}`, so two
+warnings on one line silently collapsed into one, and a package that **failed to
+build** reported as clean because its cascade noise was filtered out. Both are
+fixed, and a broken package now exits 2 with its name on stderr, because "cannot
+tell" and "clean" are different answers.
+
+Separately, the first reading of the collector's own output was wrong before the
+collector was: `python host/collect_warnings.py 2>&1 | Out-String` on
+PowerShell 5.1 interleaves stderr into stdout and destroyed a whole file's entry
+mid-JSON. The `files=9 sites=15` in this loop's notes is that artefact, not a
+measurement. Native redirection writes UTF-16 (0xFF BOM), so the working forms
+are `cmd /c "python ... > out.json"` or reading with `encoding="utf-16"`.
+**When a tool reports a count, verify the collector before believing the number**
+-- the third time this repository has been bitten by it.
+
+#### Gate and mutations
+
+`host/verify_loop66.mjs`, 14 checks, exit 0. Two are negative assertions
+(`src/khfile` must still import `moonbitlang/async`; `in_section` must still be
+*read* by the second function in `parser.mbt`, even though the dead copy is
+gone), one re-runs the collector live and asserts the reported set **equals** the
+accept table -- so a new warning fails and a fixed one fails too. The gate caught
+two of its own bugs while being written: it asserted `in_section` was absent
+file-wide when a second function legitimately reads it, and it used `require` in
+an ESM module. A gate that fails on correct code is still doing its job.
+
+`host/loop66_mutations.py`: **7 CAUGHT, 0 MISSED, 1 BUILD-BROKEN** over 8
+mutations. M3 is the deliberate shape from Loop #65 -- deleting
+`src/khfile`'s `moonbitlang/async` **is** the fix a future reader will attempt,
+and the gate must reject it. M5 is recorded as BUILD-BROKEN because the mutation
+does not compile: a mutation caught by the compiler has not tested the gate.
+
+#### Still red, and why
+
+`ci/qa.py`'s `static-analysis-sast-code` row now runs the gate instead of
+`moon check --deny-warn`. The other three rows are untouched and still red:
+
+- **test-coverage** -- `moon coverage analyze` has **no `--target` flag**, only
+  `--target-dir`, and `-p` does not limit the scan: `combine_coverages` builds
+  every package for the default target, so the two js-only Worker entry points
+  (`cmd/wt_probe`, `cmd/wt_ssh`) fail [4067] "Missing main function". An attempt
+  to declare them differently (`options(is_main: [...])`) was reverted -- the key
+  takes a boolean, and `git diff` confirmed the revert before moving on.
+- **benchmark** -- needs real `*_bench.mbt` files; the repo has none, and the
+  zero-work guard is what stops the row reporting a green that measured nothing.
+- **format-check** -- `moon fmt --check` wants to re-wrap KAT byte arrays, and
+  `moon fmt` in write mode corrupts CJK comments (`真实加密` -> `真加密`), so it
+  stays `--check`-only until that is solved rather than worked around.
+
+The release gate therefore stays shut and no tag was cut, which is the correct
+outcome and not a formality: `ci/release.py` refuses when a tier is red, and it
+was exercised in exactly that mode.
+
+
 ### Loop #64: a transport seam, a measured wall, and a CI that can say no
 
 `src/sshclient/live.mbt` and `src/sftp.mbt` named `@tcp.TcpConn` in 25

@@ -1,12 +1,17 @@
 ///| SSH client flow — RFC 4253/4252/4254 (kex + userauth + channel)
 ///| Loop #19: NEWKEYS 后启用 chacha20-poly1305 真实加密 (bpacket SendCtx/RecvCtx)
 ///| Loop #31: live_handshake against a real server over @tcp
+///| Loop #66: `src/tcp` is no longer imported. Loop #64 moved the `Transport`
+///| impl for `@tcp.TcpConn` to the transport side, and with it the last textual
+///| reference to `@tcp` in this package -- `live.mbt` and `sftp.mbt` take a
+///| `[T : @transport.Transport]` parameter instead. This is the dependency
+///| arrow Loop #64 was aiming at, now visible as a deleted line rather than as
+///| an argument about which way it points.
 import {
   "openssh/openssh_moonbit/src/socket",
   "openssh/openssh_moonbit/src/sshwire",
   "openssh/openssh_moonbit/src/kexflow",
   "openssh/openssh_moonbit/src/bpacket",
-  "openssh/openssh_moonbit/src/tcp",
   "openssh/openssh_moonbit/src/transport",
   "openssh/openssh_moonbit/src/bigint",
   "openssh/openssh_moonbit/src/kexdh",

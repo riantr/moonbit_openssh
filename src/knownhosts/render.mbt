@@ -23,7 +23,7 @@ fn base64_encode(blob : FixedArray[Byte]) -> String {
   // 桥是 `Bytes::from_fixedarray`:`@base64.encode` 要 `BytesView`,而本包的条目
   // 里存的是 `FixedArray[Byte]`,两者之间没有隐式转换,而 `FixedArray` 上也没有
   // `to_bytes()` 方法——那是 `String` 才有的。
-  @base64.encode(Bytes::from_fixedarray(blob))
+  @base64.encode(Bytes::from_array(blob))
 }
 
 ///|

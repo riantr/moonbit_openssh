@@ -68,7 +68,7 @@ test "t1_proposal_parse_roundtrip" {
   let payload = kex_hex(
     "000102030405060708090a0b0c0d0e0f00000011637572766532353531392d7368613235360000000b7373682d656432353531390000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000002b686d61632d736861322d3235362d65746d406f70656e7373682e636f6d2c686d61632d736861322d3235360000002b686d61632d736861322d3235362d65746d406f70656e7373682e636f6d2c686d61632d736861322d323536000000046e6f6e65000000046e6f6e6500000000000000000000000000",
   )
-  let parsed = parse_kexinit(payload)
+  let parsed = @kexflow.parse_kexinit(payload)
   let some = match parsed {
     Some(p) => p
     None => abort("payload should parse")
@@ -155,7 +155,7 @@ test "t4_aead_first_frame" {
     false,
     true,
   )
-  let out = s.emit(KX_MSG_KEX_ECDH_REPLY, plaintext, pad_src)
+  let out = s.emit(@kexflow.KX_MSG_KEX_ECDH_REPLY, plaintext, pad_src)
   let sp = match out {
     @bpacket.Ok(sp) => sp
     @bpacket.SeqnrWrapFatal => abort("AEAD emit should succeed")
@@ -225,9 +225,9 @@ test "t6_negotiated_algs" {
 ///|
 test "t7_proposal_serialize_roundtrip" {
   let cookie = kex_hex("000102030405060708090a0b0c0d0e0f")
-  let prop = Proposal::default_client(false)
-  let payload = kexinit_payload(cookie, prop)
-  let parsed = parse_kexinit(payload)
+  let prop = @kexflow.Proposal::default_client(false)
+  let payload = @kexflow.kexinit_payload(cookie, prop)
+  let parsed = @kexflow.parse_kexinit(payload)
   let some = match parsed {
     Some(p) => p
     None => abort("default_client payload should parse")
@@ -283,7 +283,7 @@ test "t10_reserved" {
 /// That is the whole reason the check belongs on the *proposal* rather than on
 /// whatever the negotiation happens to select.
 test "t11_default_client_only_names_runnable_algs" {
-  let p = Proposal::default_client(false)
+  let p = @kexflow.Proposal::default_client(false)
   assert_eq(@bpacket.check_runnable(p.enc_ctos, p.mac_ctos), None)
   assert_eq(@bpacket.check_runnable(p.enc_stoc, p.mac_stoc), None)
   // The list as it was before Loop #60.

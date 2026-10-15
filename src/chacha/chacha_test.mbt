@@ -58,7 +58,7 @@ test "openssh_variant_invariant_involution" {
   for i = 0; i < 100; i = i + 1 {
     plaintext[i] = (i * 7 + 13).to_byte()
   }
-  let state = ChaChaState::new256(key)
+  let state = @chacha.ChaChaState::new256(key)
   let state_with_iv = state.set_iv(iv, counter=1UL)
   let ciphertext = state_with_iv.process(plaintext)
   // 解密就是再 process 一次
@@ -73,7 +73,7 @@ test "openssh_variant_invariant_involution" {
 test "empty_input" {
   let key : FixedArray[Byte] = FixedArray::make(32, 0xAB)
   let iv : FixedArray[Byte] = FixedArray::make(8, 0xCD)
-  let state = ChaChaState::new256(key)
+  let state = @chacha.ChaChaState::new256(key)
   let state_with_iv = state.set_iv(iv)
   let empty : FixedArray[Byte] = FixedArray::make(0, 0x00)
   let result = state_with_iv.process(empty)
@@ -88,7 +88,7 @@ test "single_byte" {
     key[i] = (255 - i).to_byte()
   }
   let iv : FixedArray[Byte] = FixedArray::make(8, 0x55)
-  let state = ChaChaState::new256(key)
+  let state = @chacha.ChaChaState::new256(key)
   let state_with_iv = state.set_iv(iv)
   let input : FixedArray[Byte] = FixedArray::make(1, 0x42)
   let ct = state_with_iv.process(input)
@@ -102,7 +102,7 @@ test "exactly_one_block" {
   // 边界:64 字节(刚好一个 block)
   let key : FixedArray[Byte] = FixedArray::make(32, 0x00)
   let iv : FixedArray[Byte] = FixedArray::make(8, 0x00)
-  let state = ChaChaState::new256(key)
+  let state = @chacha.ChaChaState::new256(key)
   let state_with_iv = state.set_iv(iv)
   let input : FixedArray[Byte] = FixedArray::make(64, 0x33)
   let ct = state_with_iv.process(input)
@@ -119,7 +119,7 @@ test "multiple_blocks_counter_progression" {
   // 128 字节 = 2 blocks,会跨 counter 0 → 1
   let key : FixedArray[Byte] = FixedArray::make(32, 0x00)
   let iv : FixedArray[Byte] = FixedArray::make(8, 0x00)
-  let state = ChaChaState::new256(key)
+  let state = @chacha.ChaChaState::new256(key)
   let state_with_iv = state.set_iv(iv)
   let input : FixedArray[Byte] = FixedArray::make(128, 0x00)
   for i = 0; i < 128; i = i + 1 {

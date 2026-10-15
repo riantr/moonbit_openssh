@@ -12,12 +12,6 @@
 /// 返回: true = match, false = not match
 
 ///|
-/// 字符串索引返回 UInt16 (char code),loop 提取用于字符串比较
-fn eq_at(s : String, i : Int, target : Int) -> Bool {
-  s[i].to_int() == target
-}
-
-///|
 /// fnmatch 主函数: str 是否匹配 pattern
 pub fn fnmatch(pattern : String, str : String) -> Bool {
   fnmatch_bytes(pattern, str, 0, 0)

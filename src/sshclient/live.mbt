@@ -1076,7 +1076,10 @@ pub(all) enum AuthError {
 ///|
 pub(all) struct AuthReport {
   user : String
-  method : String
+  /// Loop #66: renamed from `method`, which the toolchain reserves for future
+  /// use. The printed label stays `method:` -- that is RFC 4252's term for the
+  /// field on the wire, and `verify_loop34` asserts on it.
+  auth_method : String
   key_type : String
   /// 签名输入与签名的十六进制。带出来是为了让第二实现能逐字节复核:
   /// 认证失败在服务端看来只有一种(FAILURE),本地若不留证据就只能靠猜。
@@ -1203,7 +1206,7 @@ fn[T : @transport.Transport] live_auth_with_state(
   (
     Authenticated({
       user,
-      method: @userauth.AUTH_METHOD_PUBLICKEY,
+      auth_method: @userauth.AUTH_METHOD_PUBLICKEY,
       key_type: curve.ssh_key_type(),
       signed_blob_hex: @ecdsa.bytes_to_hex(to_sign),
       sig_blob_hex: @ecdsa.bytes_to_hex(sig_blob),

@@ -92,7 +92,7 @@ fn wrap_key64() -> FixedArray[Byte] {
 ///|
 test "rfc8439_kat_encrypt" {
   // § 2.8.2 官方向量,期望值由 python cryptography 生成并与 RFC 已知 tag 一致
-  let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
+  let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
   assert_eq(ct_tag.length(), kat_pt().length() + 16)
   let expect_ct = hex_to_bytes(
     "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116",
@@ -119,7 +119,7 @@ test "rfc8439_kat_decrypt" {
   for i = 0; i < 16; i = i + 1 {
     input[ct.length() + i] = tag[i]
   }
-  let pt = aead_decrypt(kat_key(), kat_nonce(), kat_aad(), input)
+  let pt = @aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), input)
   match pt {
     Some(p) => assert_bytes_eq(p, kat_pt(), "kat decrypt")
     None => abort("kat decrypt returned None")
@@ -128,56 +128,56 @@ test "rfc8439_kat_decrypt" {
 
 ///|
 test "rfc8439_kat_tamper_ciphertext" {
-  let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
+  let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
   ct_tag[10] = ct_tag[10] ^ b'\x01' // 翻转密文中间一比特
-  assert_eq(aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag), None)
+  assert_eq(@aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag), None)
 }
 
 ///|
 test "rfc8439_kat_tamper_tag" {
-  let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
+  let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
   let last = ct_tag.length() - 1
   ct_tag[last] = ct_tag[last] ^ b'\x80'
-  assert_eq(aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag), None)
+  assert_eq(@aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag), None)
 }
 
 ///|
 test "rfc8439_wrong_key" {
-  let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
+  let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
   let bad_key = kat_key()
   bad_key[0] = bad_key[0] ^ b'\xff'
-  assert_eq(aead_decrypt(bad_key, kat_nonce(), kat_aad(), ct_tag), None)
+  assert_eq(@aead.aead_decrypt(bad_key, kat_nonce(), kat_aad(), ct_tag), None)
 }
 
 ///|
 test "rfc8439_wrong_nonce" {
-  let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
+  let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
   let bad_nonce = kat_nonce()
   bad_nonce[11] = bad_nonce[11] ^ b'\x01'
-  assert_eq(aead_decrypt(kat_key(), bad_nonce, kat_aad(), ct_tag), None)
+  assert_eq(@aead.aead_decrypt(kat_key(), bad_nonce, kat_aad(), ct_tag), None)
 }
 
 ///|
 test "rfc8439_wrong_aad" {
-  let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
+  let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), kat_pt())
   let bad_aad = kat_aad()
   bad_aad[0] = bad_aad[0] ^ b'\x01'
-  assert_eq(aead_decrypt(kat_key(), kat_nonce(), bad_aad, ct_tag), None)
+  assert_eq(@aead.aead_decrypt(kat_key(), kat_nonce(), bad_aad, ct_tag), None)
 }
 
 ///|
 test "rfc8439_truncated_input" {
   // 长度 < 16 直接拒绝
   let short : FixedArray[Byte] = FixedArray::make(15, b'\x00')
-  assert_eq(aead_decrypt(kat_key(), kat_nonce(), kat_aad(), short), None)
+  assert_eq(@aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), short), None)
   let empty : FixedArray[Byte] = FixedArray::make(0, b'\x00')
-  assert_eq(aead_decrypt(kat_key(), kat_nonce(), kat_aad(), empty), None)
+  assert_eq(@aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), empty), None)
 }
 
 ///|
 test "rfc8439_edge_empty_aad" {
   // A2:aad 空,pt 同 § 2.8.2 → ct 与 A 相同,tag 不同
-  let ct_tag = aead_encrypt(
+  let ct_tag = @aead.aead_encrypt(
     kat_key(),
     kat_nonce(),
     FixedArray::make(0, b'\x00'),
@@ -188,7 +188,7 @@ test "rfc8439_edge_empty_aad" {
     assert_eq(ct_tag[kat_pt().length() + i], expect_tag[i])
   }
   // 解密回来
-  let pt = aead_decrypt(
+  let pt = @aead.aead_decrypt(
     kat_key(),
     kat_nonce(),
     FixedArray::make(0, b'\x00'),
@@ -200,7 +200,7 @@ test "rfc8439_edge_empty_aad" {
 ///|
 test "rfc8439_edge_empty_plaintext" {
   // A3:pt 空,aad 同 § 2.8.2 → 输出仅 16 字节 tag
-  let ct_tag = aead_encrypt(
+  let ct_tag = @aead.aead_encrypt(
     kat_key(),
     kat_nonce(),
     kat_aad(),
@@ -211,14 +211,14 @@ test "rfc8439_edge_empty_plaintext" {
   for i = 0; i < 16; i = i + 1 {
     assert_eq(ct_tag[i], expect_tag[i])
   }
-  let pt = aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag)
+  let pt = @aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag)
   assert_eq(pt.unwrap().length(), 0)
 }
 
 ///|
 test "rfc8439_edge_both_empty" {
   // A4:aad 和 pt 全空
-  let ct_tag = aead_encrypt(
+  let ct_tag = @aead.aead_encrypt(
     kat_key(),
     kat_nonce(),
     FixedArray::make(0, b'\x00'),
@@ -244,9 +244,9 @@ test "rfc8439_roundtrip_multi_block_lengths" {
     for i = 0; i < len; i = i + 1 {
       pt[i] = data[i]
     }
-    let ct_tag = aead_encrypt(kat_key(), kat_nonce(), kat_aad(), pt)
+    let ct_tag = @aead.aead_encrypt(kat_key(), kat_nonce(), kat_aad(), pt)
     assert_eq(ct_tag.length(), len + 16)
-    match aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag) {
+    match @aead.aead_decrypt(kat_key(), kat_nonce(), kat_aad(), ct_tag) {
       Some(back) => assert_bytes_eq(back, pt, "roundtrip len=\{len}")
       None => abort("roundtrip len=\{len} failed")
     }
@@ -258,7 +258,7 @@ test "rfc8439_roundtrip_multi_block_lengths" {
 ///|
 /// B1:seqnr=0, header=deadbeef, payload="hello chachapoly wrapper!"
 test "wrapper_b1_encrypt" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let header = hex_to_bytes("deadbeef")
   let payload = hex_to_bytes(
     "68656c6c6f20636861636861706f6c79207772617070657221",
@@ -280,7 +280,7 @@ test "wrapper_b1_encrypt" {
 
 ///|
 test "wrapper_b1_decrypt" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let wrapped = hex_to_bytes(
     "4ae8b0b670dd2e5dc2c6c5b972023400df2c225ed8c6819491dd3e2ecd727cee6cc575bba0aba1ca13106344fb",
   )
@@ -294,7 +294,7 @@ test "wrapper_b1_decrypt" {
 ///|
 /// B2:seqnr=0x11223344, header=0x100, payload=100B 跨块模式
 test "wrapper_b2_roundtrip" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let seqnr = 0x11223344U
   let header = hex_to_bytes("00000100")
   let payload = hex_to_bytes(
@@ -327,7 +327,7 @@ test "wrapper_b2_roundtrip" {
 ///|
 /// B3:seqnr=0xffffffff, 最小 payload
 test "wrapper_b3_roundtrip" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let seqnr = 0xFFFFFFFFU
   let wrapped = hex_to_bytes("b90ee4ac48d34ddabce51c3dc6fda3809a06b901a68d7a2c")
   let plain = ctx.crypt(seqnr, wrapped, 4, 4, false).unwrap()
@@ -344,7 +344,7 @@ test "wrapper_b3_roundtrip" {
 
 ///|
 test "wrapper_get_length" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   // B2 的包头密文是 wrapped 前 4 字节
   let hdr_ct = hex_to_bytes("9e19c7b7")
   assert_eq(ctx.get_length(0x11223344U, hdr_ct), 0x00000100U)
@@ -358,7 +358,7 @@ test "wrapper_get_length" {
 
 ///|
 test "wrapper_wrong_seqnr_rejected" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let wrapped = hex_to_bytes(
     "4ae8b0b670dd2e5dc2c6c5b972023400df2c225ed8c6819491dd3e2ecd727cee6cc575bba0aba1ca13106344fb",
   )
@@ -368,7 +368,7 @@ test "wrapper_wrong_seqnr_rejected" {
 
 ///|
 test "wrapper_tamper_body_rejected" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let wrapped = hex_to_bytes(
     "4ae8b0b670dd2e5dc2c6c5b972023400df2c225ed8c6819491dd3e2ecd727cee6cc575bba0aba1ca13106344fb",
   )
@@ -378,7 +378,7 @@ test "wrapper_tamper_body_rejected" {
 
 ///|
 test "wrapper_tamper_tag_rejected" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let wrapped = hex_to_bytes(
     "4ae8b0b670dd2e5dc2c6c5b972023400df2c225ed8c6819491dd3e2ecd727cee6cc575bba0aba1ca13106344fb",
   )
@@ -394,7 +394,7 @@ test "wrapper_wrong_key_rejected" {
   // 协议性质(C 行为相同)。要让 tag 校验失败必须动 main_key。
   let bad_key = wrap_key64()
   bad_key[0] = bad_key[0] ^ b'\xff'
-  let bad_ctx = ChachaPolyCtx::new64(bad_key)
+  let bad_ctx = @aead.ChachaPolyCtx::new64(bad_key)
   let wrapped = hex_to_bytes(
     "4ae8b0b670dd2e5dc2c6c5b972023400df2c225ed8c6819491dd3e2ecd727cee6cc575bba0aba1ca13106344fb",
   )
@@ -407,7 +407,7 @@ test "wrapper_wrong_header_key_still_decrypts_payload" {
   // (对应 C:chachapoly_crypt 返回 0,payload 正确,header 错)
   let bad_key = wrap_key64()
   bad_key[63] = bad_key[63] ^ b'\xff'
-  let bad_ctx = ChachaPolyCtx::new64(bad_key)
+  let bad_ctx = @aead.ChachaPolyCtx::new64(bad_key)
   let wrapped = hex_to_bytes(
     "4ae8b0b670dd2e5dc2c6c5b972023400df2c225ed8c6819491dd3e2ecd727cee6cc575bba0aba1ca13106344fb",
   )
@@ -436,7 +436,7 @@ test "wrapper_wrong_header_key_still_decrypts_payload" {
 
 ///|
 test "wrapper_short_buffer_rejected" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let short : FixedArray[Byte] = FixedArray::make(4 + 25 + 15, b'\x00')
   // 少一个字节都不行(tag 不完整)
   assert_eq(ctx.crypt(0U, short, 4, 25, false), None)
@@ -444,7 +444,7 @@ test "wrapper_short_buffer_rejected" {
 
 ///|
 test "wrapper_large_roundtrip" {
-  let ctx = ChachaPolyCtx::new64(wrap_key64())
+  let ctx = @aead.ChachaPolyCtx::new64(wrap_key64())
   let datalen = 300
   let src : FixedArray[Byte] = FixedArray::make(4 + datalen, b'\x00')
   src[0] = b'\x00'

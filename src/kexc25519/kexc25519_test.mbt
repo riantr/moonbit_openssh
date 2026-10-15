@@ -72,8 +72,8 @@ fn bob_pk() -> FixedArray[Byte] {
 
 ///|
 /// Section B 端到端输入(Python 参考 _kex_ref_out.txt)
-fn b_inputs() -> ExchangeInputs {
-  ExchangeInputs::make(
+fn b_inputs() -> @kexc25519.ExchangeInputs {
+  @kexc25519.ExchangeInputs::make(
     hex_to_bytes("5353482d322e302d4d6f6f6e426974506f72745f312e300d0a"),
     hex_to_bytes("5353482d322e302d4f70656e5353485f31302e300d0a"),
     hex_to_bytes(
@@ -89,7 +89,7 @@ fn b_inputs() -> ExchangeInputs {
 
 ///|
 test "keygen_rfc7748_alice" {
-  assert_eq_bytes(c25519_keygen(alice_sk()), alice_pk(), "keygen alice")
+  assert_eq_bytes(@kexc25519.c25519_keygen(alice_sk()), alice_pk(), "keygen alice")
 }
 
 ///|
@@ -98,8 +98,8 @@ test "shared_key_raw_agreement" {
   let bob_sk = hex_to_bytes(
     "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
   )
-  let ss1 = c25519_shared_key_raw(alice_sk(), bob_pk()).unwrap()
-  let ss2 = c25519_shared_key_raw(bob_sk, alice_pk()).unwrap()
+  let ss1 = @kexc25519.c25519_shared_key_raw(alice_sk(), bob_pk()).unwrap()
+  let ss2 = @kexc25519.c25519_shared_key_raw(bob_sk, alice_pk()).unwrap()
   assert_eq_bytes(
     ss1,
     hex_to_bytes(
@@ -113,7 +113,7 @@ test "shared_key_raw_agreement" {
 ///|
 test "shared_key_mpint_both_branches" {
   // 无前置分支(首字节 0x4a)
-  let m1 = c25519_shared_key_mpint(alice_sk(), bob_pk()).unwrap()
+  let m1 = @kexc25519.c25519_shared_key_mpint(alice_sk(), bob_pk()).unwrap()
   assert_eq_bytes(
     m1,
     hex_to_bytes(
@@ -125,7 +125,7 @@ test "shared_key_mpint_both_branches" {
   let sk_bob2 = hex_to_bytes(
     "fdab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e06b",
   )
-  let m2 = c25519_shared_key_mpint(sk_bob2, alice_pk()).unwrap()
+  let m2 = @kexc25519.c25519_shared_key_mpint(sk_bob2, alice_pk()).unwrap()
   assert_eq_bytes(
     m2,
     hex_to_bytes(
@@ -139,8 +139,8 @@ test "shared_key_mpint_both_branches" {
 test "shared_key_zero_rejected" {
   // 全零公钥 → 共享密钥全零 → 拒绝(kexc25519.c 的 KEY_INVALID_EC_VALUE 路径)
   let zero : FixedArray[Byte] = FixedArray::make(32, b'\x00')
-  assert_eq(c25519_shared_key_raw(alice_sk(), zero), None)
-  assert_eq(c25519_shared_key_mpint(alice_sk(), zero), None)
+  assert_eq(@kexc25519.c25519_shared_key_raw(alice_sk(), zero), None)
+  assert_eq(@kexc25519.c25519_shared_key_mpint(alice_sk(), zero), None)
 }
 
 // ================= 交换哈希与 KDF =================
@@ -153,7 +153,7 @@ test "kex_gen_hash_e2e" {
   let ss_mpint = hex_to_bytes(
     "000000204a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
   )
-  let h = kex_gen_hash(b_inputs(), ks_blob, alice_pk(), bob_pk(), ss_mpint)
+  let h = @kexc25519.kex_gen_hash(b_inputs(), ks_blob, alice_pk(), bob_pk(), ss_mpint)
   assert_eq_bytes(
     h,
     hex_to_bytes(
@@ -175,14 +175,14 @@ test "kex_gen_hash_field_sensitivity" {
   let ic = b_inputs().client_kexinit
   let last = ic.length() - 1
   ic[last] = ic[last] ^ b'\x01'
-  let inputs_mut = ExchangeInputs::make(
+  let inputs_mut = @kexc25519.ExchangeInputs::make(
     b_inputs().client_version,
     b_inputs().server_version,
     ic,
     b_inputs().server_kexinit,
   )
-  let h1 = kex_gen_hash(b_inputs(), ks_blob, alice_pk(), bob_pk(), ss_mpint)
-  let h2 = kex_gen_hash(inputs_mut, ks_blob, alice_pk(), bob_pk(), ss_mpint)
+  let h1 = @kexc25519.kex_gen_hash(b_inputs(), ks_blob, alice_pk(), bob_pk(), ss_mpint)
+  let h2 = @kexc25519.kex_gen_hash(inputs_mut, ks_blob, alice_pk(), bob_pk(), ss_mpint)
   let mut same = true
   for i = 0; i < 32; i = i + 1 {
     if h1[i] != h2[i] {
@@ -200,7 +200,7 @@ test "derive_keys_all_six" {
   let ss_mpint = hex_to_bytes(
     "000000204a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
   )
-  let keys = derive_keys(h, ss_mpint, 64)
+  let keys = @kexc25519.derive_keys(h, ss_mpint, 64)
   assert_eq_bytes(keys.session_id, h, "session_id == first H")
   assert_eq_bytes(
     keys.iv_ctos,
@@ -256,8 +256,8 @@ test "derive_single_chain_expansion" {
     "000000204a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
   )
   // 前 32 字节必须与 we_need=32 时完全一致(前缀稳定性)
-  let k32 = derive_single(b'A', 32, h, ss_mpint, h)
-  let k33 = derive_single(b'A', 33, h, ss_mpint, h)
+  let k32 = @kexc25519.derive_single(b'A', 32, h, ss_mpint, h)
+  let k33 = @kexc25519.derive_single(b'A', 33, h, ss_mpint, h)
   for i = 0; i < 32; i = i + 1 {
     assert_eq(k33[i], k32[i])
   }
@@ -271,7 +271,7 @@ test "parse_reply_valid" {
   let reply = hex_to_bytes(
     "000000330000000b7373682d656432353531390000002003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b800000020de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f000000530000000b7373682d6564323535313900000040bdd8ae79ed073b1ec000b840f60792c85410c48070d3b7f4f90b8bd9971614da953fa569e5b05626bdca280e1775d9085ee354dbd927d7e876fc1fc5939eae0f",
   )
-  match parse_reply(reply) {
+  match @kexc25519.parse_reply(reply) {
     Some(r) => {
       assert_eq_bytes(
         r.hostkey_blob,
@@ -297,7 +297,7 @@ test "parse_reply_truncated_and_trailing" {
   for i = 0; i < short.length(); i = i + 1 {
     short[i] = reply[i]
   }
-  assert_eq(parse_reply(short) is None, true)
+  assert_eq(@kexc25519.parse_reply(short) is None, true)
   // 尾随垃圾:追加一个字节
   let trailing : FixedArray[Byte] = FixedArray::make(
     reply.length() + 1,
@@ -307,15 +307,15 @@ test "parse_reply_truncated_and_trailing" {
     trailing[i] = reply[i]
   }
   trailing[reply.length()] = b'\xff'
-  assert_eq(parse_reply(trailing) is None, true)
+  assert_eq(@kexc25519.parse_reply(trailing) is None, true)
   // Q_S 非 32 字节(C: sshbuf_len(server_blob)!=CURVE25519_SIZE → SIGNATURE_INVALID)
   let wrong_len_blob = hex_to_bytes("00000002aabb")
   // 构造 string(KS=empty) ‖ string(QS=aabb) ‖ string(sig=empty)
-  let crafted = KxBuf::new()
+  let crafted = @kexc25519.KxBuf::new()
   crafted.put_string(FixedArray::make(0, b'\x00'))
   crafted.put_string(wrong_len_blob)
   crafted.put_string(FixedArray::make(0, b'\x00'))
-  assert_eq(parse_reply(crafted.to_bytes()) is None, true)
+  assert_eq(@kexc25519.parse_reply(crafted.to_bytes()) is None, true)
 }
 
 ///|
@@ -323,9 +323,9 @@ test "parse_sig_ed25519" {
   let sig_blob = hex_to_bytes(
     "0000000b7373682d6564323535313900000040bdd8ae79ed073b1ec000b840f60792c85410c48070d3b7f4f90b8bd9971614da953fa569e5b05626bdca280e1775d9085ee354dbd927d7e876fc1fc5939eae0f",
   )
-  match parse_sig(sig_blob) {
+  match @kexc25519.parse_sig(sig_blob) {
     Some(s) => {
-      assert_eq(sig_is_ed25519(s), true)
+      assert_eq(@kexc25519.sig_is_ed25519(s), true)
       assert_eq_bytes(
         s.rs,
         hex_to_bytes(
@@ -347,15 +347,15 @@ test "parse_sig_bad_forms" {
   let bad_rs_blob = hex_to_bytes(
     "0000000b7373682d656432353531390000003fbdd8ae79ed073b1ec000b840f60792c85410c48070d3b7f4f90b8bd9971614da953fa569e5b05626bdca280e1775d9085ee354dbd927d7e876fc1fc5939eae",
   )
-  match parse_sig(bad_rs_blob) {
+  match @kexc25519.parse_sig(bad_rs_blob) {
     Some(_) => abort("63-byte rs must be rejected")
     None => assert_eq(true, true)
   }
   // 错误算法名
-  let rsa_blob = KxBuf::new()
+  let rsa_blob = @kexc25519.KxBuf::new()
   rsa_blob.put_string(hex_to_bytes("7373682d727361")) // "ssh-rsa"
   rsa_blob.put_string(hex_to_bytes("010203"))
-  match parse_sig(rsa_blob.to_bytes()) {
+  match @kexc25519.parse_sig(rsa_blob.to_bytes()) {
     Some(s) => {
       // 形态合法(rs 3B? 不——非 ed25519 要求 64B,应被拒)
       let _ = s

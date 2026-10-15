@@ -34,6 +34,14 @@ pub(all) enum Marker {
 } derive(Eq)
 
 ///|
+/// Loop #66: `derive(Eq)` used to promote `Eq::{equal, not_equal}` to plain
+/// methods on the type implicitly. That promotion is deprecated and slated for
+/// removal, and it is invisible in the source -- the calls read as ordinary
+/// methods on `Marker`. Naming them keeps the call sites honest and keeps the
+/// package compiling when the promotion goes away.
+pub extend Marker with Eq::{equal, not_equal}
+
+///|
 /// 匹配结果
 pub(all) enum HostStatus {
   /// 命中且 key 匹配
@@ -56,6 +64,9 @@ pub(all) enum HostStatus {
   /// entries 中有空指针或格式错误
   InvalidEntry
 } derive(Eq)
+
+///| Loop #66: same explicit promotion as `Marker` above.
+pub extend HostStatus with Eq::{equal, not_equal}
 
 ///|
 /// 单个 known_hosts 条目

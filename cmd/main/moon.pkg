@@ -5,7 +5,6 @@
 import {
   "openssh/openssh_moonbit/src/x25519",
   "openssh/openssh_moonbit/src/kexflow",
-  "openssh/openssh_moonbit/src/socket",
   "openssh/openssh_moonbit/src/sshwire",
   "openssh/openssh_moonbit/src/sshclient",
 }

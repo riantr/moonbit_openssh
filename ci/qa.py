@@ -127,15 +127,32 @@ QA_CATEGORIES = [
         name_en="static analysis / SAST (code)",
         name_zh="静态分析（代码级 SAST）",
         status="implemented",
-        command=[MOON + ["check", "--deny-warn"]],
+        command=[NODE + [os.path.join("host", "verify_loop66.mjs")]],
         tier="qa",
         evidence=(
-            "Probed: `moon check --deny-warn` exists and exits -1 today. The "
-            "recorded qa-tier run reports 'Failed with 0 warnings, 82 errors', "
-            "every one [0025] test_unqualified_package raised in a *_test.mbt "
-            "file. NOTE: an earlier probe of the same command minutes before "
-            "reported 90 errors, so the count is NOT stable and I did not chase "
-            "why -- treat it as a floor, not a constant. MERGED with the brief's "
+            "Loop #66 moved this row off `moon check --deny-warn` and onto a "
+            "real gate, for three reasons that were measured rather than "
+            "argued. (1) `moon check` with no path checks ONE package, not the "
+            "module: the old probe called it once and reported the result as a "
+            "repository-wide total, and three runs all said '7 files, 59 "
+            "diagnostics' and looked stable when each had simply visited a "
+            "different subset. (2) The diagnostic set is not stable under "
+            "repair -- `src/hostkey` reported 15 `deprecated` while `cert.mbt` "
+            "still had one, and 105 `test_unqualified_package` immediately after "
+            "it was fixed, so one correct measurement is a floor, not a total. "
+            "Loop #66 measured 318 sites, then 62, then 12, then 3, fixing one "
+            "layer at a time. (3) `unused_package` cannot be gated on a single "
+            "target: six packages gate files per target, and an import used "
+            "only by gated files looks unused everywhere except the target it "
+            "gates for, so the collector intersects across all four. Three "
+            "survivors remain, and `src/khfile`'s `moonbitlang/async` is one of "
+            "them even after the intersection because the compiler's `async "
+            "test` expansion consumes it with no source text to find -- deleting "
+            "it produces 8 hard errors, one per `async test` block. They are an "
+            "accept table whose entries each carry their evidence, and the gate "
+            "asserts the reported set EQUALS the table, so a new warning fails "
+            "and a fixed one fails too. Probed: `node host/verify_loop66.mjs` "
+            "exit 0 'loop66: 14/14'. MERGED with the brief's "
             "`static-code-check`: there is no second code-level static check in "
             "MoonBit, and two rows running one command would drift."
         ),

@@ -47,7 +47,7 @@ fn check_marker(s : String, start : Int) -> (Marker, Int)? {
     // 标记太长或紧贴 EOF → 错误
     return None
   }
-  let marker_str = s.substring(start=start, end=end)
+  let marker_str = s[start:end].to_owned()
   // 跳过标记后的空白
   let mut after = end
   while after < s.length() {
@@ -90,7 +90,7 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   if host_end >= line.length() || host_end == pos {
     return None
   }
-  let host_raw = line.substring(start=pos, end=host_end)
+  let host_raw = line[pos:host_end].to_owned()
   // 跳过空白
   let mut p = host_end
   while p < line.length() {
@@ -103,7 +103,7 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   if kt_end >= line.length() || kt_end == p {
     return None
   }
-  let key_type = line.substring(start=p, end=kt_end)
+  let key_type = line[p:kt_end].to_owned()
   // 跳过空白
   p = kt_end
   while p < line.length() {
@@ -114,9 +114,9 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   // base64 blob
   let blob_end = skip_to_ws(line, p)
   let blob_str = if blob_end < line.length() {
-    line.substring(start=p, end=blob_end)
+    line[p:blob_end].to_owned()
   } else {
-    line.substring(start=p, end=line.length())
+    line[p:line.length()].to_owned()
   }
   if blob_str.length() == 0 { return None }
   // base64 decode
@@ -155,7 +155,7 @@ fn split_host_patterns(s : String) -> Array[String] {
   while i <= s.length() {
     if i == s.length() || s[i] == ',' {
       if i > start {
-        let raw = s.substring(start=start, end=i)
+        let raw = s[start:i].to_owned()
         let trimmed = trim_whitespace(raw)
         if trimmed.length() > 0 {
           // 保留否定标记用于显示（parse_line 之外不需要 match）
@@ -180,7 +180,7 @@ fn split_host_patterns(s : String) -> Array[String] {
 fn split_host_pattern_spec(p : String) -> HostSpec {
   // 剥离 `!` 否定前缀（与 split_host_patterns 行为一致）
   let s = if p.length() > 0 && p[0].to_int() == '!'.to_int() {
-    p.substring(start=1, end=p.length())
+    p[1:p.length()].to_owned()
   } else {
     p
   }
@@ -195,11 +195,11 @@ fn split_host_pattern_spec(p : String) -> HostSpec {
     }
     if close > 0 {
       // s[1..close) = host_only
-      let host_inner = s.substring(start=1, end=close)
+      let host_inner = s[1:close].to_owned()
       // 期待 close+1 == ':' 然后端口
       if close + 1 < s.length() && s[close + 1].to_int() == ':'.to_int() {
         // 解析端口字符串 s[close+2..]
-        let port_str = s.substring(start=close + 2, end=s.length())
+        let port_str = s[close + 2:s.length()].to_owned()
         match parse_int_str(port_str) {
           Some(n) => { host_only: host_inner, host_port: Some(n) }
           None => { host_only: host_inner, host_port: None }  // 端口解析失败
@@ -247,7 +247,7 @@ fn trim_whitespace(s : String) -> String {
     end = end - 1
   }
   if start >= end { return "" }
-  s.substring(start=start, end=end)
+  s[start:end].to_owned()
 }
 
 ///|
@@ -265,7 +265,7 @@ pub fn parse_file(content : String) -> Array[KnownHostEntry] {
       if end > start && content[end - 1] == '\r' {
         end = end - 1
       }
-      let line = content.substring(start=start, end=end)
+      let line = content[start:end].to_owned()
       match parse_line(line, linenum) {
         Some(e) => out.push(e)
         None => ()
@@ -284,17 +284,13 @@ pub fn parse_base64_blob(s : String) -> FixedArray[Byte]? {
   // 兼容标准 base64 和 nopad 形式（OpenSSH 在写入时无 padding）
   // moonbitlang/core/encoding/base64 decode 会自动处理 padding
   let view : StringView = s
-  try {
-    let result = @base64.decode(view, ignore_whitespace=false) catch {
-      _ => return None
-    }
-    // FixedArray[Byte] from Bytes
-    let arr : FixedArray[Byte] = FixedArray::make(result.length(), b'\x00')
-    for i = 0; i < result.length(); i = i + 1 {
-      arr[i] = result[i]
-    }
-    Some(arr)
-  } catch {
-    _ => None
+  let result = @base64.decode(view, ignore_whitespace=false) catch {
+    _ => return None
   }
+  // FixedArray[Byte] from Bytes
+  let arr : FixedArray[Byte] = FixedArray::make(result.length(), b'\x00')
+  for i = 0; i < result.length(); i = i + 1 {
+    arr[i] = result[i]
+  }
+  Some(arr)
 }
