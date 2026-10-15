@@ -122,11 +122,22 @@ ZERO_WORK_RE = re.compile(r"Total tests:\s*0\b")
 #                      (loop35's failures are mostly "loop33 harness still
 #                      green"). loop30 also fails there, for a different
 #                      reason, and is therefore NOT in this list.
-# Anything not measured stays in the default tier, where it is at least
-# visible. A gate wrongly placed in peer-gates is skipped in silence, so the
-# engine prints the skipped count on every default run.
+#
+# Anything not measured stays in the default tier, where it is at least visible.
+# A gate wrongly placed in peer-gates is skipped in silence, so the engine prints
+# the skipped count on every default run.
+# Loop #65 added two more, both measured rather than assumed:
+#   loop40  -- starts a real OpenSSH server on a fixed port and CANNOT stop it:
+#              startSshd() unrefs the child and drops the handle, and
+#              sshd_setup.mjs parks on `new Promise(() => {})`. It costs ~44
+#              minutes and turns the default run red for a reason unrelated to
+#              the code under test. host/probe_sshd_leak.mjs reproduces the leak.
+#   loop49  -- needs a live peer too, and is order-dependent: it passes alone and
+#              fails inside a suite run, which is what the loop40 sshd leak looks
+#              like from the outside.
 PEER_GATES = frozenset(
-    "verify_loop%d.mjs" % n for n in (31, 32, 33, 34, 35, 36, 37, 38, 39)
+    "verify_loop%d.mjs" % n
+    for n in (31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 49)
 )
 
 TIERS = ("env", "build", "gates", "peer-gates", "mutations", "qa")

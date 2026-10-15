@@ -1265,6 +1265,80 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #65: verify_loop40 leaks the server it starts, and a fixed port makes that bite
+
+`verify_loop40.mjs` starts a real OpenSSH server and **cannot stop it**.
+`startSshd()` (line 147) spawns `node host/sshd_setup.mjs`, calls
+`child.unref()`, polls until the port answers, and returns a boolean — the
+handle is discarded and never stored. `sshd_setup.mjs:210` parks on
+`await new Promise(() => {})`: `sshd -D` runs in the foreground forever and no
+SIGTERM/SIGINT handler is installed. The only `kill()` in the whole gate is
+`relay.kill()` (line 556), a different process. So on every run, successful or
+not, an sshd is orphaned on `SSHD_PORT = 18783` — a **hard-coded literal**, so
+the second run collides with the first.
+
+That is the shape behind `verify_loop49` passing standalone and failing inside
+a suite run. It is the kind of order-dependent failure that gets relabelled
+"flaky" and then lived with forever.
+
+Reading the code shows there is no owner; it does **not** show that the process
+survives. `host/probe_sshd_leak.mjs` measures it, in two processes on purpose:
+the inner one reproduces loop40's `spawn` + `unref` + dropped handle verbatim
+and exits normally, exactly as a gate that finished — or was killed — would;
+the outer one then polls the port. If it still answers, the server outlived its
+only owner. In a single process that measurement would be void, because the
+inner process would still be alive. The outer probe cleans up after itself,
+which is precisely what loop40 lacks.
+
+```
+LEAK CONFIRMED: the port still answers after the owner exited.
+self-cleanup by this probe: ok, port released
+```
+
+`verify_loop65.mjs` 25/25. Mutations **6 CAUGHT / 0 MISSED**. M1 is worth
+reading twice: giving loop40 an sshd kill *is* the fix being argued for, and
+the gate goes red when it appears — the gate asserts the leak exists, so a real
+fix must be accompanied by a decision about what the gate should then say.
+
+#### The classification mistake, corrected
+
+Loop #64 wrote `PEER_GATES` as `verify_loop31..39` and left loop40 in the
+default tier, where it costs ~44 minutes and turns the run red for reasons
+unrelated to the code under test. That was Loop #64's error, not a judgement
+call. The set is now `31..40, 49`, each entry carrying the measurement that put
+it there. Default tier: **44 steps**; the eleven excluded gates are named on
+every run.
+
+#### A note on restoring bytes
+
+Two separate incidents this loop, both mine:
+
+- `git show … | Out-String` turned a 2-line change into a 717-line diff.
+  PowerShell rewrites line endings and appends a newline. Use `git show` piped
+  to a binary write.
+- A restore-from-HEAD script then reverted the loop's own uncommitted work along
+  with the temporary mutation, and the gate noticed before I did.
+  **Restore-by-HEAD is only safe on files with no legitimate uncommitted
+  changes.** Restore by re-applying the exact change instead.
+
+#### A gate that took four attempts to specify
+
+The provenance check on `PEER_GATES` — "the set must carry the measurement that
+justifies it" — was too weak three times in a row, and each time a mutation that
+should have failed it passed:
+
+1. A mutation that appended a misleading comment and deleted nothing. The gate
+   was right to pass; **the mutation was broken**, which is worse than no
+   mutation because it looks like a hole.
+2. Deleting one line of the block — "measured" also appears on Loop #64's
+   paragraph about 31–39.
+3. Deleting the block's header — the detail lines still name `loop40`.
+
+Deleting the whole nine-line block fails it (23/25). The spec that works names
+the two gates specifically. Three broken mutations are recorded in
+`host/loop65_mutations.py` rather than deleted: **a mutation that cannot fail is
+more dangerous than no mutation at all.**
+
 ### Loop #64: a transport seam, a measured wall, and a CI that can say no
 
 `src/sshclient/live.mbt` and `src/sftp.mbt` named `@tcp.TcpConn` in 25
@@ -1411,6 +1485,23 @@ A self-check case caught a contradiction here: this file originally promised to
 refuse a date-shaped tag like `release-2026-10`, while the implementation
 incremented it. The implementation matched the owner's rule ("only the last
 digit moves"), so the *promise* was corrected, not the code.
+
+#### Left open: verify_loop41 fails in the suite and passes alone
+
+The default tier is **43/44**, with one red: `verify_loop41.mjs` exits
+`3221226505` (`0xC0000409`, a native abort) inside a suite run, while running
+it standalone passes — three times in a row, 29 checks each. It is not flaky
+on its own, so something else in the suite affects it.
+
+**Whether this predates Loop #65 is NOT established.** The evidence leans that
+way — this loop changed only `ci/ci.py` (the peer-gate set and the mutations
+sandbox) plus new files under `host/`, touched nothing in `src/` or `cmd/`,
+and loop41 shares no state with loop40 — but leaning is not proving, and the
+attempt to prove it failed three times: a `git worktree` is a plain checkout,
+so it has no `node_modules`, and `verify_loop41.mjs` imports the npm `ws`
+package. Every control run therefore died with `ERR_MODULE_NOT_FOUND` before
+reaching any assertion. The experiment needs `npm install ws` in the worktree
+first; until then this is an open question, not a result.
 
 #### Also learned this loop
 
