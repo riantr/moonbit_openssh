@@ -58,8 +58,8 @@ pub(all) enum SftpOutcome {
 
 ///|
 /// 跑完整个 SFTP 会话:认证 → 开通道 → subsystem → 等确认 → 脚本。
-pub fn live_sftp(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_sftp(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -76,8 +76,8 @@ pub fn live_sftp(
 /// 配过的名字,而「这个名字不存在」在 want_reply=TRUE 的规则下**必须**表现为
 /// CHANNEL_FAILURE;如果驱动层把名字写死成 `sftp`,这一条路径就没法被测到,而
 /// 「配置拼错」在真实部署里正是最常见的 SFTP 故障。
-pub fn live_sftp_named(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_sftp_named(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -107,8 +107,8 @@ pub fn live_sftp_named(
 ///|
 /// 通道之上的那一小段循环。`SftpSession` 是纯状态机,这里是它和 socket 之间
 /// 唯一的接缝。
-fn run_sftp_session(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] run_sftp_session(
+  conn : T,
   st0 : SessionState,
   subsystem : String,
   ops : Array[@sftp.SftpOp],
@@ -241,8 +241,8 @@ fn run_sftp_session(
 ///
 /// `pump` 在 `feed` **之外**每轮都调,而不是只在收到数据之后:应答可能已经躺在
 /// 重组缓冲里,而 socket 已经空了——只在那里等,就是在等一个自己已经收到的包。
-fn pump_once(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] pump_once(
+  conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   sess : @sftp.SftpSession,
@@ -287,8 +287,8 @@ fn pump_once(
 ///
 /// 返回值第一个分量是「到了没有」:False 表示排空 64 个包仍未见目标,调用方要
 /// 区分它和「连接断了」——前者是协议没按预期走,后者是传输没了。
-fn pump_until(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] pump_until(
+  conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   sess : @sftp.SftpSession,
@@ -318,8 +318,8 @@ fn wait_pred(mode : Int, st : @channel.ChanState) -> Bool {
   }
 }
 
-fn send_chan(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] send_chan(
+  conn : T,
   st : SessionState,
   a : @channel.ChanAction,
 ) -> SessionState? {

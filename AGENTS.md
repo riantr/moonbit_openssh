@@ -1265,6 +1265,163 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #64: a transport seam, a measured wall, and a CI that can say no
+
+`src/sshclient/live.mbt` and `src/sftp.mbt` named `@tcp.TcpConn` in 25
+signatures. `@tcp` is **our own** package (`src/tcp`, a plain Winsock binding) —
+not `moonbitlang/core/tcp` — so the protocol layer and one transport were the
+same thing at the type level. There was no way to say "run the same handshake
+over a WebSocket", and no way to *prove* two transports equivalent because only
+one existed.
+
+`src/transport` supplies the seam. Three methods, because that is all
+`sshclient` calls: SSH is strict request/response, so `read_exact` is the only
+read primitive that matters and no partial-read notion leaks upward.
+
+```
+pub(open) trait Transport {
+  fn wire_send(Self, FixedArray[Byte]) -> Bool
+  fn wire_read_exact(Self, Int) -> FixedArray[Byte]?
+  fn wire_close(Self) -> Unit
+}
+```
+
+The `Transport for @tcp.TcpConn` impl lives in `src/transport`, not in
+`src/tcp`. The dependency arrow points one way and `src/tcp` is unmodified: if
+the socket binding learned about the trait, the "seam" would be a cycle wearing
+a trait's clothes. `verify_loop64.mjs` asserts both directions.
+
+**The wall, measured rather than argued.** `cmd/probe_async_wall` puts a byte
+into a JS-visible slot from a `setTimeout` callback — the stand-in for
+`WebSocket.onmessage` — and asks whether a *synchronous* `fn` can ever see it:
+
+```
+sync : STARVED after 5000000 spins -- synchronous code never yields
+async: GOT 0x5a
+```
+
+Both arms are driven by the same `setTimeout` scheduling, because if they
+differed the comparison would prove nothing; `verify_loop64.mjs` asserts that.
+**Consequence, and it is the real finding of this loop:** `src/sshclient` is
+synchronous, a browser WebSocket can only be read by awaiting, and in MoonBit
+only an `async fn` can await. So running the verified handshake in a browser is
+not "write a WebSocket bridge" — it requires converting the whole SSH layer to
+`async fn`. Loop #63's conclusion is narrowed, not overturned: the wasm target
+cannot do it; the js target can, but only asynchronously.
+
+Verification: `verify_loop64.mjs` 31/31. Mutations: **4 CAUGHT / 0 MISSED /
+2 BUILD-BROKEN** (the two broken ones are compile errors, so the gate never
+judged them and they are not evidence).
+
+`verify_loop63.mjs` asserted `live.mbt` contains `@tcp.TcpConn` — a literal that
+this loop supersedes. It was replaced by the stronger statement it was standing
+in for: scan every `impl Transport for` in the repo and assert the set is
+exactly `["@tcp.TcpConn"]`. A second implementation is exactly what would let a
+browser transport in, and nothing else in that gate would notice. Loop #64's own
+mutation M6 found the first attempt was too weak — it only guarded one end of
+the arrow — and that is now asserted too.
+
+#### Local CI, and three gates that were red for reasons nobody had noticed
+
+`ci/ci.py` is the engine; `.github/workflows/ci.yml` is a thin shell that calls
+it. The step list lives in **one** place on purpose: a YAML copy of 40 gates
+drifts within a couple of loops, and the failure mode is silent — CI goes green
+because it stopped running the new gate.
+
+The engine exists because a hand-written loop got it wrong inside one session:
+PowerShell 5.1 evaluates `.Count` on a *scalar* as `$null`, so a run with one
+failing gate printed `11 - $null = 11`, i.e. **"11/11 PASS" while the process
+exited 1**. A summary that can disagree with the exit status is not a summary.
+`--self-check` therefore tests the engine's own accounting, including that one.
+
+Three red gates surfaced immediately, all pre-existing (reproduced on a clean
+`git worktree` of `59145fb`):
+
+1. **`verify_loop24.mjs`, red since Loop #57.** It asserted
+   `cmd/sshconfig_test` prints `fnmatch_pass: 23/23`. Loop #57 *deleted* that
+   block — the count was hardcoded, so the binary printed 23/23 whether or not
+   the arithmetic held — and moved the cases into `src/sshconfig/sshconfig_test.mbt`
+   as a table that asserts instead of printing. The gate was never updated. It
+   now asserts the *absence* of the hardcoded line and the *presence* of the
+   table.
+2. **`verify_loop30.mjs`, KAT mismatch vs Python — and the MoonBit side was
+   right.** An independent RFC 4251/5656 parser decided it:
+   MoonBit's blob parses and consumes all 101 bytes; the expected file does not
+   parse at all. `gen_ecdsa_driver.py`'s `sig_blob` omitted the outer
+   `string signature_blob` length, and `render`'s `format(v, "X")` dropped
+   leading zeros, producing a 95-character hex string where a 48-byte value needs
+   96. Both fixed; the generator is now idempotent (`cmd/ecdsa_test/main.mbt`
+   regenerates byte-identical to HEAD).
+3. **The generator was a landmine.** Loop #34 had fixed `build_sig` *by hand*
+   in `cmd/ecdsa_test/main.mbt`, left a comment predicting exactly this bug, and
+   never fixed the generator. Regenerating silently reverted it. The generator
+   now emits the correct layout with the original Chinese comment preserved
+   byte-for-byte.
+
+All three are the same disease: **one fact stored twice, one copy edited.**
+Keep the generator authoritative and make regeneration idempotent, or a future
+loop will repeat this.
+
+#### Mutations run in a sandbox, because `finally` is not a safety net
+
+Mutation harnesses restore the tree in a `finally`, which does not run when the
+process is killed — and `subprocess.run(timeout=...)` kills. This already
+happened: `verify_loop40` was interrupted at 44 minutes and left
+`src/channel/channel.mbt` with the `env` name/value pair swapped. The tree was
+restored byte-exactly (via `git show` + a binary write; `git show | Out-String`
+turns a 2-line change into a 717-line diff, and `git checkout --` is forbidden).
+
+`ci/sandbox.py` runs the mutations tier against a throwaway `git worktree` with
+the current uncommitted state applied on top, so the tree that matters is never
+written to.
+
+#### QA matrix: 20 categories, each with evidence
+
+`ci/qa.py` classifies 20 QA categories as `implemented` / `not_available` /
+`needs_external`. Every `not_available` carries the probe that proves it, and
+the matrix is printed in full — omitting a category is the failure mode to
+avoid. Notable: **Gherkin does exist** (`moonrockz/gherkin@0.5.1`); it is
+unavailable *here* only because `moon.mod` declares neither it nor `cucumber`,
+and adding dependencies is out of scope. Also merged rather than shipped twice:
+`static-code-check` into static-analysis, `contract-test` into
+api-interface-contract — this project has been bitten three times by two copies
+of one fact. Two commands that exit 0 while testing nothing were caught and are
+guarded: `moon bench cmd/bench_cached` and `moon test -p src/channel` both
+report "Total tests: 0".
+
+`python ci/ci.py --tiers qa` currently reports **8/12 pass, 4 fail**
+(`format-check`, `moon check --deny-warn` with 114 `test_unqualified_package`,
+`moon coverage analyze` with no data, `moon bench` hitting `extern "wasm"` on
+native). Not hidden. `moon fmt --check` failing is expected and must not be
+"fixed" by running `moon fmt`: that corrupts CJK comments (`真实加密` → `真加密`).
+
+#### Release gate
+
+`ci/release.py`. **No tag while the local CI is not fully green — including when
+the owner asks directly.** The gate does not know who is asking; the tag is
+produced by `git tag` from `next_tag()`, never hand-typed. `next_tag` moves only
+the trailing number (`v0.1.0` → `v0.1.1`), preserving zero padding, and refuses
+rather than guessing when there is nothing to move. Gitee may be pushed at any
+time; GitHub only after a green run and a tag — and note this repository has
+**only** an `origin` → gitee remote, so that half is policy with nothing to act
+on yet. Tiers excluded from the tag decision (`peer-gates`, `mutations`) are
+printed at the moment the decision is made, not hidden.
+
+A self-check case caught a contradiction here: this file originally promised to
+refuse a date-shaped tag like `release-2026-10`, while the implementation
+incremented it. The implementation matched the owner's rule ("only the last
+digit moves"), so the *promise* was corrected, not the code.
+
+#### Also learned this loop
+
+- MoonBit type parameters go **before** the name: `fn[T] f`, not `fn f[T]`.
+  This was got wrong three times during the migration.
+- `src/tcp` has a `moon.pkg` warning about `moonbitlang/core/bytes` being unused
+  — pre-existing, harmless.
+- `[System.IO.File]` with a relative path resolves against the *process* CWD,
+  not `Set-Location`, so an encoding check reported `INVALID-UTF8` for files it
+  had never read. Always use absolute paths there.
+
 ### Loop #63: the browser path has never run, and on this toolchain it cannot
 
 Loops #60, #61 and #62 each found a thing that looked tested and was not — a

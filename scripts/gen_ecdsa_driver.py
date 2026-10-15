@@ -162,8 +162,14 @@ def pubkey_blob(c, Q):
 
 
 def sig_blob(c, r, s):
-    return (ssh_string(c["ssh"].encode())
-            + ssh_string(put_bignum2(r)) + ssh_string(put_bignum2(s)))
+    # RFC 5656 3.1.1: the signature field is a `string` holding the blob, and
+    # the blob itself is `mpint r` + `mpint s`. This used to emit the two mpints
+    # directly after the algorithm name, with no outer length -- so the expected
+    # file described a byte string that no RFC 4251 parser can read: a consumer
+    # would read r's length as the blob length and then run off the end. The
+    # MoonBit side always emitted the outer length and was right.
+    inner = ssh_string(put_bignum2(r)) + ssh_string(put_bignum2(s))
+    return ssh_string(c["ssh"].encode()) + ssh_string(inner)
 
 
 # ---------------------------------------------------------------- data file
@@ -234,8 +240,14 @@ for c in CURVES:
     G = (c["gx"], c["gy"])
     G2 = pt_mul(2, G, c)
     G3 = pt_mul(3, G, c)
-    expected.append((f'{nm}_2G_x', G2[0]))
-    expected.append((f'{nm}_3G_x', G3[0]))
+    # Curve coordinates are fixed width by definition. `format(v, "X")` is not:
+    # it drops leading zeros, so a P-384 x-coordinate whose top nibble happens
+    # to be 0 came out 95 hex characters wide instead of 96 and no longer
+    # described a 48-byte value. The MoonBit side pads to the curve size, which
+    # is the correct behaviour.
+    width = c["size"] * 2
+    expected.append((f'{nm}_2G_x', format(G2[0], "0%dx" % width).upper()))
+    expected.append((f'{nm}_3G_x', format(G3[0], "0%dx" % width).upper()))
     expected.append((f'{nm}_nG_is_inf', pt_mul(c["n"], G, c) is None))
     # k^-1 * (e + r*d) with an unreduced second operand must still equal s.
     h = hashfn(MSG).digest()
@@ -285,12 +297,19 @@ v('    @ecdsa.put_string(q))')
 v('}')
 v('')
 v('///| Build a signature blob from raw r/s byte strings, for the negative cases.')
+v('///')
+v('/// \u5e03\u5c40\u5fc5\u987b\u548c `encode_sig_blob` \u4e00\u81f4 \u2014\u2014 `string alg` + `string( mpint r \u2016 mpint s )`\u3002')
+v('/// \u5c11\u5305\u5916\u9762\u90a3\u5c42 string \u7684\u8bdd,\u6bcf\u4e00\u6761\u8d1f\u4f8b\u90fd\u4f1a\u5728**\u89e3\u6790\u5c42**\u5c31\u5931\u8d25,\u4e8e\u662f')
+v('/// "is None" \u6052\u771f:\u6d4b\u8bd5\u770b\u8d77\u6765\u5168\u7eff,\u5b9e\u9645\u4ec0\u4e48\u90fd\u6ca1\u6d4b\u3002Loop #34 \u4fee')
+v('/// `encode_sig_blob` \u65f6\u6b63\u662f\u88ab\u8fd9\u4e00\u70b9\u6321\u4e86\u4e00\u4e0b,\u6240\u4ee5\u8fd9\u91cc\u663e\u5f0f\u5199\u6b7b\u6b63\u786e\u5e03\u5c40,')
+v('/// \u5e76\u5728\u4e0b\u9762\u5355\u72ec\u7528\u4e00\u6761\u6b63\u4f8b(`_wire_sig` \u5f80\u8fd4)\u5b88\u4f4f\u5b83\u3002')
 v('fn build_sig(alg : String, rb : FixedArray[Byte], sb : FixedArray[Byte]) -> FixedArray[Byte] {')
 v('  @ecdsa.cat(')
-v('    @ecdsa.cat(')
-v('      @ecdsa.put_string(@ecdsa.str_bytes(alg)),')
-v('      @ecdsa.put_string(rb)),')
-v('    @ecdsa.put_string(sb))')
+v('    @ecdsa.put_string(@ecdsa.str_bytes(alg)),')
+v('    @ecdsa.put_string(')
+v('      @ecdsa.cat(@ecdsa.put_string(rb), @ecdsa.put_string(sb)),')
+v('    ),')
+v('  )')
 v('}')
 v('')
 v('fn run_curve(name : String, c : @ecdsa.Curve) -> Unit {')

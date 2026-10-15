@@ -7,6 +7,7 @@
 
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -81,7 +82,6 @@ if (allMatch) {
 
   const sampleOut = outputs['native-debug'];
   const checks = [
-    ['fnmatch_pass', '23/23'],
     ['parsed_sections', '3'],
     ['foo.example.com match', 'yes'],
     ['foo.example.com User', 'foo'],
@@ -101,10 +101,40 @@ if (allMatch) {
     }
   }
 
-  console.log('\n  + fnmatch 23/23 KAT PASS (?, * wildcards)');
+  // Loop #24 originally asserted the binary printed "fnmatch_pass: 23/23".
+  // Loop #57 removed that block instead of fixing it: the count was hardcoded,
+  // so the binary printed 23/23 whether or not the arithmetic held, and two of
+  // its expectations were themselves wrong. The cases moved to a table in
+  // `src/sshconfig/sshconfig_test.mbt` where a mismatch is counted and
+  // asserted. This gate was never updated and has been red ever since -- it was
+  // outside the loop53--63 regression set, which is why nobody saw it.
+  //
+  // Assert the current, honest arrangement instead of the old literal: the
+  // count line must be ABSENT (a reappearing "23/23" means someone restored the
+  // block that cannot fail), and the cases must live in the package test.
+  if (/\bfnmatch_pass\b/.test(sampleOut)) {
+    console.error(
+      '  ✗ the binary prints fnmatch_pass again; Loop #57 removed that block ' +
+        'because its count was hardcoded and could not reflect the arithmetic',
+    );
+    process.exit(1);
+  }
+  console.log('  ✓ the binary no longer prints the hardcoded fnmatch count');
+
+  const pkgTest = readFileSync(
+    join(ROOT, 'src', 'sshconfig', 'sshconfig_test.mbt'),
+    'utf8',
+  );
+  if (!/fnmatch/.test(pkgTest)) {
+    console.error('  ✗ src/sshconfig/sshconfig_test.mbt no longer covers fnmatch');
+    process.exit(1);
+  }
+  console.log('  ✓ fnmatch cases live in src/sshconfig/sshconfig_test.mbt (moon test src/sshconfig)');
+
+  console.log('\n  + fnmatch KAT PASS (?, * wildcards) -- via `moon test src/sshconfig`');
   console.log('  + ssh_config parser 3 sections byte-exact');
   console.log('  + Host pattern matching first-match-wins byte-exact');
-  console.log('  + 9 字段 byte-exact: fnmatch_pass/parsed_sections/match + 5 个 option 匹配 + NonExistent');
+  console.log('  + 8 字段 byte-exact: parsed_sections/match + 5 个 option 匹配 + NonExistent');
   process.exit(0);
 } else {
   console.error(`\n✗ FAIL: hash mismatch`);

@@ -1,0 +1,147 @@
+# Loop #64: CI lives in ci/ci.py, not here.
+#
+# This workflow is a thin shell on purpose. A second copy of the list of gates,
+# written as YAML `steps:` entries, would drift from the Python engine within a
+# couple of loops -- and the failure mode is silent: CI goes green because it
+# stopped running the new gate. So the job installs the toolchain and then
+# hands everything to the same engine a developer runs locally.
+#
+#   local:  python ci/ci.py
+#   here:   python ci/ci.py --json ci/artifacts/ci.json
+#
+# The one genuinely CI-shaped thing this file adds is caching. `moon` and the
+# dependency cache are the slow part of a cold gate run, and neither belongs in
+# the repository.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+
+      - name: Cache MoonBit dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.moon
+            .mooncakes
+          key: moonbit-${{ runner.os }}-${{ hashFiles('moon.mod') }}
+          restore-keys: moonbit-${{ runner.os }}-
+
+      - name: Update MoonBit dependencies
+        run: moon update
+
+      # --list first: a CI run that silently discovered zero steps would report
+      # green. The engine refuses to run with no steps, and this makes the
+      # refusal visible in the log.
+      - name: Show the discovered steps
+        run: python ci/ci.py --tiers env,build,gates --list
+
+      - name: Run gates
+        run: python ci/ci.py --tiers env,build,gates --json ci/artifacts/ci.json
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-report
+          path: ci/artifacts/ci.json
+          if-no-files-found: warn
+
+  qa-matrix:
+    # The QA category matrix (ci/qa.py). Opt-in on purpose, and NOT folded into
+    # the gates job: several of these commands are slow, and three are red today
+    # for understood, documented reasons -- `moon fmt --check`, `moon check
+    # --deny-warn` (90 test_unqualified_package warnings), and `moon coverage
+    # analyze` (no output data). Making them gate pull requests would mean
+    # either letting a known-red job block every PR or deleting the rows, and
+    # deleting the rows is the failure mode this project keeps getting hit.
+    #
+    # So it runs on workflow_dispatch and on pushes to main, as a REPORT. The
+    # engine's own exit code is still honest: if it exits 1 the job is red.
+    name: qa category matrix
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+
+      - name: Show the QA categories
+        run: python ci/ci.py --tiers qa --list
+
+      - name: Run the QA category matrix
+        run: python ci/ci.py --tiers qa --json ci/artifacts/qa.json
+
+  engine-self-check:
+    # Runs first and fast. If the engine's own accounting is broken, nothing
+    # the gates report can be trusted, so this gates everything else.
+    name: engine self-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify the CI engine's own bookkeeping
+        # Runs first and on its own: if the engine's accounting is broken,
+        # nothing it reports -- including a green tag decision -- can be
+        # trusted. This also covers the release gate's pure tag logic.
+        run: python ci/ci.py --self-check
+
+  release-gate:
+    # Deliberately manual, and deliberately a *report* rather than an action.
+    # The tag rule the owner set is: no tag until the local CI is fully green,
+    # even on request. So this job never creates a tag on a red run; it tells
+    # you whether a tag WOULD be allowed, and a human (or an agent holding the
+    # same rule) creates it locally with
+    #     python ci/ci.py --tiers ... --tag
+    # Pushing to gitee is allowed at any time. Pushing to GitHub is allowed
+    # only after a green run and a tag -- see ci/release.py.
+    name: release gate (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: always() && needs.engine-self-check.result == 'success'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Set up MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+      - name: Would a tag be allowed right now?
+        # Exits 1 when the gate would refuse, which is the honest answer.
+        # This job is allowed to fail: a red gate is the expected state most
+        # of the time, and hiding that would defeat its purpose.
+        run: python ci/ci.py --tiers env,build,gates,qa --check-release

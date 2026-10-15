@@ -13,9 +13,11 @@
 // ## What is true
 //
 // **`src/sshclient/live.mbt` is the only code that performs a real, verified
-// handshake**, and it is bound to `@tcp.TcpConn`. It does not import
-// `src/ws_socket`. That is native TCP, and it is genuinely verified -- Loops
-// #54--#59 run it against a real peer.
+// handshake.** As written by Loop #63 it was bound to `@tcp.TcpConn` and did
+// not import `src/ws_socket`; Loop #64 lifted the binding into a
+// `@transport.Transport` trait, but `TcpConn` is still its only implementation
+// and the client still never imports a browser socket. That is native TCP,
+// and it is genuinely verified -- Loops #54--#59 run it against a real peer.
 //
 // **`cmd/ssh_full_ws` is the browser binary, and it does not do a handshake.**
 // It reads the server's KEXINIT and KEXDH_REPLY into `let _ =` -- discarded --
@@ -236,9 +238,46 @@ async function main() {
   console.log("");
   console.log("D. the verified client and the browser transport are disjoint");
   const live = stripComments(readFileSync(join(root, "src", "sshclient", "live.mbt"), "utf8"));
-  expect("the verified client is bound to @tcp.TcpConn", live.includes("@tcp.TcpConn"));
+  // Loop #64 replaced the hard binding with a trait, so the literal this gate
+  // used to check ("the client mentions @tcp.TcpConn") no longer describes the
+  // code. The invariant underneath it is stronger than the literal and still
+  // holds: no browser transport has been wired into the verified client, and
+  // TcpConn remains its only implementation. Asserting the intent instead of
+  // the old type name keeps the gate from silently passing if someone later
+  // adds a second Transport impl behind it.
+  expect(
+    "the verified client is now generic over the Transport trait",
+    live.includes("@transport.Transport"),
+  );
+  expect(
+    "the verified client is no longer hard-bound to @tcp.TcpConn",
+    !live.includes("@tcp.TcpConn"),
+  );
   expect("the verified client never imports ws_socket", !live.includes("ws_socket"));
   expect("the verified client never imports wt_socket", !live.includes("wt_socket"));
+
+  // The load-bearing half: a second impl is exactly what would let a browser
+  // transport in, and nothing else in this gate would notice.
+  // One `impl` block per trait method, so collect the distinct impl *types*.
+  const transportImpls = [
+    ...new Set(
+      readdirSync(join(root, "src", "transport"))
+        .filter((f) => f.endsWith(".mbt"))
+        .flatMap((f) => {
+          const src = stripComments(
+            readFileSync(join(root, "src", "transport", f), "utf8"),
+          );
+          return [
+            ...src.matchAll(/impl\s+Transport\s+for\s+([@A-Za-z_][\w.]*)/g),
+          ].map((m) => m[1]);
+        }),
+    ),
+  ].sort();
+  expect(
+    "TcpConn is still the only Transport implementation",
+    JSON.stringify(transportImpls) === JSON.stringify(["@tcp.TcpConn"]),
+    transportImpls.join(", ") || "(none)",
+  );
 
   const wsPkg = stripComments(readFileSync(join(root, "src", "ws_socket", "socket.mbt"), "utf8"));
   expect("ws_socket is wasm-only", wsPkg.includes('extern "wasm"'));

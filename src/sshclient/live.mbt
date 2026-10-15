@@ -338,8 +338,8 @@ priv struct WireCounters {
 ///   point is a byte-exact transcript, and unpredictable padding makes the
 ///   transcript irreproducible. The trade is deliberate and this is the place
 ///   to change it.
-fn send_packet(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] send_packet(
+  conn : T,
   counters : WireCounters,
   s : @bpacket.SendCtx,
   msg_type : Byte,
@@ -348,7 +348,7 @@ fn send_packet(
   let pad_src : FixedArray[Byte] = FixedArray::make(64, b'\x00')
   match s.emit(msg_type, payload, pad_src) {
     Ok(pkt) => {
-      if !conn.send(pkt.wire) {
+      if !conn.wire_send(pkt.wire) {
         return false
       }
       counters.sent = counters.sent + pkt.wire.length()
@@ -382,12 +382,12 @@ pub(all) enum RecvOutcome {
 ///   length is asked for first -- `RecvCtx::wire_len_from_header` decrypts the
 ///   4-byte length field for us when the channel is encrypted -- and only then
 ///   is the remainder pulled in.
-fn recv_packet(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] recv_packet(
+  conn : T,
   counters : WireCounters,
   r : @bpacket.RecvCtx,
 ) -> RecvOutcome {
-  let hdr = match conn.read_exact(4) {
+  let hdr = match conn.wire_read_exact(4) {
     None => return Closed
     Some(h) => h
   }
@@ -403,7 +403,7 @@ fn recv_packet(
   let body = if rest == 0 {
     FixedArray::make(0, b'\x00')
   } else {
-    match conn.read_exact(rest) {
+    match conn.wire_read_exact(rest) {
       None => return Closed
       Some(b) => b
     }
@@ -419,15 +419,15 @@ fn recv_packet(
 ///|
 /// Read one CRLF-terminated identification line, bounded so a hostile or
 /// broken server cannot make us read forever.
-fn read_ident_line(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] read_ident_line(
+  conn : T,
   counters : WireCounters,
   max_bytes : Int,
 ) -> String? {
   let mut acc : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let mut total = 0
   while total < max_bytes {
-    let b = match conn.read_exact(1) {
+    let b = match conn.wire_read_exact(1) {
       None => return None
       Some(v) => v
     }
@@ -560,8 +560,8 @@ pub fn key_tag_of(
 /// than something read from a global because a global default would be exactly
 /// the wrong shape here: the safe reading and the insecure reading differ by one
 /// field, and a caller that forgets to set it should have to notice.
-fn handshake_to_session(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] handshake_to_session(
+  conn : T,
   x : @bigint.BigNat,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> (LiveResult, SessionState?) {
@@ -570,7 +570,7 @@ fn handshake_to_session(
   let r = @bpacket.RecvCtx::new()
   let client_ident = "SSH-2.0-MoonBit_0.1"
   // ---- 1. identification exchange ----
-  if !conn.send(cat2(ascii(client_ident), ascii("\r\n"))) {
+  if !conn.wire_send(cat2(ascii(client_ident), ascii("\r\n"))) {
     return (Failed(ConnectFailed), None)
   }
   counters.sent = counters.sent + client_ident.length() + 2
@@ -884,8 +884,8 @@ fn handshake_to_session(
 
 ///|
 /// Run a full handshake against `host:port`, stopping after NEWKEYS.
-pub fn live_handshake(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_handshake(
+  conn : T,
   x : @bigint.BigNat,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> LiveResult {
@@ -946,8 +946,8 @@ pub const USERAUTH_SERVICE : String = "ssh-userauth"
 /// about that can be faked by a self-consistent bug on our side -- if our keys,
 /// counter or MAC were wrong the server would either drop the connection or
 /// reply `MAC error`/`decryption failed`, and this function would report it.
-pub fn live_session(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_session(
+  conn : T,
   x : @bigint.BigNat,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> SessionResult {
@@ -988,8 +988,8 @@ pub fn live_session(
 /// 抽出来是因为 Loop #34 的认证流程要再走一遍同样的两步。把这段留在
 /// `live_session` 里的结果是认证路径要么复制它、要么改回去——前者会漂移,
 /// 后者会动到 Loop #33 已经验证过的字节数。
-fn request_userauth_service(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] request_userauth_service(
+  conn : T,
   st : SessionState,
 ) -> (String?, SessionError?) {
   let payload = @sshwire.write_ssh_string(ascii(USERAUTH_SERVICE))
@@ -1098,8 +1098,8 @@ pub(all) struct AuthReport {
 /// 对「浏览器零依赖」的客户端来说这是唯一说得通的选择。password 认证会把
 /// 口令的存储、清洗与比较拖进客户端,而 Loop #33 刚把 userauth 服务协商好,
 /// 这里没有任何理由去碰它。
-pub fn live_auth(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_auth(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -1117,8 +1117,8 @@ pub fn live_auth(
 /// 让 `live_auth` 多返回一个私有结构体不算破坏 API,但它本来是给 CLI 打印用的,
 /// 所以这里保留原样的同时另开一个内部入口——两条路径共用同一份认证代码,
 /// Loop #34 修好的签名逻辑不会被分叉出去。
-fn live_auth_with_state(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] live_auth_with_state(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -1318,8 +1318,8 @@ pub(all) struct ExecResult {
 /// 对端发了 CLOSE 且我们也回了 CLOSE(`finished`)、连接关闭、或者包数超限。
 /// 超限那条不是摆设:状态机里任何一处「回包发不出去」如果没检查,就会变成
 /// 一边等 CHANNEL_CLOSE 一边永远收不到的死等。
-pub fn live_exec(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_exec(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -1348,8 +1348,8 @@ pub fn live_exec(
 ///
 /// `stdin_data` 可以是空的:那样发出去的只有一个 CHANNEL_EOF,等价于
 /// `ssh -n host cmd`。EOF 一定要发,否则 `cmd` 读到的是永不结束的 stdin。
-pub fn live_exec_io(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_exec_io(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -1429,8 +1429,8 @@ pub fn ssh_stdin_pattern(n : Int) -> FixedArray[Byte] {
 /// 循环体是「先把窗口允许的 stdin 发完 → 缓冲空了才发 EOF → 再收一个包」。
 /// 顺序不能换:先发 EOF 再补数据等于告诉对端输入流到此为止,后面那些数据它
 /// 不会读,而远端命令**不会报错**,只是安静地拿到一份截断的输入——比断链更难查。
-fn exec_drive(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] exec_drive(
+  conn : T,
   st0 : SessionState,
   command : String,
   stdin_data : FixedArray[Byte],
@@ -1557,8 +1557,8 @@ fn exec_drive(
 }
 
 ///| 发一个 `ChanAction`,并把更新后的计数器带回来
-fn send_action(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] send_action(
+  conn : T,
   st : SessionState,
   a : @channel.ChanAction,
 ) -> SessionState? {
@@ -1636,8 +1636,8 @@ pub(all) struct ShellResult {
 ///
 /// 第 6 步要循环而不是只收一个包:pty 的横幅往往和 CHANNEL_SUCCESS 同批甚至
 /// 更早到达,只收一个包会把横幅当成「shell 已被接受」然后丢掉。
-pub fn live_shell(
-  conn : @tcp.TcpConn,
+pub fn[T : @transport.Transport] live_shell(
+  conn : T,
   x : @bigint.BigNat,
   user : String,
   d : @bigint.BigNat,
@@ -1695,8 +1695,8 @@ pub fn live_shell(
 /// CHANNEL_FAILURE,而开通道这一步来的是 CHANNEL_OPEN_CONFIRMATION ——
 /// 拿错条件的表现不是报错,是**死等**:服务端已经把确认发完了,之后再没有
 /// 任何数据,而读包是阻塞的。
-fn shell_wait_open(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] shell_wait_open(
+  conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   cap : Int,
@@ -1736,8 +1736,8 @@ fn shell_wait_open(
 ///
 /// 交互式流程里这两个包**不是**致命的:pty-req 被拒只意味着没有 tty,shell
 /// 仍然开得起来(`chan_step` 在 `interactive` 模式下只记数不报错)。
-fn shell_confirm(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] shell_confirm(
+  conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   cap : Int,
@@ -1777,8 +1777,8 @@ fn shell_confirm(
 }
 
 ///| 收包直到字节流里出现 `needle`,或者包数超限
-fn shell_read_until(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] shell_read_until(
+  conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   seen : FixedArray[Byte],
@@ -1853,8 +1853,8 @@ fn tail_of(
   out
 }
 
-fn shell_drive(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] shell_drive(
+  conn : T,
   st0 : SessionState,
   command : String,
   term : String,
@@ -2027,8 +2027,8 @@ fn shell_drive(
 ///
 /// 和 exec 路径的差别是有意为之:exec 的 stdin 要流式喂(可以边收包边续发),
 /// shell 的一行命令必须整段到达才能被 conhost 提交,半截的行根本不回车。
-fn send_stdin_all(
-  conn : @tcp.TcpConn,
+fn[T : @transport.Transport] send_stdin_all(
+  conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   data : FixedArray[Byte],
