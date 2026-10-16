@@ -14,7 +14,7 @@ import {
 }
 
 options(
-  targets: { "main.mbt": [ "native" ] },
+  supported_targets: "+native",
 )
 
 pkgtype(kind: "executable")

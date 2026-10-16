@@ -17,3 +17,7 @@ import {
 }
 
 pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+native",
+)

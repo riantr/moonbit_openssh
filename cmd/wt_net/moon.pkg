@@ -10,5 +10,5 @@ import {
 pkgtype(kind: "executable")
 
 options(
-  targets: { "main.mbt": [ "js" ] },
+  supported_targets: "+js",
 )

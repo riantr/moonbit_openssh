@@ -116,8 +116,35 @@ if (innerCode !== 0) {
 }
 
 // The owner is gone. Anything still listening now is an orphan.
-await new Promise((r) => setTimeout(r, 1500));
-const after = await waitForPort(PORT, 5000);
+//
+// The wait used to be a flat `setTimeout(1500)` -- a guess at how long the OS
+// needs to let a child go. Loop #68 measured that guess being wrong: a full CI
+// run put verify_loop65 red with "self-cleanup by this probe: FAILED, port still
+// bound", while the same gate passed standalone minutes later with no sshd
+// process left behind. A fixed sleep is a race that only reports itself when
+// the machine happens to be loaded, and a check that fails under load and
+// passes when idle is indistinguishable from a flaky check.
+//
+// So the question becomes the one that actually matters: has the port been
+// free CONTINUOUSLY for a settling window, rather than "was it free at one
+// instant after N milliseconds"? `waitForPort` returns on the first successful
+// bind; `settle` below requires every attempt to succeed.
+const SETTLE_MS = 3000;
+const POLL_MS = 150;
+const deadline = Date.now() + SETTLE_MS;
+let stable = 0;
+let leaked = false;
+while (Date.now() < deadline) {
+  if (await waitForPort(PORT, 500)) {
+    stable = 0;
+    leaked = true;
+  } else {
+    stable += POLL_MS;
+    if (stable >= SETTLE_MS) break;
+  }
+  await new Promise((r) => setTimeout(r, POLL_MS));
+}
+const after = leaked;
 
 console.log('');
 if (after) {

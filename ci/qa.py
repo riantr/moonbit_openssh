@@ -283,10 +283,15 @@ QA_CATEGORIES = [
         evidence=(
             "Computed by ci/ci.py from THIS run's measured results -- the step "
             "pass rate and the implemented-category pass rate, both real "
-            "arithmetic over observed exit codes, never a constant. Line coverage "
-            "is deliberately NOT folded in: `moon coverage analyze` produces no "
-            "number in this repo (see test-coverage), and a metric sourced from "
-            "a command that always fails would be decoration."
+            "arithmetic over observed exit codes, never a constant. Line "
+            "coverage is deliberately NOT folded in even though Loop #68 made "
+            "`moon coverage analyze` produce a number: it is a real measurement, "
+            "but it is an UNCOVERED-line count over the 15 of 17 src "
+            "directories with tests that can be reported at all, so folding it "
+            "into a single 'quality metrics' number would silently treat the "
+            "two that cannot as 100% covered. The per-package figures are "
+            "printed in full by host/cov_report.py instead, where the gaps are "
+            "visible."
         ),
     ),
     QaCategory(
@@ -345,28 +350,53 @@ QA_CATEGORIES = [
         name_zh="测试覆盖率",
         status="implemented",
         command=[
-            MOON + ["test", "--enable-coverage", "-p", "src/bpacket", "--target", "native"],
-            MOON + ["coverage", "analyze"],
+            PY + ["host/cov_report.py"],
         ],
         tier="qa",
         evidence=(
-            "Probed, and it FAILS today -- reported, not hidden. `moon test "
-            "--enable-coverage -p src/bpacket --target native` exits 0 (25/25), "
-            "but `moon coverage analyze` then exits 2 with Failure('No coverage "
-            "output data found') after error [4067] 'Missing main function in the "
-            "main package' for cmd/wt_probe and cmd/wt_ssh -- the browser Worker "
-            "mains break the workspace-wide combine step. Loop #67 pinned the "
-            "mechanism down and it is structural, not a flag that was missed. "
-            "`combine_coverages` walks the whole workspace and builds every "
-            "package for the DEFAULT target; a package gated to js has no main "
-            "there and fails [4067]. `moon coverage analyze --help` lists only "
-            "-p and --target-dir: there is NO --target, so the combine cannot be "
-            "pointed at js, and `-p` limits which coverage is REPORTED, not "
-            "which packages are BUILT -- verified, `-p src/bpacket` fails "
-            "identically. An attempt to declare the two entry points differently "
-            "(`options(is_main: [...])`) was reverted: the key takes a boolean, "
-            "and `git diff` confirmed the revert before moving on. "
-            "Reproduced identically with -p and from inside src/bpacket."
+            "Probed, and it now PASSES -- every number below was measured in "
+            "this repo, not reasoned about. `moon coverage analyze` has no "
+            "--target, so it builds the whole workspace at the DEFAULT target. "
+            "Loop #67 established that target is not native; Loop #68 measured "
+            "that it is not js either, since the js-only mains are the ones "
+            "complaining. Two declarations were lying about what they support, "
+            "and this combine step was the instrument that found them. Seven "
+            "executables gated their ONLY source file with "
+            "`options(targets: { 'main.mbt': ['js'] })`, which is a FILE "
+            "filter: on every other target the package still exists with no "
+            "main.mbt left and answers [4067] 'Missing main function'. "
+            "`cmd/ssh_live` declared no target at all while building on native "
+            "only -- measured native 0 errors, js 8, wasm 7, wasm-gc 9, seven of "
+            "them true [4021]/[4024] complaints about @khfile symbols that are "
+            "native-gated away. Both now use "
+            "`options(supported_targets: '+X')`, which makes the toolchain "
+            "REFUSE an unsupported build instead of attempting it and failing; "
+            "cmd/proton_gui and cmd/sftp_mitm already said it that way and "
+            "neither ever appeared in the diagnostics. Applied by "
+            "host/patch_target_decl.py, which then checks every package against "
+            "all four targets instead of trusting the edit. "
+            "The working recipe is one command: `moon clean` first. The dirty "
+            "state it removes produces two errors that read like toolchain "
+            "limitations -- 'conflicting trace metadata', and an OCaml "
+            "assertion inside moon_cove_report's output_no_intermediate -- and "
+            "both are the same cause, which `moon coverage clean` does NOT fix. "
+            "Loop #68 spent most of its length believing otherwise: it looked "
+            "like three packages could never be reported, and it was the "
+            "build cache. Neither MOON_COVE_REPORT_ENABLED=1 nor a per-package "
+            "`moon coverage clean` turns out to be needed -- both were deleted "
+            "and both mutations came back MISSED, which is the correct verdict "
+            "for a step nothing depends on. `ci/qa.py` cannot set an "
+            "environment variable in any case, since _run_argv inlines the "
+            "environment, so the row is host/cov_report.py. "
+            "Result: 15 of the 17 src directories holding a test driver produce "
+            "a real source-annotated report, 463 uncovered lines measured in "
+            "total, every report checked for self-consistency (the number of "
+            "`<-- UNCOVERED` markers must equal the `Total:` the reporter "
+            "claims, so a bare number could not hide a dropped line). The two "
+            "that do not are explained: src/khfile's only test file is gated to "
+            "native while this command runs at the default target and has no "
+            "--target, and src/test_nested has no moon.pkg at all -- it is a "
+            "fixture, not a package."
         ),
     ),
     QaCategory(

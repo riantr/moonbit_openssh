@@ -139,6 +139,14 @@ check("the benchmark category is scoped to a native-buildable package", () => {
 
 // ------------------------------------------------------------- test coverage
 
+// The evidence block of one QaCategory, as the string Python builds it.
+//
+// Adjacent string literals concatenate implicitly, so `"a " "b"` is the string
+// `a b`. Reading the source text and searching it directly looks for `a b` in
+// `a " " b`, misses, and reports a claim that is present and correct as missing.
+const joinLiterals = (src) =>
+  src.replace(/"\s*(?:\\.|[^"\\])*"\s*"/g, (m) => m.replace(/"\s+"/g, ""));
+
 check("test-coverage records why the workspace combine cannot run", () => {
   const qa = read("ci/qa.py");
   const start = qa.indexOf('id="test-coverage"');
@@ -148,15 +156,42 @@ check("test-coverage records why the workspace combine cannot run", () => {
   // `),`, which lands wherever the prose happens to put a closing paren.
   const rest = qa.slice(start);
   const next = rest.indexOf("QaCategory(");
-  const ev = next === -1 ? rest : rest.slice(0, next);
+  const sourceBlock = next === -1 ? rest : rest.slice(0, next);
+  // Read the evidence as the value it is, not as the source text that spells
+  // it. ci/qa.py builds each evidence block by concatenating adjacent string
+  // literals, so the SOURCE reads
+  //
+  //     "...has no "
+  //     "--target, and src/test_nested..."
+  //
+  // and any literal search for `no --target` misses, because in the source text
+  // those two halves are separated by `" "`. Loop #68 rewrote this evidence and
+  // the assertion broke on the wrapping rather than on the meaning.
+  //
+  // The fix is to join the literals the way Python does before looking for
+  // anything. Stripping comments and quotes is not enough -- a search has to
+  // see the same string the interpreter would build.
+  const ev = joinLiterals(sourceBlock);
   assert(ev.length > 400, `evidence block is only ${ev.length} chars -- a stub`);
   // The mechanism, named, so the note cannot rot into a vague "it fails".
   assert(/4067/.test(ev), "the evidence no longer names error [4067]");
-  assert(/combine_coverages/.test(ev),
-         "the evidence no longer names combine_coverages");
-  assert(/no --target|no --target`|NO --target/.test(ev),
+  assert(/no --target/.test(ev),
          "the evidence does not say that analyze has no --target flag, which " +
          "is the reason this is structural rather than a missed flag");
+  // Loop #68 removed the third of these three assertions, and the reason is
+  // worth keeping: this check used to require the literal string
+  // `combine_coverages`, the OCaml function inside the reporter whose source
+  // line had been read to find the failure. Loop #68 fixed the blocker, the
+  // evidence stopped naming that function, and the check went red on a row
+  // that is now GREEN -- a stale assertion, not a regression.
+  //
+  // What survives is the part that is still load-bearing: the row must say the
+  // mechanism is a workspace-wide build at the default target, because that is
+  // the part of the story that has not changed. Asserting the name of a
+  // function inside someone else's implementation would have meant the fix had
+  // to keep quoting it forever.
+  assert(/whole workspace|workspace-wide|every package in the module|walks every package/i.test(ev),
+         "the evidence no longer says the combine walks the whole workspace");
   return "records the structural blocker by name";
 });
 

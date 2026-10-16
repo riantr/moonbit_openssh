@@ -1281,6 +1281,293 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #68: the last red row was two untrue declarations, and a third failure that was this repository's own build cache
+
+`test-coverage` had been red for about a dozen loops. Loop #67 pinned the
+mechanism -- `moon coverage analyze` has no `--target`, so it builds the whole
+workspace for the DEFAULT target, and a js-gated `main.mbt` is not there -- and
+recorded it as structural. The structural part was true and is still true. What
+was on top of it was not.
+
+There were three things stacked here, and the third was the expensive one,
+because for most of this loop it looked like a property of the toolchain:
+
+1. **Seven `cmd/` executables under-declared their target**, and
+   `cmd/ssh_live` declared nothing at all while building on native only. Both
+   are untrue statements about the repository, and both are fixed below.
+2. **`moon coverage analyze` has no `--target`.** Real, structural, and
+   unchanged. It is why a workspace-wide walk at the default target is the thing
+   that surfaces the other two.
+3. **A stale instrumented `_build`.** This one produced
+   `conflicting trace metadata` for three packages and an OCaml assertion
+   failure, neither of which had anything to do with the code. It is also what
+   made steps 4 and 5 of the recipe below look mandatory when they are not, and
+   it survived three refuted hypotheses and a lot of confident writing before
+   the mutations caught it.
+
+#### Two declarations were untrue, and `moon coverage analyze` was the instrument that caught them
+
+The combine step walks every package in the module. Seven executables gated
+their only source file with
+
+```moonbit
+options(
+  targets: { "main.mbt": [ "js" ] },
+)
+```
+
+which is a **file** filter, not a package declaration: on every other target the
+package still exists, it just has no `main.mbt` left, and the compiler answers
+`[4067] Missing main function in the main package`.
+
+And `cmd/ssh_live` declared **nothing at all**, while building on native only.
+That one was never a gate artefact -- seven real errors, every one of them true:
+
+| target | `moon check -p cmd/ssh_live` |
+|---|---|
+| native | 0 errors |
+| js | 8 |
+| wasm | 7 |
+| wasm-gc | 9 |
+
+`cmd/ssh_live` consumes `src/khfile` and `src/tcp`, both native-only, so
+`@khfile.append_terminated` and `@khfile.AppendResult` do not exist anywhere else.
+Every gate had missed it because the gates only ever asked whether a package
+builds on the target it was built for.
+
+The fix is the form `cmd/proton_gui` and `cmd/sftp_mitm` already used:
+
+```moonbit
+options(
+  supported_targets: "+js",
+)
+```
+
+Measured, not assumed: a package that declares `supported_targets` and is asked
+for a target it does not support **refuses**, exiting non-zero with **zero
+diagnostics** -- a declared impossibility rather than a surprise. Neither
+`proton_gui` nor `sftp_mitm` ever appeared in the combine run's output. The
+controlled proof was converting `cmd/wt_ssh` alone: its `[4067]` disappeared
+while the other six stayed.
+
+**The per-file `targets:` form is still correct under `src/`, and this loop did
+not touch it.** `src/khstore/moon.pkg` and `src/khfile/moon.pkg` say why: a
+package-level declaration would block downstream consumers, so a wasm-wanting
+consumer fails loudly at its own compile instead of silently inside the library.
+`cmd/` packages are leaves -- nothing imports them -- so the reason does not
+apply and only the honesty does. `verify_loop68.mjs` asserts both halves, so the
+library rule cannot be quietly relaxed later.
+
+`host/patch_target_decl.py` applies the conversion and then **checks every
+package against all four targets** instead of trusting its own edit. Ten
+packages declare a target; all ten build on exactly that one.
+
+#### The recipe is one command, and both obvious additions turn out to be unnecessary
+
+**`moon clean` first. That is the whole recipe.** It is worth saying why,
+because each of the two steps people reach for next looks load-bearing and is
+not, and each of them cost this loop real time before the mutations caught on.
+
+1. **`moon clean`.** The dirty state it removes produces *two* errors that read
+   like toolchain limitations: `conflicting trace metadata` for three packages'
+   worth of "this can never be reported", and an OCaml assertion failure. Both
+   are the same cause. Wiping `_build` fixes both -- see the next section.
+   `moon coverage clean` does **not** substitute for it: that removes the dump
+   files (28 of which had accumulated here) and leaves the conflict in place.
+2. **`MOON_COVE_REPORT_ENABLED=1`.** **Not needed.** `moon coverage --help`
+   advertises it, and the default OCaml `moon_cove_report` does die on an
+   assertion inside `output_no_intermediate` (`moon_cove_report.ml:220291`) --
+   against a dirty `_build`. Against a clean one it exits 0 and prints the same
+   report: `src/kexflow`, 73 `<-- UNCOVERED` markers against `Total: 73`, in 15
+   seconds, which is the same report the wasm reporter produced for that
+   package. (No speed claim is made here: the two were timed in different build
+   states, and comparing them would be exactly the kind of measurement this
+   section is about not inventing.) The env var was a workaround for a symptom
+   of the thing above.
+3. **~~`moon coverage clean` between packages.~~ Not needed.** `moon clean` has
+   already done everything it does. Deleting it changes nothing measurable.
+
+`moon clean` is the reason `host/cov_report.py` exists at all: `ci/qa.py` cannot
+set an environment variable (`_run_argv` inlines the environment) and a bare
+command line cannot run one thing and then another, so the qa row is a script.
+`host/cov_probe.py` and section C of the gate do the same clean for the same
+reason.
+
+#### What it measures -- and the one measurement in this loop that was wrong
+
+15 of the 17 `src` directories holding a test driver produce a real,
+source-annotated report: **463 uncovered lines** measured in total, every report
+cross-checked so that the number of `<-- UNCOVERED` markers on the annotated
+source equals the `Total:` the reporter claims. A number on its own would not
+notice a dropped or duplicated line.
+
+The two that do not are both explained, and neither is a toolchain limit:
+
+- `src/khfile` -- `no coverage source data`. Its only test file is gated to
+  native (`targets: { "store.mbt": ["native"], "store_test.mbt": ["native"] }`,
+  for the library reason above), and `moon coverage analyze` runs at the
+  DEFAULT target with no `--target` flag to change that. So its tests are never
+  compiled by the command that wants to report on them. This is the honest
+  residue of the missing flag, and it is the only package in the tree it costs.
+- `src/test_nested` -- the same message, for a boring reason: it has no
+  `moon.pkg` at all. It is a fixture directory holding one `nested_test.mbt`,
+  not a package.
+
+**A third entry in the earlier, longer list was this loop's own build cache.**
+For most of this loop the answer was 13 of 17: `src/bpacket` and `src/hmac`
+failed with
+
+```
+error: conflicting trace metadata for file id '.../src/bpacket$chacha_api'
+```
+
+which reads exactly like a toolchain limitation, and two plausible mechanisms
+were tested and refuted on the way -- "a package with two test drivers" (nine of
+the reportable packages have both a blackbox and a whitebox driver) and "a file
+id present in more than one dump" (`src/aead` and `src/sha256` have every key
+in more than one dump and report cleanly). The thing that finally broke it was
+not an experiment at all. In the harness's **first draft**, three mutations --
+one deleting a `moon coverage clean`, one dropping an environment variable, one
+changing a package list -- reported **the same single FAIL line**:
+`newly reportable: src/bpacket,src/hmac`. Three unrelated mutations cannot
+produce one identical unrelated failure. The gate was not catching them; it was
+failing for an environmental reason on every run and the mutations were riding
+on it. (The first-draft M3/M4/M5 are not the M3/M4/M5 in the shipped file --
+that is the point, and the reason is in the harness docstring.)
+
+Confirmed three ways, in this order:
+
+1. A sandbox, which has no `_build` at all, reports both packages fine.
+2. `moon clean` in the working tree, then the same command: `src/bpacket`
+   exits 0 with `Total: 66 uncovered line(s) in 11 file(s)`, in 31 seconds.
+3. Reproducing the suspected cause *fails* to reproduce it: a standalone
+   `moon test --enable-coverage -p src/bpacket --target native` followed by
+   `moon coverage clean` and a re-analyse still reports cleanly, so the stale
+   thing is not the dumps and not the extra test run.
+
+`moon coverage clean` removes the dump files and leaves the conflict exactly
+where it was. Only `moon clean` clears it. So `host/cov_report.py`,
+`host/cov_probe.py` and section C of the gate all begin with `moon clean`, and
+that line is what makes the committed `host/cov_reportable.json` a statement
+about the repository instead of a statement about whoever ran it last.
+
+`host/cov_conflict.py` exists so the next person does not have to re-derive this
+from scratch: it reports, for every file id carried by more than one dump, which
+dumps hold it and how their counters differ.
+
+#### The gate derives the answer instead of listing it
+
+`host/verify_loop68.mjs` keeps **no** list of which packages should be
+reportable. It re-runs the toolchain over every `src` package with a test driver
+and compares the result against the committed `host/cov_reportable.json` **in
+both directions**. A package that silently becomes unreportable fails, and so
+does one that silently becomes reportable -- the second is Loop #66's accept
+table lesson: a gate that only notices new problems is a gate whose evidence has
+stopped being checked.
+
+Section A2 is the check that closes the hole the rest of section A leaves. The
+declared-package matrix only inspects packages that already declare something, so
+deleting `cmd/ssh_live`'s declaration would just drop it off the list. A2 asks
+the workspace-wide question instead -- `moon check` at the default target must
+report **zero `Error: [NNNN]` lines** -- and that is the very observation that
+found the bug. It is asserted on the error count and *not* on the exit code: a
+package that correctly refuses an unsupported target exits non-zero with no
+diagnostics at all, so an exit-code assertion would be demanding the workspace
+build on the target it was told it cannot support. This is Loop #67's
+`evidence_targets` lesson wearing a different hat -- silence is the healthy state
+here, and a package that failed to compile must never be read as a clean one.
+
+`host/loop68_mutations.py` runs 7 mutations, each one a **reversal of a fix this
+loop shipped** rather than a synthetic defect: the per-file gate restored, the
+`ssh_live` declaration deleted, a declaration pointed at the wrong target, the
+library-side gate that this loop deliberately left alone removed, the qa command
+aimed at the one package whose tests can never be covered, and the committed
+evidence edited in each of the two directions. The question a mutation answers
+is never "can this gate see an arbitrary bug" but "would it have seen the thing
+that was actually wrong here".
+
+**Result: `mutations=7 CAUGHT=7 MISSED=0 BUILD-BROKEN=0`.**
+
+**The mutations earned their keep twice, and both times by failing.**
+
+The first time, in the harness's first draft, M3, M4 and M5 -- a clean call, an
+environment variable and a package list, nothing to do with one another --
+reported **the same single FAIL line**:
+`newly reportable: src/bpacket,src/hmac`. Three unrelated mutations cannot
+produce one identical unrelated failure, so the gate was not catching them; it
+was failing for an environmental reason on every run and the mutations were
+riding on it. Without looking at *which* check fired, M3 through M7 would have
+been recorded as five comfortable CAUGHTs and a stale `_build` would have
+shipped as a permanent claim about the toolchain.
+
+The second time, two mutations came back **MISSED** and both were right to.
+Deleting the per-package `moon coverage clean`, and separately dropping
+`MOON_COVE_REPORT_ENABLED=1`, each changed nothing -- because `moon clean` has
+already done the work of both. Those two were written, run, judged and then
+**deleted from the set**, and the reason is recorded in the harness rather than
+quietly dropped. A mutation that provably cannot fail is worse than no
+mutation: it sits in the count looking like coverage of the recipe and it trains
+the reader to trust a number that means nothing.
+
+#### Two gates of older loops needed updating, and neither update was optional
+
+Making the row green was the easy half. Two older gates then went red, and both
+had been written to assert something that is no longer true. The interesting
+question is not that they went red -- it is which direction they were wrong in.
+
+**`verify_loop67.mjs` asserted that the evidence must name
+`combine_coverages`** -- the OCaml function inside the reporter whose source line
+had been read in Loop #67 to find the failure. Loop #68 fixed the blocker, the
+evidence stopped quoting that function, and the gate went red on a row that is
+now GREEN. That is a stale assertion, not a regression, and the right fix was to
+assert the part of the story that has not changed (the row must still say the
+combine walks the whole workspace at the default target) rather than to quote the
+old prose back. Asserting the name of a function inside someone else's
+implementation would have meant the fix had to keep naming it forever.
+
+Then the same check failed a second time, on a claim that was present and
+correct. `ci/qa.py` builds each evidence block by concatenating adjacent string
+literals, so the **source** reads
+
+```python
+"...has no "
+"--target, and src/test_nested..."
+```
+
+and a literal search for `no --target` in the source text misses, because the two
+halves are separated by `" "`. The check was reading the spelling of the
+evidence rather than the value, and it had only been passing by luck of where the
+prose happened to wrap. It now joins the literals the way Python does before
+looking for anything. Same rule as everywhere else in this file: assert the
+property, never the formatting of the source that happens to spell it.
+
+**`verify_loop65.mjs` failed for real, and not because of anything this loop
+changed.** Its sshd-leak probe waited a flat `setTimeout(1500)` after the owner
+process exited, then asked once whether the port was still bound. Under a full
+CI run that guess was wrong:
+
+```
+FAIL  the probe cleans up after itself  [self-cleanup by this probe: FAILED, port still bound]
+```
+
+Standalone, minutes later, the same gate passed 25/25 with no sshd process left
+behind. A check that fails under load and passes when idle is a flaky check, and
+`moon clean` -- which Loop #68 puts at the head of the coverage recipe, making
+every run start cold -- is exactly the kind of load that exposes one. The probe
+now asks the question that matters: has the port been free *continuously* for a
+settling window, rather than was it free at one instant after a guessed delay.
+Three consecutive standalone runs: 25/25.
+
+Two lessons, both about what a green gate is made of. A gate can be red for a
+reason that has nothing to do with the code it inspects, and the way to tell is
+to run it alone -- a failure that disappears when you stop running everything
+else is a timing bug until proven otherwise. And a gate whose failure text names
+no file is a gate that will cost an hour next time; `host/cov_report.py` now also
+writes its reason to **stderr**, because the CI engine keeps only the last 12
+lines of output and a coverage table is longer than that, which is exactly how an
+earlier run of this loop showed a table of successes and the bare words
+"exit 1" with no indication of what had gone wrong.
+
 ### Loop #67: a twelve-loop-old warning was wrong, and the tool that measured it was wrong in a worse way
 
 Loop #66 closed the static-analysis row. This one closes format-check and

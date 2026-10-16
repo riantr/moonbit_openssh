@@ -14,7 +14,7 @@ import {
 ///| another target fails at its own compile instead of silently here.
 
 options(
-  targets: { "main.mbt": [ "js" ] },
+  supported_targets: "+js",
 )
 
 pkgtype(kind: "executable")
