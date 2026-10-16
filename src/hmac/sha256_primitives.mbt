@@ -12,43 +12,43 @@
 
 ///|
 /// 注意:MoonBit 的 `>>` 在 UInt 域上自动按 32-bit 截断(Loop #2 教训)
-pub fn rotr(n : Int, x : UInt) -> UInt {
+pub fn rotr(n : Int32, x : UInt32) -> UInt32 {
   (x >> n) | (x << (32 - n))
 }
 
 ///|
 /// Ch(x, y, z) = (x & y) ^ (~x & z)
-pub fn ch(x : UInt, y : UInt, z : UInt) -> UInt {
+pub fn ch(x : UInt32, y : UInt32, z : UInt32) -> UInt32 {
   (x & y) ^ ((x ^ 0xFFFFFFFFU) & z)
 }
 
 ///|
 /// Maj(x, y, z) = (x & y) ^ (x & z) ^ (y & z)
-pub fn maj(x : UInt, y : UInt, z : UInt) -> UInt {
+pub fn maj(x : UInt32, y : UInt32, z : UInt32) -> UInt32 {
   (x & y) ^ (x & z) ^ (y & z)
 }
 
 ///|
 /// Sigma0(x) = ROTR(2, x) ^ ROTR(13, x) ^ ROTR(22, x)
-pub fn sigma0_big(x : UInt) -> UInt {
+pub fn sigma0_big(x : UInt32) -> UInt32 {
   rotr(2, x) ^ rotr(13, x) ^ rotr(22, x)
 }
 
 ///|
 /// Sigma1(x) = ROTR(6, x) ^ ROTR(11, x) ^ ROTR(25, x)
-pub fn sigma1_big(x : UInt) -> UInt {
+pub fn sigma1_big(x : UInt32) -> UInt32 {
   rotr(6, x) ^ rotr(11, x) ^ rotr(25, x)
 }
 
 ///|
 /// sigma0(x) = ROTR(7, x) ^ ROTR(18, x) ^ SHR(3, x)
-pub fn sigma0_small(x : UInt) -> UInt {
+pub fn sigma0_small(x : UInt32) -> UInt32 {
   rotr(7, x) ^ rotr(18, x) ^ (x >> 3)
 }
 
 ///|
 /// sigma1(x) = ROTR(17, x) ^ ROTR(19, x) ^ SHR(10, x)
-pub fn sigma1_small(x : UInt) -> UInt {
+pub fn sigma1_small(x : UInt32) -> UInt32 {
   rotr(17, x) ^ rotr(19, x) ^ (x >> 10)
 }
 
@@ -56,7 +56,7 @@ pub fn sigma1_small(x : UInt) -> UInt {
 
 ///|
 /// SHA-256 内部用 BE 解析 input block
-pub fn be8_to_32(bytes : FixedArray[Byte], offset : Int) -> UInt {
+pub fn be8_to_32(bytes : FixedArray[Byte], offset : Int32) -> UInt32 {
   let b0 = bytes[offset].to_uint()
   let b1 = bytes[offset + 1].to_uint()
   let b2 = bytes[offset + 2].to_uint()
@@ -66,7 +66,11 @@ pub fn be8_to_32(bytes : FixedArray[Byte], offset : Int) -> UInt {
 
 ///|
 /// 把 UInt 按 big-endian 写入 FixedArray[Byte] 的指定偏移
-pub fn be32_to_8(bytes : FixedArray[Byte], offset : Int, value : UInt) -> Unit {
+pub fn be32_to_8(
+  bytes : FixedArray[Byte],
+  offset : Int32,
+  value : UInt32,
+) -> Unit {
   bytes[offset] = ((value >> 24) & 0xFFU).to_byte()
   bytes[offset + 1] = ((value >> 16) & 0xFFU).to_byte()
   bytes[offset + 2] = ((value >> 8) & 0xFFU).to_byte()

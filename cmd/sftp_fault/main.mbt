@@ -26,7 +26,7 @@
 // hex
 // ---------------------------------------------------------------------------
 
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -70,7 +70,7 @@ fn to_hex(b : FixedArray[Byte]) -> String {
 // ---------------------------------------------------------------------------
 
 ///|
-fn u32b(n : Int) -> FixedArray[Byte] {
+fn u32b(n : Int32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(4, b'\x00')
   out[0] = ((n >> 24) & 0xFF).to_byte()
   out[1] = ((n >> 16) & 0xFF).to_byte()
@@ -98,7 +98,7 @@ fn cat(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
 
 ///|
 /// Split `data` into `size`-byte pieces. 0 or less means "leave it alone".
-fn chop(data : FixedArray[Byte], size : Int) -> Array[FixedArray[Byte]] {
+fn chop(data : FixedArray[Byte], size : Int32) -> Array[FixedArray[Byte]] {
   if size <= 0 {
     return [data]
   }
@@ -113,7 +113,7 @@ fn chop(data : FixedArray[Byte], size : Int) -> Array[FixedArray[Byte]] {
 }
 
 ///|
-fn sub(data : FixedArray[Byte], at : Int, n : Int) -> FixedArray[Byte] {
+fn sub(data : FixedArray[Byte], at : Int32, n : Int32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     out[i] = data[at + i]
@@ -126,7 +126,7 @@ fn sub(data : FixedArray[Byte], at : Int, n : Int) -> FixedArray[Byte] {
 // ---------------------------------------------------------------------------
 
 ///|
-const LOCAL_CHANNEL : Int = 0
+const LOCAL_CHANNEL : Int32 = 0
 
 ///| The window we advertise to the peer, and the window we give the peer.
 
@@ -136,7 +136,7 @@ const LOCAL_CHANNEL : Int = 0
 
 ///|
 /// test the fake peer rather than the client.
-const PEER_WINDOW : Int = 2097152
+const PEER_WINDOW : Int32 = 2097152
 
 ///|
 fn ops_of(c : FaultCase) -> Array[@sftp.SftpOp] {
@@ -166,7 +166,7 @@ pub(all) struct Run {
 }
 
 ///|
-fn run_case(c : FaultCase, chop_size : Int) -> Run {
+fn run_case(c : FaultCase, chop_size : Int32) -> Run {
   let sess = @sftp.SftpSession::new(ops_of(c))
   let chan0 = @channel.ChanState::new(LOCAL_CHANNEL)
   // The peer's reassembly buffer for what the client sends us. The client's
@@ -337,7 +337,7 @@ fn render_results(sess : @sftp.SftpSession) -> Array[String] {
 // ---------------------------------------------------------------------------
 
 ///|
-fn opt_int(v : Int?) -> String {
+fn opt_int(v : Int32?) -> String {
   match v {
     None => "-"
     Some(x) => x.to_string()
@@ -456,7 +456,7 @@ fn eq_arrays(
 }
 
 ///|
-fn judge(c : FaultCase, r : Run, chop_size : Int) -> Array[String] {
+fn judge(c : FaultCase, r : Run, chop_size : Int32) -> Array[String] {
   let tag = c.name + "@chop" + chop_size.to_string()
   let fails : Array[String] = []
   eq_arrays(r.requests, c.requests, tag + ": requests", fails)

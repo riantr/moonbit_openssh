@@ -11,13 +11,13 @@
 
 // ===== add: out = a + b (无 mod,允许 limb 31 临时 ≥ 256) =====
 pub fn fe_add(
-  out : FixedArray[UInt],
-  a : FixedArray[UInt],
-  b : FixedArray[UInt],
+  out : FixedArray[UInt32],
+  a : FixedArray[UInt32],
+  b : FixedArray[UInt32],
 ) -> Unit {
-  let mut u : UInt = 0U
+  let mut u : UInt32 = 0U
   for j = 0; j < 31; j = j + 1 {
-    let sum : UInt = a[j] + b[j] + u
+    let sum : UInt32 = a[j] + b[j] + u
     out[j] = sum & 0xFFU
     u = sum >> 8
   }
@@ -29,13 +29,13 @@ pub fn fe_add(
 
 ///|
 pub fn fe_sub(
-  out : FixedArray[UInt],
-  a : FixedArray[UInt],
-  b : FixedArray[UInt],
+  out : FixedArray[UInt32],
+  a : FixedArray[UInt32],
+  b : FixedArray[UInt32],
 ) -> Unit {
-  let mut u : UInt = 218U // 2*p 的低 8-bit 贡献 (= 2*19 mod 256)
+  let mut u : UInt32 = 218U // 2*p 的低 8-bit 贡献 (= 2*19 mod 256)
   for j = 0; j < 31; j = j + 1 {
-    let diff : UInt = a[j] + 65280U - b[j] + u
+    let diff : UInt32 = a[j] + 65280U - b[j] + u
     out[j] = diff & 0xFFU
     u = diff >> 8
   }
@@ -46,21 +46,21 @@ pub fn fe_sub(
 // ===== squeeze: 把所有 limb 归约到 < 256(limb 31 < 2^15) =====
 
 ///|
-pub fn fe_squeeze(a : FixedArray[UInt]) -> Unit {
-  let mut u : UInt = 0U
+pub fn fe_squeeze(a : FixedArray[UInt32]) -> Unit {
+  let mut u : UInt32 = 0U
   for j = 0; j < 31; j = j + 1 {
-    let sum : UInt = a[j] + u
+    let sum : UInt32 = a[j] + u
     a[j] = sum & 0xFFU
     u = sum >> 8
   }
   // limb 31: 清掉 bit 7(= 限制 < 128 = 2^7)
-  let sum : UInt = a[31] + u
+  let sum : UInt32 = a[31] + u
   a[31] = sum & 0x7FU
   u = sum >> 7
   // 进位 × 19(因为 2^255 ≡ 19 mod p)
   u = u * 19U
   for j = 0; j < 31; j = j + 1 {
-    let sum2 : UInt = a[j] + u
+    let sum2 : UInt32 = a[j] + u
     a[j] = sum2 & 0xFFU
     u = sum2 >> 8
   }
@@ -73,13 +73,13 @@ pub fn fe_squeeze(a : FixedArray[UInt]) -> Unit {
 
 ///|
 pub fn fe_mult(
-  out : FixedArray[UInt],
-  a : FixedArray[UInt],
-  b : FixedArray[UInt],
+  out : FixedArray[UInt32],
+  a : FixedArray[UInt32],
+  b : FixedArray[UInt32],
 ) -> Unit {
   // 第 1 步:计算 16-bit partial products 到 out[0..32]
   for i = 0; i < 32; i = i + 1 {
-    let mut u : UInt = 0U
+    let mut u : UInt32 = 0U
     // a[j] * b[i-j] for j in 0..=i  → 直接贡献到 out[i]
     for j = 0; j <= i; j = j + 1 {
       u = u + a[j] * b[i - j]
@@ -98,9 +98,9 @@ pub fn fe_mult(
 // 对应 OpenBSD 第 90-108 行
 
 ///|
-pub fn fe_square(out : FixedArray[UInt], a : FixedArray[UInt]) -> Unit {
+pub fn fe_square(out : FixedArray[UInt32], a : FixedArray[UInt32]) -> Unit {
   for i = 0; i < 32; i = i + 1 {
-    let mut u : UInt = 0U
+    let mut u : UInt32 = 0U
     // 对称化:对 j < i/2 取 a[j]*a[i-j]
     // 注:C 代码 `for (j = 0; j < i - j; ++j)` 等价于 j < i - j 即 j < i/2
     let mut j = 0
@@ -118,7 +118,7 @@ pub fn fe_square(out : FixedArray[UInt], a : FixedArray[UInt]) -> Unit {
     u = u * 2U
     // i 偶数时加对角项 a[i/2]^2 + 38 * a[i/2+16]^2
     if (i & 1) == 0 {
-      let half : Int = i / 2
+      let half : Int32 = i / 2
       u = u + a[half] * a[half]
       u = u + 38U * a[half + 16] * a[half + 16]
     }
@@ -131,21 +131,21 @@ pub fn fe_square(out : FixedArray[UInt], a : FixedArray[UInt]) -> Unit {
 // 121665 = (A - 2) / 4 where A = 486662 (RFC 7748 § 5)
 
 ///|
-pub fn fe_mult121665(out : FixedArray[UInt], a : FixedArray[UInt]) -> Unit {
-  let mut u : UInt = 0U
+pub fn fe_mult121665(out : FixedArray[UInt32], a : FixedArray[UInt32]) -> Unit {
+  let mut u : UInt32 = 0U
   for j = 0; j < 31; j = j + 1 {
-    let sum : UInt = 121665U * a[j] + u
+    let sum : UInt32 = 121665U * a[j] + u
     out[j] = sum & 0xFFU
     u = sum >> 8
   }
   // limb 31: mask bit 7
-  let sum : UInt = 121665U * a[31] + u
+  let sum : UInt32 = 121665U * a[31] + u
   out[31] = sum & 0x7FU
   u = sum >> 7
   // × 19 进位
   u = u * 19U
   for j = 0; j < 31; j = j + 1 {
-    let sum2 : UInt = out[j] + u
+    let sum2 : UInt32 = out[j] + u
     out[j] = sum2 & 0xFFU
     u = sum2 >> 8
   }

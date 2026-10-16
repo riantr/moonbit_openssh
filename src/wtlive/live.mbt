@@ -105,11 +105,11 @@ pub(all) struct WtLiveReport {
   mac_stoc : String
   hostkey_blob : FixedArray[Byte]
   hostkey_type : String
-  hostkey_bits : Int
+  hostkey_bits : Int32
   exchange_hash : FixedArray[Byte]
   shared_secret_head : String
-  sent_bytes : Int
-  recv_bytes : Int
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -119,8 +119,8 @@ pub(all) struct WtLiveReport {
 ///|
 /// direction rather than just that the code path was reached.
 priv struct WtWireCounters {
-  mut sent : Int
-  mut recv : Int
+  mut sent : Int32
+  mut recv : Int32
 }
 
 ///|
@@ -132,7 +132,7 @@ priv struct WtSessionState {
   send : @bpacket.SendCtx
   recv : @bpacket.RecvCtx
   counters : WtWireCounters
-  we_need : Int
+  we_need : Int32
   /// 首次 KEX 的 H。publickey 认证要拿它当签名输入(RFC 4252 §7),
   /// 必须是**完整**字节——`session_id_head` 只是给人看的十六进制摘要。
   session_id : FixedArray[Byte]
@@ -173,11 +173,11 @@ pub(all) struct WtSessionReport {
   handshake : WtLiveReport
   service_name : String
   accepted_service : String
-  we_need : Int
+  we_need : Int32
   key_tag : String
   session_id_head : String
-  sent_bytes : Int
-  recv_bytes : Int
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -269,7 +269,7 @@ async fn wt_recv_plain_packet(
 async fn wt_read_ident_line(
   conn : @wt.WtConn,
   counters : WtWireCounters,
-  max_bytes : Int,
+  max_bytes : Int32,
 ) -> String? {
   let mut acc : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let mut total = 0
@@ -491,12 +491,7 @@ async fn wt_handshake_into(
   }
   let key = presented.key
   let (ktype, kbits) = @hostkey.HostKey::describe(key)
-  match @hostkey.HostKey::verify_with_alg(
-    key,
-    h,
-    sig_blob,
-    presented.sig_alg,
-  ) {
+  match @hostkey.HostKey::verify_with_alg(key, h, sig_blob, presented.sig_alg) {
     @hostkey.Accepted => ()
     _ => return Failed(SignatureInvalid(h))
   }
@@ -515,7 +510,8 @@ async fn wt_handshake_into(
   // 规则因此散在两处,而 `allows` 无人调用。规则只有一份,才谈得上改默认。
   match kh.decide(ks) {
     None => ()
-    Some(@knownhosts.PinFailure::Mismatch(h)) => return Failed(HostkeyMismatch(h))
+    Some(@knownhosts.PinFailure::Mismatch(h)) =>
+      return Failed(HostkeyMismatch(h))
     Some(@knownhosts.PinFailure::Unknown(h)) => return Failed(HostkeyUnknown(h))
     Some(@knownhosts.PinFailure::CertAuthority(h, reason)) =>
       return Failed(HostkeyCertAuthority(h, reason))
@@ -605,21 +601,11 @@ async fn wt_handshake_into(
 /// 这里原本有一份自己的实现,和 `src/sshclient` 的逐字符相同。两份副本在
 /// 「前缀取多少字节」上分叉过一次的话,只有一条传输路径会拿到正确的密钥,
 /// 而且症状是对方解不开——极难定位。所以共享函数,不留副本。
-fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+fn head_bytes(b : FixedArray[Byte], n : Int32) -> FixedArray[Byte] {
   @sshclient.head_bytes(b, n)
 }
 
 ///|
-/// 字节前缀的十六进制 —— 直接用 `@sshclient.hex_bytes_head`。
-///
-/// 理由同上。注意它只用于非秘密字节(session_id);会话密钥走
-/// `@sshclient.key_tag_of`。
-fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
-  @sshclient.hex_bytes_head(b, n)
-}
-
-///|
-/// 握手到 NEWKEYS 为止(Loop #32 的既有行为,保持不变)
 pub async fn wt_live_handshake(
   conn : @wt.WtConn,
   x : @bigint.BigNat,
@@ -701,7 +687,11 @@ pub(all) enum WtAuthError {
 ///|
 pub(all) struct WtAuthReport {
   user : String
-  method : String
+  /// Loop #67: renamed from `method`, which the toolchain reserves for future
+  /// use. This is the WebTransport twin of `sshclient.AuthReport`; Loop #66
+  /// renamed only that one, so `cmd/wt_ssh` briefly read a field that did not
+  /// exist. The printed label stays `method:` -- RFC 4252's term.
+  auth_method : String
   key_type : String
   signed_blob_hex : String
   sig_blob_hex : String
@@ -851,7 +841,7 @@ pub async fn wt_live_auth(
   }
   Authenticated({
     user,
-    method: @userauth.AUTH_METHOD_PUBLICKEY,
+    auth_method: @userauth.AUTH_METHOD_PUBLICKEY,
     key_type: curve.ssh_key_type(),
     signed_blob_hex: @ecdsa.bytes_to_hex(to_sign),
     sig_blob_hex: @ecdsa.bytes_to_hex(sig_blob),
@@ -871,7 +861,8 @@ pub async fn wt_live_auth(
 
 ///|
 
-///| 浏览器侧的一次远端命令执行
+///|
+/// 浏览器侧的一次远端命令执行
 pub(all) enum WtExecOutcome {
   Done(WtExecResult)
   AuthFailed(WtAuthError)
@@ -884,7 +875,7 @@ pub(all) enum WtExecOutcome {
 pub(all) enum WtExecError {
   NoSessionState
   Malformed(String)
-  OpenFailed(Int, String)
+  OpenFailed(Int32, String)
   ExecRejected
   /// 子系统请求被 CHANNEL_FAILURE 拒了。与 `ExecRejected` 分开,因为它说的是
   /// 「没有这个子系统」——通常只是名字写错了(sftp → sftp-server),而
@@ -895,7 +886,7 @@ pub(all) enum WtExecError {
   BadPacket(String)
   Closed
   TooManyPackets
-  ///| 一次性投递时远端窗口为 0(见 `src/sshclient` 的同名错误)
+  /// 一次性投递时远端窗口为 0(见 `src/sshclient` 的同名错误)
   StdinStalled
 }
 
@@ -903,15 +894,15 @@ pub(all) enum WtExecError {
 pub(all) struct WtExecResult {
   stdout : FixedArray[Byte]
   stderr : FixedArray[Byte]
-  exit_status : Int
-  remote_id : Int
-  adjusts_sent : Int
-  stdin_sent : Int
-  stdin_packets : Int
+  exit_status : Int32
+  remote_id : Int32
+  adjusts_sent : Int32
+  stdin_sent : Int32
+  stdin_packets : Int32
   eof_sent : Bool
-  env_sent : Int
-  sent_bytes : Int
-  recv_bytes : Int
+  env_sent : Int32
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -966,7 +957,10 @@ async fn wt_auth_into(
     Failed(e) => return Err(WtAuthError::HandshakeFailed(e))
   }
   let st = match box.state {
-    None => return Err(WtAuthError::HandshakeFailed(WtLiveError::BadPacket("no_session_state")))
+    None =>
+      return Err(
+        WtAuthError::HandshakeFailed(WtLiveError::BadPacket("no_session_state")),
+      )
     Some(v) => v
   }
   let (accepted_opt, svc_err) = wt_request_userauth_service(conn, st)
@@ -1155,11 +1149,10 @@ async fn wt_exec_drive(
       chan = c1
       match a {
         None => ()
-        Some(x) => {
+        Some(x) =>
           if !wt_send_action(conn, st, x) {
             return (chan, Some(WtExecError::SendFailed))
           }
-        }
       }
       eof_pending = false
     }
@@ -1185,16 +1178,19 @@ async fn wt_exec_drive(
   (chan, None)
 }
 
+///|
 async fn wt_send_action(
   conn : @wt.WtConn,
   st : WtSessionState,
   a : @channel.ChanAction,
 ) -> Bool {
   match a {
-    Send(t, payload) => wt_send_plain_packet(conn, st.counters, st.send, t, payload)
+    Send(t, payload) =>
+      wt_send_plain_packet(conn, st.counters, st.send, t, payload)
   }
 }
 
+///|
 fn wt_chan_error(e : @channel.ChanError) -> WtExecError {
   match e {
     OpenFailed(r, d) => WtExecError::OpenFailed(r, d)
@@ -1231,7 +1227,8 @@ async fn wt_stdin_all(
   (c, None)
 }
 
-///| 浏览器侧的一次交互式 shell 会话
+///|
+/// 浏览器侧的一次交互式 shell 会话
 pub(all) enum WtShellOutcome {
   Done(WtShellResult)
   AuthFailed(WtAuthError)
@@ -1245,16 +1242,16 @@ pub(all) enum WtShellOutcome {
 pub(all) struct WtShellResult {
   stdout : FixedArray[Byte]
   stderr : FixedArray[Byte]
-  exit_status : Int
+  exit_status : Int32
   exit_signal : (String, Bool)?
   exit_signal_message : String
   pty_granted : Bool
-  cols : Int
-  rows : Int
+  cols : Int32
+  rows : Int32
   resize_sent : Bool
-  adjusts_sent : Int
-  sent_bytes : Int
-  recv_bytes : Int
+  adjusts_sent : Int32
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -1270,16 +1267,17 @@ pub async fn wt_live_shell(
   d : @bigint.BigNat,
   command : String,
   term : String,
-  cols : Int,
-  rows : Int,
-  resize_to : (Int, Int)?,
+  cols : Int32,
+  rows : Int32,
+  resize_to : (Int32, Int32)?,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> WtShellOutcome {
   let box = { state: None, }
   let res = wt_handshake_into(conn, x, box, kh)
   match res {
     Established(_) => ()
-    Failed(e) => return WtShellOutcome::AuthFailed(WtAuthError::HandshakeFailed(e))
+    Failed(e) =>
+      return WtShellOutcome::AuthFailed(WtAuthError::HandshakeFailed(e))
   }
   let st = match box.state {
     None => return WtShellOutcome::ChannelFailed(WtExecError::NoSessionState)
@@ -1339,13 +1337,7 @@ pub async fn wt_live_shell(
     return WtShellOutcome::AuthFailed(WtAuthError::NoAuthReply)
   }
   let (chan0, failure, pty_granted, resize_sent) = wt_shell_drive(
-    conn,
-    st,
-    command,
-    term,
-    cols,
-    rows,
-    resize_to,
+    conn, st, command, term, cols, rows, resize_to,
   )
   match failure {
     Some(e) => WtShellOutcome::ChannelFailed(e)
@@ -1379,7 +1371,7 @@ async fn wt_wait_open(
   conn : @wt.WtConn,
   st : WtSessionState,
   chan : @channel.ChanState,
-  cap : Int,
+  cap : Int32,
 ) -> (@channel.ChanState, WtExecError?) {
   let mut c = chan
   let mut n = 0
@@ -1409,12 +1401,13 @@ async fn wt_wait_open(
   (c, Some(WtExecError::TooManyPackets))
 }
 
-///| 等 CHANNEL_SUCCESS / CHANNEL_FAILURE,并把中间的 DATA 喂进状态机
+///|
+/// 等 CHANNEL_SUCCESS / CHANNEL_FAILURE,并把中间的 DATA 喂进状态机
 async fn wt_confirm(
   conn : @wt.WtConn,
   st : WtSessionState,
   chan : @channel.ChanState,
-  cap : Int,
+  cap : Int32,
 ) -> (@channel.ChanState, WtExecError?, Bool) {
   let mut c = chan
   let mut n = 0
@@ -1448,18 +1441,17 @@ async fn wt_confirm(
   (c, Some(WtExecError::TooManyPackets), false)
 }
 
+///|
 async fn wt_shell_drive(
   conn : @wt.WtConn,
   st : WtSessionState,
   command : String,
   term : String,
-  cols : Int,
-  rows : Int,
-  resize_to : (Int, Int)?,
+  cols : Int32,
+  rows : Int32,
+  resize_to : (Int32, Int32)?,
 ) -> (@channel.ChanState, WtExecError?, Bool, Bool) {
-  let mut chan = @channel.ChanState::new_interactive(
-    @channel.LOCAL_CHANNEL,
-  )
+  let mut chan = @channel.ChanState::new_interactive(@channel.LOCAL_CHANNEL)
   if !wt_send_action(conn, st, chan.open_action()) {
     return (chan, Some(WtExecError::SendFailed), false, false)
   }
@@ -1477,16 +1469,15 @@ async fn wt_shell_drive(
       false,
     )
   }
-  let pty = match chan.pty_req_action(
-    term,
-    cols,
-    rows,
-    0,
-    0,
-    @channel.tty_modes_bytes(38400),
-  ) {
+  let pty = match
+    chan.pty_req_action(term, cols, rows, 0, 0, @channel.tty_modes_bytes(38400)) {
     None =>
-      return (chan, Some(WtExecError::Malformed("pty_before_open")), false, false)
+      return (
+        chan,
+        Some(WtExecError::Malformed("pty_before_open")),
+        false,
+        false,
+      )
     Some(a) => a
   }
   if !wt_send_action(conn, st, pty) {
@@ -1500,7 +1491,12 @@ async fn wt_shell_drive(
   }
   let shell = match chan.shell_action() {
     None =>
-      return (chan, Some(WtExecError::Malformed("shell_before_open")), false, false)
+      return (
+        chan,
+        Some(WtExecError::Malformed("shell_before_open")),
+        false,
+        false,
+      )
     Some(a) => a
   }
   if !wt_send_action(conn, st, shell) {
@@ -1539,9 +1535,15 @@ async fn wt_shell_drive(
   let mut found = false
   while n < 4096 && !found {
     match wt_recv_plain_packet(conn, st.counters, st.recv) {
-      Closed => return (chan, Some(WtExecError::Closed), pty_granted, resize_sent)
+      Closed =>
+        return (chan, Some(WtExecError::Closed), pty_granted, resize_sent)
       BadPacket(why) =>
-        return (chan, Some(WtExecError::BadPacket(why)), pty_granted, resize_sent)
+        return (
+          chan,
+          Some(WtExecError::BadPacket(why)),
+          pty_granted,
+          resize_sent,
+        )
       Packet(t, pl) => {
         n = n + 1
         let (c4, actions, err) = @channel.chan_step(chan, t, pl)
@@ -1551,21 +1553,39 @@ async fn wt_shell_drive(
         match err {
           None => ()
           Some(chan_err) =>
-            return (chan, Some(wt_chan_error(chan_err)), pty_granted, resize_sent)
+            return (
+              chan,
+              Some(wt_chan_error(chan_err)),
+              pty_granted,
+              resize_sent,
+            )
         }
         for i = 0; i < actions.length(); i = i + 1 {
           if !wt_send_action(conn, st, actions[i]) {
-            return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+            return (
+              chan,
+              Some(WtExecError::SendFailed),
+              pty_granted,
+              resize_sent,
+            )
           }
         }
-        if @sshclient.sh_contains_bytes(@channel.ch_cat_all(chan.stdout), marker) {
+        if @sshclient.sh_contains_bytes(
+            @channel.ch_cat_all(chan.stdout),
+            marker,
+          ) {
           found = true
         }
         if chan.finished() {
           found = true
         }
         if grew < 0 {
-          return (chan, Some(WtExecError::Malformed("stdout_shrank")), pty_granted, resize_sent)
+          return (
+            chan,
+            Some(WtExecError::Malformed("stdout_shrank")),
+            pty_granted,
+            resize_sent,
+          )
         }
       }
     }
@@ -1588,9 +1608,15 @@ async fn wt_shell_drive(
       return (chan, Some(WtExecError::TooManyPackets), pty_granted, resize_sent)
     }
     match wt_recv_plain_packet(conn, st.counters, st.recv) {
-      Closed => return (chan, Some(WtExecError::Closed), pty_granted, resize_sent)
+      Closed =>
+        return (chan, Some(WtExecError::Closed), pty_granted, resize_sent)
       BadPacket(why) =>
-        return (chan, Some(WtExecError::BadPacket(why)), pty_granted, resize_sent)
+        return (
+          chan,
+          Some(WtExecError::BadPacket(why)),
+          pty_granted,
+          resize_sent,
+        )
       Packet(t, pl) => {
         k = k + 1
         let (c5, actions, err) = @channel.chan_step(chan, t, pl)
@@ -1598,11 +1624,21 @@ async fn wt_shell_drive(
         match err {
           None => ()
           Some(chan_err) =>
-            return (chan, Some(wt_chan_error(chan_err)), pty_granted, resize_sent)
+            return (
+              chan,
+              Some(wt_chan_error(chan_err)),
+              pty_granted,
+              resize_sent,
+            )
         }
         for i = 0; i < actions.length(); i = i + 1 {
           if !wt_send_action(conn, st, actions[i]) {
-            return (chan, Some(WtExecError::SendFailed), pty_granted, resize_sent)
+            return (
+              chan,
+              Some(WtExecError::SendFailed),
+              pty_granted,
+              resize_sent,
+            )
           }
         }
       }

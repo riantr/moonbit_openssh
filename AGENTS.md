@@ -440,8 +440,24 @@ python compare.py
   `packet_length - padding_length - 2`.
 - **`moon fmt` scope and CJK damage**: run it only over the packages the
   loop actually touched, then `git checkout --` the rest — it reformats
-  unrelated legacy files and can alter CJK comments (it turned
-  `真实加密` into `真加密` in `src/sshclient/moon.pkg`).
+  unrelated legacy files.
+  **The CJK half of this note did not reproduce and Loop #67 removed it.**
+  It read: "`moon fmt` in write mode alters CJK comments (it turned
+  `真实加密` into `真加密` in `src/sshclient/moon.pkg`)". On
+  `moon 0.1.20261012` the damage is not there. Measured three ways, all
+  before running write mode over anything: (1) the formatter's own output
+  already sits in `_build/<target>/release/format/`, and all 366 CJK runs in
+  `cmd/channel_test/main.mbt` are byte-identical between source and that
+  output; (2) after formatting 12 files that needed it, all 373 CJK runs
+  across them were unchanged; (3) after formatting the whole tree — 267
+  files — `host/cjk_snapshot.py` compared all **12,840** CJK runs across 226
+  files against a snapshot taken beforehand and found zero difference.
+  The scope rule above stays, because the reformats are real; the CJK
+  warning did not. `host/cjk_snapshot.py` is the standing guard: snapshot
+  before any whole-tree format, `check` after, and it exits 1 if a single
+  CJK run is lost or gained. What the old incident actually was is not
+  recorded, and guessing is how a wrong rule survives for a dozen loops —
+  the file it named no longer contains the string.
 - **`moon check` summary goes to stderr** and exits 0 even with
   warnings, so a stdout-only capture sees an empty string. Read the
   error count out of the `N warnings, M errors` line across both
@@ -1265,79 +1281,290 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
-### Loop #65: verify_loop40 leaks the server it starts, and a fixed port makes that bite
+### Loop #67: a twelve-loop-old warning was wrong, and the tool that measured it was wrong in a worse way
 
-`verify_loop40.mjs` starts a real OpenSSH server and **cannot stop it**.
-`startSshd()` (line 147) spawns `node host/sshd_setup.mjs`, calls
-`child.unref()`, polls until the port answers, and returns a boolean — the
-handle is discarded and never stored. `sshd_setup.mjs:210` parks on
-`await new Promise(() => {})`: `sshd -D` runs in the foreground forever and no
-SIGTERM/SIGINT handler is installed. The only `kill()` in the whole gate is
-`relay.kill()` (line 556), a different process. So on every run, successful or
-not, an sshd is orphaned on `SSHD_PORT = 18783` — a **hard-coded literal**, so
-the second run collides with the first.
+Loop #66 closed the static-analysis row. This one closes format-check and
+benchmark, disproves a standing instruction, and finds a real regression that
+Loop #66 shipped. The regression is the reason to read this section twice.
 
-That is the shape behind `verify_loop49` passing standalone and failing inside
-a suite run. It is the kind of order-dependent failure that gets relabelled
-"flaky" and then lived with forever.
+#### The CJK warning was false, and it was costing us the fix
 
-Reading the code shows there is no owner; it does **not** show that the process
-survives. `host/probe_sshd_leak.mjs` measures it, in two processes on purpose:
-the inner one reproduces loop40's `spawn` + `unref` + dropped handle verbatim
-and exits normally, exactly as a gate that finished — or was killed — would;
-the outer one then polls the port. If it still answers, the server outlived its
-only owner. In a single process that measurement would be void, because the
-inner process would still be alive. The outer probe cleans up after itself,
-which is precisely what loop40 lacks.
+AGENTS.md carried this rule for a dozen loops:
 
-```
-LEAK CONFIRMED: the port still answers after the owner exited.
-self-cleanup by this probe: ok, port released
-```
+> `moon fmt` in write mode corrupts CJK comments (`真实加密` -> `真加密`)
 
-`verify_loop65.mjs` 25/25. Mutations **6 CAUGHT / 0 MISSED**. M1 is worth
-reading twice: giving loop40 an sshd kill *is* the fix being argued for, and
-the gate goes red when it appears — the gate asserts the leak exists, so a real
-fix must be accompanied by a decision about what the gate should then say.
+It was the stated reason `format-check` could never be made green -- "run with
+`--check` ONLY". It does not reproduce on `moon 0.1.20261012`. Measured three
+ways, and the first one needed no write mode at all:
 
-#### The classification mistake, corrected
+1. **The formatter's own output is already on disk.** `moon fmt --check` writes
+   what it *would* write to `_build/<target>/release/format/`. All 366 CJK runs
+   in `cmd/channel_test/main.mbt` are byte-identical between source and that
+   output. This is the decisive test and it is free.
+2. After formatting the 10 files `--check` named, all 373 CJK runs across them
+   were unchanged.
+3. After formatting the whole tree -- 267 files -- `host/cjk_snapshot.py`
+   compared **12,840** CJK runs across 226 files against a snapshot taken
+   beforehand. Zero difference.
 
-Loop #64 wrote `PEER_GATES` as `verify_loop31..39` and left loop40 in the
-default tier, where it costs ~44 minutes and turns the run red for reasons
-unrelated to the code under test. That was Loop #64's error, not a judgement
-call. The set is now `31..40, 49`, each entry carrying the measurement that put
-it there. Default tier: **44 steps**; the eleven excluded gates are named on
-every run.
+The rule is deleted, and the guard that replaces it is stronger than the rule
+was: `host/cjk_snapshot.py save|check` snapshots CJK *content* and fails if a
+run is lost or changed inside a file that still exists. It fired once during
+this loop -- on `src/wtlive/live.mbt`, because a dead function and its Chinese
+doc comment were deleted on purpose -- which is the proof that it is measuring
+something real. `verify_loop67.mjs` runs it.
 
-#### A note on restoring bytes
+The incident itself is not recorded, and guessing is how a wrong rule outlives
+a dozen loops. The file it named no longer contains the string.
 
-Two separate incidents this loop, both mine:
+#### `moon fmt --check` reports a partial set, like `moon check`
 
-- `git show … | Out-String` turned a 2-line change into a 717-line diff.
-  PowerShell rewrites line endings and appends a newline. Use `git show` piped
-  to a binary write.
-- A restore-from-HEAD script then reverted the loop's own uncommitted work along
-  with the temporary mutation, and the gate noticed before I did.
-  **Restore-by-HEAD is only safe on files with no legitimate uncommitted
-  changes.** Restore by re-applying the exact change instead.
+Before formatting, `--check` named 10 files. Formatting them made it name **20
+more, with no overlap**. Same command, same tree, and the second batch was
+always there. This is the Loop #66 finding wearing a different hat: a single
+measurement pass is a floor, not a total. Both tools report what they reached,
+not what exists.
 
-#### A gate that took four attempts to specify
+Of the 10 it named first, **2 were line-ending-only** -- a CRLF source against
+an LF formatter, byte-identical after normalising. The diff renders as a
+whole-file delete-and-readd, which reads like a catastrophe and contains no
+change at all. `verify_loop67.mjs` now asserts that every tracked `.mbt`,
+`.pkg` and `.moon` file is LF.
 
-The provenance check on `PEER_GATES` — "the set must carry the measurement that
-justifies it" — was too weak three times in a row, and each time a mutation that
-should have failed it passed:
+#### Loop #66 shipped a compile error, and only a js build found it
 
-1. A mutation that appended a misleading comment and deleted nothing. The gate
-   was right to pass; **the mutation was broken**, which is worse than no
-   mutation because it looks like a hole.
-2. Deleting one line of the block — "measured" also appears on Loop #64's
-   paragraph about 31–39.
-3. Deleting the block's header — the detail lines still name `loop40`.
+Loop #66 renamed `AuthReport.method` -> `auth_method` because `method` is a
+reserved keyword, and updated `cmd/wt_ssh/main.mbt` to read `r.auth_method`.
+But `cmd/wt_ssh`'s `r` is a `src/wtlive.WtAuthReport` -- the WebTransport twin
+of the type, not the type itself. Loop #66 renamed one twin and edited the
+consumer of the other.
 
-Deleting the whole nine-line block fails it (23/25). The spec that works names
-the two gates specifically. Three broken mutations are recorded in
-`host/loop65_mutations.py` rather than deleted: **a mutation that cannot fail is
-more dangerous than no mutation at all.**
+`moon check cmd/wt_ssh` on the default target does not see it: the file is
+gated to js. `moon check --target js` does, and so does `moon build`. It
+surfaced in this loop as `verify_loop46.mjs` failing with "failed when building
+project" -- the first time the whole-workspace CI had run since.
+
+Two lessons, and the second is the expensive one:
+
+1. Parallel types must be renamed together. `WtAuthReport` got the same
+   treatment, and its `reserved_keyword` warning had been invisible for the same
+   reason the error was.
+2. **The collector reported that broken package as CLEAN.** Its
+   `_is_hard_error` tested `msg.startswith("Error")`, and the message is
+   `The type ... has no field auth_method.` -- no prefix. Loop #66's fixpoint
+   of "3 remaining warnings" was therefore a statement about packages that
+   happened to build. Fixed to key on the diagnostic's shape
+   (`Warning (<kind>):` or not), which is the only thing that actually
+   discriminates -- `level` cannot, because `--deny-warn` reports warnings as
+   `"level": "error"` too.
+
+#### The same mistake one level up: judging a package from one target
+
+With the error detector fixed, the collector immediately reported **five
+packages that "failed to build"** -- and every one of them was fine. They are
+js-only executables with `options(targets: { "main.mbt": ["js"] })`; checked on
+the default target they have no main and fail [4067]. `cmd/probe_async_wall`
+was the real defect hiding in that list: its `main.mbt` is `extern "js"` end to
+end and **its `moon.pkg` never declared the gate at all**, so it was a js-only
+package pretending to be universal.
+
+So the collector now reads `moon.pkg` and checks a package on all four targets
+when it declares gating, on the default target when it does not, and only
+gathers diagnostics from targets that built -- a target that failed produces
+cascade noise, which is exactly how `cmd/wt_ssh` once produced a wall of
+`test_unqualified_package`. Fixing all of that turned "3 warnings" into 4 real
+sites across 3 files, all of them justified:
+
+- `cmd/proton_gui` x3 `unused_async` -- `CommandRegistrar::bind` declares its
+  handler type as `async fn`, so a handler is async whether or not its body
+  awaits. `main.mbt:69` says so in the source. The warning is about the body;
+  the requirement is about the type.
+- `src/khfile` x1 `unused_package` -- Loop #66's entry, kept.
+
+And a controlled experiment settled a disagreement between the two loops.
+`src/wtlive` also imported `moonbitlang/async`, unused by the same test.
+Loop #66's evidence says such an import must stay; Loop #67 deleted it and
+measured: `moon check --target js` and `moon build cmd/wt_ssh --target js` are
+both green without it. **Same warning, same package shape, opposite answers** --
+because `src/khfile` has `async test` (whose expansion consumes the import) and
+`src/wtlive` has only `async fn` (which does not). Both entries now carry that
+distinction in their evidence.
+
+#### benchmark: the row had never measured anything
+
+`moon bench --target native` with no `-p` benchmarks the *current* package, so
+the row inherited the whole workspace and died on the js-only Worker mains.
+Scoped to `-p src/bigint`, the real reason surfaced: the repository contained
+**zero** benchmark blocks, and `moon bench` on a package with none exits **0**
+while printing `Total tests: 0, passed: 0, failed: 0` and `Warning: no test
+entry found`. An exit-code-only check would have reported a PASS having measured
+nothing. `verify_loop67.mjs` asserts on that text.
+
+`src/bigint/bigint_bench.mbt` now carries five. A MoonBit benchmark is a
+**test block taking a `@bench.T`**, not a `bench "..." { }` block -- `bench` is
+not a keyword in that position, and `ignore(x)` and `let _ = x` both fail to
+parse inside one. `b.keep()` is what stops the optimiser deleting the
+computation. Measured here:
+
+| benchmark | time (mean ± σ) |
+|---|---|
+| `mod_pow` 2048-bit e=65537, schoolbook | 4.86 ms ± 52 µs |
+| `mod_pow_auto`, cached Montgomery ctx | **173.96 µs ± 2.23 µs** |
+| `mod_mul` 2048-bit | 237.80 ns ± 2.34 ns |
+| `mpint_encode` 2048-bit | 329.05 ns ± 2.40 ns |
+| bytes round trip | 486.26 ns ± 2.21 ns |
+
+The 28x gap is Loop #29's optimisation finally quantified instead of asserted.
+The modulus is RFC 3526 group 14, written as a derivation (`2^2048 - 1` is 255
+bytes of `0xFF` and `0xFF`, and `189 = 0xBC`, so subtracting puts `0x43` last)
+rather than 256 pasted bytes that nothing here could check.
+
+#### The first full CI run found three more, and two of them were self-inflicted
+
+Closing format-check meant formatting 267 files, and formatting is exactly the
+kind of change that breaks gates which were asserting on things nobody thought
+to re-derive. Three failures, all from that one action:
+
+1. **`src/bigint/bigint_bench.mbt` shipped five warnings.** `@bench.T` is a
+   core package, and core packages are no longer implicitly in scope. It reports
+   as `core_package_not_imported`, a **deprecation rather than an error** --
+   which is why the benchmarks still ran and the number still came out. A gate
+   that only ran the benchmarks would never have noticed.
+2. **`verify_loop56.mjs` failed on a 276-byte "drift".** Its two generated files
+   are compared byte for byte, so formatting one turned a content check into a
+   wrapping check. Worse, the gate *writes* the generator's output back in
+   place, so the unformatted file it left behind turned `moon fmt --check` red
+   **two steps later in the same run** -- one byte-for-byte assertion turned one
+   green row into two red ones. The fix is to run `moon fmt` on the generated
+   files before comparing, so the check measures what it exists to measure
+   (did the content change) and formatting stays format-check's business. The
+   failure message now says "after formatting, so this is a content change and
+   not a wrapping one", which is the difference between an action and a shrug.
+3. **`verify_loop66` and `verify_loop67` went red on the new file** -- the same
+   five warnings, caught by the accept-table equality, which is what it is for.
+
+The generalisable part: **turning on a gate you had been carrying as "known
+defect" is its own change**, and it will find things that were always there and
+that no gate was looking at. The benchmark file is the clean example -- it was
+written to be correct, ran correctly, printed real numbers, and was still wrong
+in a way only the accept table could name.
+
+
+#### Mutations, and one that was filed in the wrong place
+
+`host/loop67_mutations.py`, six mutations. The first run came back
+**4 CAUGHT / 2 MISSED / 1 BUILD-BROKEN**, and all three of the wrong-looking
+ones were worth more than a pass would have been:
+
+- **M1 was BUILD-BROKEN, and it should not have been.** It prepended a junk
+  line to a source file to create a CRLF defect, which also made the package
+  fail to compile -- so it tested the compiler, not the CRLF check, even though
+  the gate did catch it. It now converts the file's line endings instead, which
+  is the defect without the breakage. *A mutation that cannot build has not
+  tested the gate*, and reporting it as a pass would have been the lie.
+- **M7 errored on a stale anchor** because I had edited `cjk_snapshot.py`
+  under it. A harness whose anchors silently rot stops testing anything, so it
+  fails loudly and the anchor is fixed rather than the mutation dropped.
+- **M5 MISSED, and the gate deserved it.** It re-added `src/wtlive`'s dead
+  `moonbitlang/async` import -- and the only check in the repository that
+  notices a stray unused import is the accept-table equality inside
+  `verify_loop66.mjs`, which `verify_loop67.mjs` invokes with `--skip-live` so
+  that a mutation run stays affordable. So the mutation sat exactly where the
+  check it attacks was switched off.
+
+  It moved to `host/loop66_mutations.py` as **M9**, beside the check, and runs
+  there with `live=True`. **A mutation belongs beside the check that catches
+  it, not beside the loop that introduced the defect** -- which is a different
+  statement from "put it in the same file as the code it breaks".
+
+
+#### The mutation that was right about the gate, twice
+
+M9 re-adds `src/wtlive`'s dead `moonbitlang/async` import and expects the
+accept-table equality to reject it. It did not -- and it was right twice, which
+is rarer and more useful than being right once.
+
+The first MISSED was cheap to explain and was a placement error: M9 sat in
+`loop67_mutations.py`, whose gate calls Loop #66's with `--skip-live` to keep a
+mutation run affordable, and that flag skips exactly the accept-table check it
+attacks. Moved to `loop66_mutations.py` beside the check.
+
+The second MISSED was a **real hole in the collector**, found only because the
+mutation was not deleted and the gate was not explained away:
+
+- The site *was* reported. `collect_one("src/wtlive", target="js")` returns
+  `('src\\wtlive\\moon.pkg', '2')` as an `unused_package`.
+- But `unused_package_all_targets` returned the **empty set**, and empty means
+  "classified as a false positive and filtered out".
+
+The intersection runs over all four targets. `src/wtlive` gates both of its
+files to js, so on native it builds with **zero active files** and reports
+nothing at all -- and an empty set intersected with anything is empty.
+**A target where a package has no files is silence, not evidence.**
+
+That fix then exposed two more, both of the same family:
+
+- **Bare `moon check` does not default to native.** `cmd/proton_gui` is
+  `supported_targets: "+native"`, so checking it with no `--target` produced no
+  diagnostics, and the collector would have called a package with three real
+  warnings clean. The collector had been consulting "whatever the default is" --
+  now it consults `targets:`, then `supported_targets:`, and otherwise **all
+  four targets**.
+- **The `targets:` parser only captured the first element of each list.** With
+  `[ "wasm", "wasm-gc" ]` it returned `{wasm}`, so `src/tcp` was being
+  intersected over three targets instead of four -- and an intersection over
+  fewer targets is one that can hide a real dead import. Caught by printing
+  what each package resolved to rather than by reasoning about it.
+
+With the hole closed, one more genuinely dead import appeared that three rounds
+of "is this a false positive?" had been waving through: **`cmd/wt_ssh`'s
+`moonbitlang/async/js_async`**. Deleted after `moon check --target js` and
+`moon build cmd/wt_ssh --target js` both came back clean without it. Nothing in
+this repository noticed it for a dozen loops, because every layer above the
+compiler was answering the question it had been asked rather than the question
+that was true.
+
+The mutation harness earned its keep here in a way a passing run could not:
+**a mutation that cannot fail is more dangerous than no mutation at all**, and
+three of this loop's four were failures that had to be read before they could
+be fixed.
+
+
+#### Still red
+
+`test-coverage`. `moon coverage analyze` has **no `--target` flag**, only
+`--target-dir`, and `-p` does not limit the scan -- `combine_coverages` builds
+every package for the default target, so the two js-only Worker mains fail
+[4067]. An attempt to declare them differently (`options(is_main: [...])`) was
+reverted after the key turned out to take a boolean, and `git diff` confirmed
+the revert before moving on. This is recorded, not worked around.
+
+The release gate stays shut and no tag was cut. `ci/release.py` refusing while a
+tier is red is the correct outcome, and it is not a formality: it was exercised
+in exactly that mode both this loop and the last.
+
+Where the matrix ended up, for the record. `python ci/ci.py --tiers
+env,build,gates,qa`: **57/58 steps in 762.9 s**, and of the twelve runnable QA
+categories **11 pass**. That is 8/12 at the start of Loop #66, 9/12 after it,
+and 11/12 now:
+
+| row | Loop #66 | Loop #67 |
+|---|---|---|
+| static-analysis | red (one package) | **pass**, 22.4 s |
+| format-check | red | **pass**, 0.1 s |
+| benchmark | red | **pass**, 5.0 s |
+| test-coverage | red | red, structural |
+
+#### A note on editing, because it cost more time than any of this
+
+The `edit` tool failed to match multi-line blocks in this repository -- AGENTS.md,
+ci/qa.py, cmd/flow_kat/main.mbt, collect_warnings.py, src/khfile/moon.pkg --
+on invisible byte differences alone, repeatedly. `host/patch_span.py` locates a
+span by two unique ASCII lines and rewrites between them, with a uniqueness check
+so a drifted file fails loudly. The one trap worth naming: `}` is not a unique
+end marker in MoonBit, `cmd/flow_kat/main.mbt` has 74 of them, hence the
+`until:` form.
+
 
 ### Loop #66: the warnings were hiding each other, and the collector was hiding the warnings
 
@@ -1464,14 +1691,89 @@ does not compile: a mutation caught by the compiler has not tested the gate.
   takes a boolean, and `git diff` confirmed the revert before moving on.
 - **benchmark** -- needs real `*_bench.mbt` files; the repo has none, and the
   zero-work guard is what stops the row reporting a green that measured nothing.
-- **format-check** -- `moon fmt --check` wants to re-wrap KAT byte arrays, and
-  `moon fmt` in write mode corrupts CJK comments (`真实加密` -> `真加密`), so it
-  stays `--check`-only until that is solved rather than worked around.
+- **format-check** -- `moon fmt --check` wanted to re-wrap KAT byte arrays.
+  **Solved in Loop #67**, which also disproved the CJK warning this line used to
+  carry: `moon fmt` over the whole tree leaves all 12,840 CJK runs across 226
+  files byte-identical. `moon fmt --check` now exits 0.
 
 The release gate therefore stays shut and no tag was cut, which is the correct
 outcome and not a formality: `ci/release.py` refuses when a tier is red, and it
 was exercised in exactly that mode.
 
+
+### Loop #65: verify_loop40 leaks the server it starts, and a fixed port makes that bite
+
+`verify_loop40.mjs` starts a real OpenSSH server and **cannot stop it**.
+`startSshd()` (line 147) spawns `node host/sshd_setup.mjs`, calls
+`child.unref()`, polls until the port answers, and returns a boolean — the
+handle is discarded and never stored. `sshd_setup.mjs:210` parks on
+`await new Promise(() => {})`: `sshd -D` runs in the foreground forever and no
+SIGTERM/SIGINT handler is installed. The only `kill()` in the whole gate is
+`relay.kill()` (line 556), a different process. So on every run, successful or
+not, an sshd is orphaned on `SSHD_PORT = 18783` — a **hard-coded literal**, so
+the second run collides with the first.
+
+That is the shape behind `verify_loop49` passing standalone and failing inside
+a suite run. It is the kind of order-dependent failure that gets relabelled
+"flaky" and then lived with forever.
+
+Reading the code shows there is no owner; it does **not** show that the process
+survives. `host/probe_sshd_leak.mjs` measures it, in two processes on purpose:
+the inner one reproduces loop40's `spawn` + `unref` + dropped handle verbatim
+and exits normally, exactly as a gate that finished — or was killed — would;
+the outer one then polls the port. If it still answers, the server outlived its
+only owner. In a single process that measurement would be void, because the
+inner process would still be alive. The outer probe cleans up after itself,
+which is precisely what loop40 lacks.
+
+```
+LEAK CONFIRMED: the port still answers after the owner exited.
+self-cleanup by this probe: ok, port released
+```
+
+`verify_loop65.mjs` 25/25. Mutations **6 CAUGHT / 0 MISSED**. M1 is worth
+reading twice: giving loop40 an sshd kill *is* the fix being argued for, and
+the gate goes red when it appears — the gate asserts the leak exists, so a real
+fix must be accompanied by a decision about what the gate should then say.
+
+#### The classification mistake, corrected
+
+Loop #64 wrote `PEER_GATES` as `verify_loop31..39` and left loop40 in the
+default tier, where it costs ~44 minutes and turns the run red for reasons
+unrelated to the code under test. That was Loop #64's error, not a judgement
+call. The set is now `31..40, 49`, each entry carrying the measurement that put
+it there. Default tier: **44 steps**; the eleven excluded gates are named on
+every run.
+
+#### A note on restoring bytes
+
+Two separate incidents this loop, both mine:
+
+- `git show … | Out-String` turned a 2-line change into a 717-line diff.
+  PowerShell rewrites line endings and appends a newline. Use `git show` piped
+  to a binary write.
+- A restore-from-HEAD script then reverted the loop's own uncommitted work along
+  with the temporary mutation, and the gate noticed before I did.
+  **Restore-by-HEAD is only safe on files with no legitimate uncommitted
+  changes.** Restore by re-applying the exact change instead.
+
+#### A gate that took four attempts to specify
+
+The provenance check on `PEER_GATES` — "the set must carry the measurement that
+justifies it" — was too weak three times in a row, and each time a mutation that
+should have failed it passed:
+
+1. A mutation that appended a misleading comment and deleted nothing. The gate
+   was right to pass; **the mutation was broken**, which is worse than no
+   mutation because it looks like a hole.
+2. Deleting one line of the block — "measured" also appears on Loop #64's
+   paragraph about 31–39.
+3. Deleting the block's header — the detail lines still name `loop40`.
+
+Deleting the whole nine-line block fails it (23/25). The spec that works names
+the two gates specifically. Three broken mutations are recorded in
+`host/loop65_mutations.py` rather than deleted: **a mutation that cannot fail is
+more dangerous than no mutation at all.**
 
 ### Loop #64: a transport seam, a measured wall, and a CI that can say no
 
@@ -1600,8 +1902,14 @@ report "Total tests: 0".
 `python ci/ci.py --tiers qa` currently reports **8/12 pass, 4 fail**
 (`format-check`, `moon check --deny-warn` with 114 `test_unqualified_package`,
 `moon coverage analyze` with no data, `moon bench` hitting `extern "wasm"` on
-native). Not hidden. `moon fmt --check` failing is expected and must not be
-"fixed" by running `moon fmt`: that corrupts CJK comments (`真实加密` → `真加密`).
+native). Not hidden. ~~`moon fmt --check` failing is expected and must not be
+"fixed" by running `moon fmt`: that corrupts CJK comments
+(`真实加密` → `真加密`).~~ **Superseded by Loop #67**, which measured the CJK
+claim three ways and found no damage on `moon 0.1.20261012` — 12,840 runs
+across 226 files, byte-identical after a whole-tree format. The format-check
+row is now green. The other three rows moved as follows: the static-analysis row
+went green in Loop #66 (8/12 → 9/12); `moon coverage analyze` and `moon bench`
+are still red, for the reasons recorded under Loop #66 and Loop #67.
 
 #### Release gate
 

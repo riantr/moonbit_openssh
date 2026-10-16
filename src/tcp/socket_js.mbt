@@ -8,17 +8,22 @@
 #borrow(host)
 extern "js" fn mb_tcp_connect(
   host : Bytes,
-  host_len : Int,
-  port : Int,
+  host_len : Int32,
+  port : Int32,
 ) -> Int64 = "((_h, _p) => -1n)"
 
 ///|
 #borrow(buf)
-extern "js" fn mb_tcp_send(h : Int64, buf : Bytes, off : Int, n : Int) -> Int64 = "((_h, _b, _o, _n) => -1n)"
+extern "js" fn mb_tcp_send(
+  h : Int64,
+  buf : Bytes,
+  off : Int32,
+  n : Int32,
+) -> Int64 = "((_h, _b, _o, _n) => -1n)"
 
 ///|
 #borrow(buf)
-extern "js" fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int) -> Int64 = "((_h, _b, _n) => -1n)"
+extern "js" fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int32) -> Int64 = "((_h, _b, _n) => -1n)"
 
 ///|
-extern "js" fn mb_tcp_close(h : Int64) -> Int = "((_h) => -1)"
+extern "js" fn mb_tcp_close(h : Int64) -> Int32 = "((_h) => -1)"

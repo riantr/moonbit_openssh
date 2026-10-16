@@ -4,7 +4,7 @@
 
 ///|
 /// 把 8 个 state u32 按大端序列化到 32 字节 output
-pub fn s256_serialize_state(state : FixedArray[UInt]) -> FixedArray[Byte] {
+pub fn s256_serialize_state(state : FixedArray[UInt32]) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(s256_hash_len, b'\x00')
   for i = 0; i < 8; i = i + 1 {
     be32_to_8(out, i * 4, state[i])

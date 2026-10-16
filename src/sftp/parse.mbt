@@ -38,8 +38,8 @@ pub(all) struct SftpNameEntry {
 /// data to act on. What matters is that they are *consumed*, so the packet is
 /// genuinely understood rather than partially skipped.
 pub(all) struct SftpVersionReply {
-  version : Int
-  extensions : Int
+  version : Int32
+  extensions : Int32
   /// The extension names, in the order the server sent them.
   ///
   /// Kept because "the count" and "which names" are different facts and only
@@ -54,8 +54,8 @@ pub(all) struct SftpVersionReply {
 /// SSH2_FXP_STATUS (sftp.h:58) -- the reply to every request that is not
 /// answered with a HANDLE, DATA, NAME or ATTRS.
 pub(all) struct SftpStatus {
-  id : Int
-  code : Int
+  id : Int32
+  code : Int32
   message : FixedArray[Byte]
   lang : FixedArray[Byte]
 }
@@ -63,28 +63,28 @@ pub(all) struct SftpStatus {
 ///|
 /// SSH2_FXP_HANDLE (sftp.h:59) -- the answer to OPEN and OPENDIR.
 pub(all) struct SftpHandleReply {
-  id : Int
+  id : Int32
   handle : FixedArray[Byte]
 }
 
 ///|
 /// SSH2_FXP_DATA (sftp.h:60) -- the payload of one READ.
 pub(all) struct SftpDataReply {
-  id : Int
+  id : Int32
   data : FixedArray[Byte]
 }
 
 ///|
 /// SSH2_FXP_ATTRS (sftp.h:62) -- the answer to STAT and LSTAT.
 pub(all) struct SftpAttrsReply {
-  id : Int
+  id : Int32
   attrs : SftpAttrs
 }
 
 ///|
 /// SSH2_FXP_NAME (sftp.h:61) -- the answer to READDIR, REALPATH and READLINK.
 pub(all) struct SftpNameReply {
-  id : Int
+  id : Int32
   names : Array[SftpNameEntry]
 }
 
@@ -95,6 +95,7 @@ pub(all) enum SftpParse {
   Rejected(SftpError)
 }
 
+///|
 pub(all) enum SftpReply {
   Version(SftpVersionReply)
   Status(SftpStatus)
@@ -114,6 +115,7 @@ fn checked(e : SftpError?) -> Bool {
   e is Some(_)
 }
 
+///|
 pub fn sftp_parse_version(body : FixedArray[Byte]) -> SftpParse {
   let c = SftpCursor::new(body)
   let t = c.u8()
@@ -142,19 +144,22 @@ pub fn sftp_parse_version(body : FixedArray[Byte]) -> SftpParse {
     names.push(bytes_text_of(name))
     n = n + 1
   }
-  Parsed(SftpReply::Version({ version: v, extensions: n, ext_names: names }))
+  Parsed(SftpReply::Version({ version: v, extensions: n, ext_names: names, }))
 }
 
 ///| 应答里的原始字节按 latin-1 变成文本——扩展名都是 ASCII,而 SFTP 的 string
-///| 是字节串,不是「某个编码的字符串」。
+
+///|
+/// 是字节串,不是「某个编码的字符串」。
 fn bytes_text_of(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   sb.to_string()
 }
 
+///|
 pub fn sftp_parse_status(body : FixedArray[Byte]) -> SftpParse {
   let c = SftpCursor::new(body)
   let t = c.u8()
@@ -172,9 +177,10 @@ pub fn sftp_parse_status(body : FixedArray[Byte]) -> SftpParse {
   if checked(c.err) {
     return Rejected(c.err.unwrap())
   }
-  Parsed(SftpReply::Status({ id, code, message: msg, lang }))
+  Parsed(SftpReply::Status({ id, code, message: msg, lang, }))
 }
 
+///|
 pub fn sftp_parse_handle(body : FixedArray[Byte]) -> SftpParse {
   let c = SftpCursor::new(body)
   let t = c.u8()
@@ -190,9 +196,10 @@ pub fn sftp_parse_handle(body : FixedArray[Byte]) -> SftpParse {
   if checked(c.err) {
     return Rejected(c.err.unwrap())
   }
-  Parsed(SftpReply::Handle({ id, handle: h }))
+  Parsed(SftpReply::Handle({ id, handle: h, }))
 }
 
+///|
 pub fn sftp_parse_data(body : FixedArray[Byte]) -> SftpParse {
   let c = SftpCursor::new(body)
   let t = c.u8()
@@ -208,9 +215,10 @@ pub fn sftp_parse_data(body : FixedArray[Byte]) -> SftpParse {
   if checked(c.err) {
     return Rejected(c.err.unwrap())
   }
-  Parsed(SftpReply::Data({ id, data: d }))
+  Parsed(SftpReply::Data({ id, data: d, }))
 }
 
+///|
 pub fn sftp_parse_attrs(body : FixedArray[Byte]) -> SftpParse {
   let c = SftpCursor::new(body)
   let t = c.u8()
@@ -233,9 +241,10 @@ pub fn sftp_parse_attrs(body : FixedArray[Byte]) -> SftpParse {
   if checked(c.err) {
     return Rejected(c.err.unwrap())
   }
-  Parsed(SftpReply::Attrs({ id, attrs: a }))
+  Parsed(SftpReply::Attrs({ id, attrs: a, }))
 }
 
+///|
 pub fn sftp_parse_name(body : FixedArray[Byte]) -> SftpParse {
   let c = SftpCursor::new(body)
   let t = c.u8()
@@ -268,7 +277,7 @@ pub fn sftp_parse_name(body : FixedArray[Byte]) -> SftpParse {
     if checked(c.err) {
       return Rejected(c.err.unwrap())
     }
-    names.push({ filename: fname, longname: lname, attrs: a })
+    names.push({ filename: fname, longname: lname, attrs: a, })
     i = i + 1
   }
   // Catches a lying `count`: too few triples and there are leftover bytes, too
@@ -277,7 +286,7 @@ pub fn sftp_parse_name(body : FixedArray[Byte]) -> SftpParse {
   if checked(c.err) {
     return Rejected(c.err.unwrap())
   }
-  Parsed(SftpReply::Name({ id, names }))
+  Parsed(SftpReply::Name({ id, names, }))
 }
 
 ///|
@@ -306,7 +315,7 @@ pub fn sftp_parse_reply(body : FixedArray[Byte]) -> SftpParse {
 ///
 /// Matching on this is what keeps a reply to an abandoned request from being
 /// attributed to the request we are actually waiting for.
-pub fn reply_id(r : SftpReply) -> Int {
+pub fn reply_id(r : SftpReply) -> Int32 {
   match r {
     SftpReply::Version(_) => -1
     SftpReply::Status(s) => s.id

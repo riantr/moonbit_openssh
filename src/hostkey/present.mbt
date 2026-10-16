@@ -1,11 +1,17 @@
 ///| K_S 出示的东西 → 「用来验签的那把钥匙」（Loop #53）
 ///
+
 ///| 握手签名永远是**内层那把钥匙**签的，即使 K_S 里是一张证书。把证书当成钥匙
+
 ///| 直接送进 `verify_with_alg` 会得到一个必然失败的验签——不是密码学出错，是
+
 ///| 拿错了钥匙。所以这条规则住在这里，两条 live 适配器共用；它们只负责翻译错误类型。
 ///
+
 ///| 顺带定死了另一件事：**协商出的算法名就是证书类型名**。
+
 ///| `ssh-ed25519-cert-v01@openssh.com` 这个名字既出现在 KEXINIT 里，也应该是
+
 ///| 证书 blob 的第一个字符串。两者不等就是协议违规，比「签名验不过」早一步报出来。
 
 ///|
@@ -43,7 +49,9 @@ pub fn plain_type_is_supported(name : String) -> Bool {
 ///|
 /// 从 K_S 的字节取出验签要用的钥匙
 ///
-///| `negotiated_alg` 是 KEX 协商出来的主机密钥算法名。
+
+///|
+/// `negotiated_alg` 是 KEX 协商出来的主机密钥算法名。
 pub fn presented_key(
   blob : FixedArray[Byte],
   negotiated_alg : String,
@@ -81,7 +89,12 @@ pub fn presented_key(
         if !HostKey::agrees_with_alg(k, negotiated_alg) {
           Bad(TypeMismatch)
         } else {
-          Ready({ key: k, sig_alg: negotiated_alg, is_cert: false, cert_type_name: "" })
+          Ready({
+            key: k,
+            sig_alg: negotiated_alg,
+            is_cert: false,
+            cert_type_name: "",
+          })
         }
     }
   }

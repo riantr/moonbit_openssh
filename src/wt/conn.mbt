@@ -57,7 +57,7 @@ suberror WtError {
 ///|
 /// An open WebTransport bidirectional stream, as a byte source.
 pub(all) struct WtConn {
-  handle : Int
+  handle : Int32
 }
 
 ///|
@@ -106,7 +106,7 @@ pub async fn WtConn::send(
 /// would push the failure somewhere much harder to read.
 pub async fn WtConn::read_exact(
   self : WtConn,
-  n : Int,
+  n : Int32,
 ) -> FixedArray[Byte] raise WtError {
   let got = @js_async.Promise::wait(ffi_wt_read_exact(self.handle, n)) catch {
     err => raise WtError::Eof(err.to_string())

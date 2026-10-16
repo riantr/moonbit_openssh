@@ -1,5 +1,4 @@
 import {
-  "moonbitlang/async",
   "openssh/openssh_moonbit/src/wt",
   "openssh/openssh_moonbit/src/sshclient",
   "openssh/openssh_moonbit/src/sshwire",

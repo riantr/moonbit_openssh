@@ -1,4 +1,5 @@
 ///| SSH packet framing (RFC 4253 §6)
+
 ///|
 /// 包结构:
 ///   uint32  packet_length     (不含 MAC)
@@ -6,6 +7,7 @@
 ///   byte    payload[N   - padding_length - 1]
 ///   byte    random_padding[padding_length]
 ///   byte    mac[mac_length]   (0 unencrypted / 16 chacha20-poly1305 / 20 hmac-sha1 / ...)
+
 ///|
 /// 最小 packet_length = 1 (padding_length) + 4 (最小 padding) + 0 (payload) = 5
 /// 最大 packet_length = 256 * 1024 = 262144 bytes
@@ -21,13 +23,13 @@ pub struct SshPacket {
 /// 字节流累积器 (用于解析 SSH packet from WebSocket / TCP byte stream)
 pub struct SshBuf {
   mut data : FixedArray[Byte]
-  mut pos : Int
+  mut pos : Int32
 }
 
 ///|
 pub fn SshBuf::new() -> SshBuf {
   let buf : FixedArray[Byte] = FixedArray::make(0, b'\x00')
-  { data: buf, pos: 0 }
+  { data: buf, pos: 0, }
 }
 
 ///|
@@ -103,7 +105,7 @@ pub fn SshBuf::try_parse(self : SshBuf) -> SshPacket? {
   }
   // 前进 pos 跳过整个 packet (不含 MAC)
   self.pos = self.pos + 4 + packet_length_int
-  Some({ msg_type, payload })
+  Some({ msg_type, payload, })
 }
 
 ///|
@@ -115,11 +117,15 @@ pub fn SshBuf::try_parse(self : SshBuf) -> SshPacket? {
 ///   4. packet_length = payload_full.length() + padding_length + 1
 ///   5. padding = random bytes (4..block_size bytes, 至少 4)
 ///   6. return: u32(packet_length) || u8(padding_length) || payload_full || padding
-pub fn make_packet(msg_type : Byte, payload : FixedArray[Byte]) -> FixedArray[Byte] {
+pub fn make_packet(
+  msg_type : Byte,
+  payload : FixedArray[Byte],
+) -> FixedArray[Byte] {
   let block_size = 8
   let payload_full_len = 1 + payload.length()
-  let total_minus_one = payload_full_len + 4  // 至少 padding_length = 4
-  let mut padding_length = (block_size - (total_minus_one % block_size)) % block_size
+  let total_minus_one = payload_full_len + 4 // 至少 padding_length = 4
+  let mut padding_length = (block_size - total_minus_one % block_size) %
+    block_size
   if padding_length < 4 {
     padding_length = padding_length + block_size
   }
@@ -130,7 +136,7 @@ pub fn make_packet(msg_type : Byte, payload : FixedArray[Byte]) -> FixedArray[By
   let out : FixedArray[Byte] = FixedArray::make(total, b'\x00')
 
   // u32 packet_length (大端)
-  let pl_u : UInt = packet_length.reinterpret_as_uint()
+  let pl_u : UInt32 = packet_length.reinterpret_as_uint()
   out[0] = ((pl_u >> 24) & 0xFFU).to_byte()
   out[1] = ((pl_u >> 16) & 0xFFU).to_byte()
   out[2] = ((pl_u >> 8) & 0xFFU).to_byte()
@@ -156,7 +162,10 @@ pub fn make_packet(msg_type : Byte, payload : FixedArray[Byte]) -> FixedArray[By
 
 ///|
 /// 读 SSH string (RFC 4251 §5): u32 length + bytes
-pub fn read_ssh_string(buf : FixedArray[Byte], offset : Int) -> (FixedArray[Byte], Int) {
+pub fn read_ssh_string(
+  buf : FixedArray[Byte],
+  offset : Int32,
+) -> (FixedArray[Byte], Int32) {
   let len = (buf[offset].to_uint() << 24) |
     ((buf[offset + 1].to_uint() << 16) & 0xFF0000U) |
     ((buf[offset + 2].to_uint() << 8) & 0xFF00U) |
@@ -173,7 +182,7 @@ pub fn read_ssh_string(buf : FixedArray[Byte], offset : Int) -> (FixedArray[Byte
 /// 构造 SSH string (RFC 4251 §5): u32 length + bytes
 pub fn write_ssh_string(s : FixedArray[Byte]) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(4 + s.length(), b'\x00')
-  let len_u : UInt = s.length().reinterpret_as_uint()
+  let len_u : UInt32 = s.length().reinterpret_as_uint()
   out[0] = ((len_u >> 24) & 0xFFU).to_byte()
   out[1] = ((len_u >> 16) & 0xFFU).to_byte()
   out[2] = ((len_u >> 8) & 0xFFU).to_byte()
@@ -186,16 +195,16 @@ pub fn write_ssh_string(s : FixedArray[Byte]) -> FixedArray[Byte] {
 
 ///|
 /// 读 SSH uint32 (大端)
-pub fn read_u32(buf : FixedArray[Byte], offset : Int) -> UInt {
+pub fn read_u32(buf : FixedArray[Byte], offset : Int32) -> UInt32 {
   (buf[offset].to_uint() << 24) |
-    ((buf[offset + 1].to_uint() << 16) & 0xFF0000U) |
-    ((buf[offset + 2].to_uint() << 8) & 0xFF00U) |
-    (buf[offset + 3].to_uint() & 0xFFU)
+  ((buf[offset + 1].to_uint() << 16) & 0xFF0000U) |
+  ((buf[offset + 2].to_uint() << 8) & 0xFF00U) |
+  (buf[offset + 3].to_uint() & 0xFFU)
 }
 
 ///|
 /// 构造 SSH uint32 (大端)
-pub fn write_u32(v : UInt) -> FixedArray[Byte] {
+pub fn write_u32(v : UInt32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(4, b'\x00')
   out[0] = ((v >> 24) & 0xFFU).to_byte()
   out[1] = ((v >> 16) & 0xFFU).to_byte()
@@ -206,7 +215,7 @@ pub fn write_u32(v : UInt) -> FixedArray[Byte] {
 
 ///|
 /// 读 SSH uint64 (大端)
-pub fn read_u64(buf : FixedArray[Byte], offset : Int) -> UInt64 {
+pub fn read_u64(buf : FixedArray[Byte], offset : Int32) -> UInt64 {
   let mut v : UInt64 = 0UL
   for i = 0; i < 8; i = i + 1 {
     v = (v << 8) | (buf[offset + i].to_uint().to_uint64() & 0xFFUL)

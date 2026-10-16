@@ -46,7 +46,7 @@ pub fn ChachaPolyCtx::new64(key : FixedArray[Byte]) -> ChachaPolyCtx {
 
 ///|
 /// 移位量会被掩码(&31),>>56 实际是 >>24,产生重复字节。
-fn seq_to_be64(seqnr : UInt) -> FixedArray[Byte] {
+fn seq_to_be64(seqnr : UInt32) -> FixedArray[Byte] {
   let v : UInt64 = seqnr.to_uint64()
   let buf : FixedArray[Byte] = FixedArray::make(8, b'\x00')
   for i = 0; i < 8; i = i + 1 {
@@ -59,7 +59,7 @@ fn seq_to_be64(seqnr : UInt) -> FixedArray[Byte] {
 
 ///|
 /// ChaCha20(K_main, iv=seqbuf, counter=0) 处理 32 个零字节
-fn chachapoly_poly_key(ctx : ChachaPolyCtx, seqnr : UInt) -> FixedArray[Byte] {
+fn chachapoly_poly_key(ctx : ChachaPolyCtx, seqnr : UInt32) -> FixedArray[Byte] {
   let state = ChaChaState::new256(ctx.main_key)
   let with_iv = state.set_iv(seq_to_be64(seqnr), counter=0UL)
   let zeros : FixedArray[Byte] = FixedArray::make(32, b'\x00')
@@ -88,10 +88,10 @@ fn chachapoly_poly_key(ctx : ChachaPolyCtx, seqnr : UInt) -> FixedArray[Byte] {
 ///                   成功返回解密后的 头‖payload(长 body,C 的 dest 只写这些)
 pub fn ChachaPolyCtx::crypt(
   self : ChachaPolyCtx,
-  seqnr : UInt,
+  seqnr : UInt32,
   src : FixedArray[Byte],
-  aadlen : Int,
-  datalen : Int,
+  aadlen : Int32,
+  datalen : Int32,
   do_encrypt : Bool,
 ) -> FixedArray[Byte]? {
   let body_len = aadlen + datalen
@@ -154,7 +154,11 @@ pub fn ChachaPolyCtx::crypt(
 
 ///|
 /// 取 bytes[from..to) 的拷贝(小工具,避免到处手写循环)
-fn src_sub(bytes : FixedArray[Byte], from : Int, to : Int) -> FixedArray[Byte] {
+fn src_sub(
+  bytes : FixedArray[Byte],
+  from : Int32,
+  to : Int32,
+) -> FixedArray[Byte] {
   let n = to - from
   let arr : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
@@ -167,9 +171,9 @@ fn src_sub(bytes : FixedArray[Byte], from : Int, to : Int) -> FixedArray[Byte] {
 /// 解密 4 字节包头得到包长(对应 chachapoly_get_length)
 pub fn ChachaPolyCtx::get_length(
   self : ChachaPolyCtx,
-  seqnr : UInt,
+  seqnr : UInt32,
   hdr_ct : FixedArray[Byte],
-) -> UInt {
+) -> UInt32 {
   if hdr_ct.length() < 4 {
     abort("get_length: need at least 4 bytes")
   }

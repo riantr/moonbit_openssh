@@ -1,9 +1,11 @@
 ///| Loop #54: the native half of the write-back -- a real file.
 ///
+
 ///|
 ///
 /// Three outcomes, not two, and the third is the point.
 ///
+
 ///|
 ///
 /// `Missing` is separated from `Unreadable` because they are different
@@ -13,6 +15,7 @@
 /// silently loses the ability to read their own known_hosts will not know why.
 /// A read failure is printed, not swallowed.
 ///
+
 ///|
 ///
 /// **Storage being broken is not a man in the middle.** Loop #52 reached the
@@ -21,6 +24,7 @@
 /// failure for the wrong reason. The connection is fine, the user just loses
 /// the ability to pin. So `load` reports and the caller decides.
 ///
+
 ///|
 ///
 /// **`exists` first, so a missing file is not reported as a read failure.**
@@ -61,11 +65,13 @@ fn describe(e : Error) -> String {
 ///|
 /// 读一个 known_hosts 文件
 ///
-///| 返回空文本的只有 `Missing`。`Unreadable` 必须原样上报：把它当成「没有
+
+///|
+/// 返回空文本的只有 `Missing`。`Unreadable` 必须原样上报：把它当成「没有
 /// pin」在 strict 下会拒绝（方向对），但在非 strict 下会**放行**，而一个读不到
 /// 自己的信任锚的人绝不该因为读不到而被放行。
 pub async fn load(path : String) -> LoadResult {
-  if !(@fs.exists(path)) {
+  if !@fs.exists(path) {
     return LoadResult::Missing
   }
   try {
@@ -79,9 +85,11 @@ pub async fn load(path : String) -> LoadResult {
 ///|
 /// 在文件末尾追加一段字节（追加，不是覆盖）
 ///
+
 ///| `chunk` 自带结尾换行由调用方负责——这个包不知道一行 known_hosts 长什么样，
 /// 那是 `src/knownhosts` 的事。
 ///
+
 ///|
 ///
 /// **A torn append costs you the line you were adding and nothing else.**
@@ -92,6 +100,7 @@ pub async fn load(path : String) -> LoadResult {
 /// that would matter, because a half-written entry that *did* parse would
 /// report a mismatch against a host nobody changed.
 ///
+
 ///|
 ///
 /// Read-modify-write (read the file, concatenate, write it all back) was the
@@ -116,7 +125,9 @@ pub async fn append(path : String, chunk : String) -> AppendResult {
 ///|
 /// 文件末尾是否已经有 `\n`
 ///
-///| 文件不存在时按「需要补换行」处理——空文件不需要，但补一个也不会错，
+
+///|
+/// 文件不存在时按「需要补换行」处理——空文件不需要，但补一个也不会错，
 /// 而判断「文件在不在」在这里没有价值。
 fn ends_with_newline(text : String) -> Bool {
   text.length() > 0 && text[text.length() - 1] == '\n'
@@ -125,11 +136,14 @@ fn ends_with_newline(text : String) -> Bool {
 ///|
 /// 往文件里追加**一行**（`line` 不带结尾换行），自动补齐分隔换行
 ///
+
 ///| 这是驱动真正会调用的那个。行格式由 `src/knownhosts` 决定、重复判定也由
 /// 那个包决定（`has_line`）——所以**这个包不依赖 `knownhosts`**，依赖是反的：
 /// 格式层调平台层，不是反过来。少一条依赖边，少一处能漂移的地方。
 ///
-///| 补分隔换行属于文件卫生而不是格式知识，所以留在这里：一份最后一行没有换行的
+
+///|
+/// 补分隔换行属于文件卫生而不是格式知识，所以留在这里：一份最后一行没有换行的
 /// known_hosts 直接追加会与新行**粘成一条**，而粘连出来的行解析不出来，等于把
 /// 这次写回悄悄丢掉。
 pub async fn append_terminated(path : String, line : String) -> AppendResult {

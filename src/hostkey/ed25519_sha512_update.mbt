@@ -13,10 +13,10 @@
 pub fn update(
   state : FixedArray[UInt64],
   buffer : FixedArray[Byte],
-  buffer_len : Int,
+  buffer_len : Int32,
   bit_count : UInt64,
   message : FixedArray[Byte],
-) -> (FixedArray[Byte], Int, UInt64) {
+) -> (FixedArray[Byte], Int32, UInt64) {
   let mut buf_len = buffer_len
   let mut bc = bit_count
   let mut msg_offset = 0
@@ -72,7 +72,7 @@ pub fn update(
 pub fn pad(
   state : FixedArray[UInt64],
   buffer : FixedArray[Byte],
-  buffer_len : Int,
+  buffer_len : Int32,
   bit_count : UInt64,
 ) -> Unit {
   buffer[buffer_len] = b'\x80'

@@ -24,8 +24,8 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn hex_digit_bb(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hex_digit_bb(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -300,7 +300,7 @@ test "wrapper_b2_roundtrip" {
   let payload = hex_to_bytes(
     "0b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0",
   )
-  let datalen : Int = payload.length()
+  let datalen : Int32 = payload.length()
   let src : FixedArray[Byte] = FixedArray::make(4 + datalen, b'\x00')
   for i = 0; i < 4; i = i + 1 {
     src[i] = header[i]
@@ -422,7 +422,7 @@ test "wrapper_wrong_header_key_still_decrypts_payload" {
       }
       // 包头是垃圾(几乎必然 != deadbeef;逐字节统计不匹配数)
       let header = hex_to_bytes("deadbeef")
-      let mut diff : Int = 0
+      let mut diff : Int32 = 0
       for i = 0; i < 4; i = i + 1 {
         if plain[i] != header[i] {
           diff = diff + 1

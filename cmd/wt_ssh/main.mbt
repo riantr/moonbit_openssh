@@ -41,22 +41,34 @@ extern "js" fn wt_finish(ok : Bool, detail : String) -> Unit = "((ok, detail) =>
 
 ///| Loop #53: 当前 Unix 秒，给证书有效期判定用
 ///
+
 ///| `@env.now()` 返回的是**毫秒**——这一点是量出来的（`.loop53/probe`，与 Python
+
 ///| 的 `time.time()` 对拍：1791858899366 对 1791858899），不是照文档抄的。猜错
+
 ///| 单位的后果很安静：所有比较差 1000 倍，有效期判定会放行该拒的、拒掉该放的，
+
 ///| 而且没有任何报错可以指过去。
 ///
+
 ///| 曾经为它写过一个 `extern "js"` 的版本（Worker 里取 `Date.now()`）。删掉了：
+
 ///| core 已经给了 `@env.now()`，而那条路要跨 FFI 边界，Loop #52 在那里踩过的坑
+
 ///| （实现串里的字符串字面量、`null` 被判成 `Some(null)`）一个都省不掉。少一层
-///| FFI 比多一份注释值钱。
+
+///|
+/// FFI 比多一份注释值钱。
 fn cfg_now_seconds() -> UInt64 {
   @env.now() / 1000UL
 }
 
 ///| One vector from `fault_vectors.mbt` -- the same generated table
+
 ///| `cmd/sftp_mitm` and `cmd/sftp_fault` carry. Three copies of one file is
-///| why `host/verify_loop41.mjs` checks the tables agree.
+
+///|
+/// why `host/verify_loop41.mjs` checks the tables agree.
 fn wt_fault_case(name : String) -> FaultCase {
   for i = 0; i < fault_cases.length(); i = i + 1 {
     if fault_cases[i].name == name {
@@ -67,10 +79,15 @@ fn wt_fault_case(name : String) -> FaultCase {
 }
 
 ///| hex -> bytes, for a writefile payload. Written out rather than reached for
+
 ///| because this package has no hex helper yet and the standard library's
+
 ///| `hex_to_bytes` silently drops a trailing odd digit -- a fault vector
+
 ///| mistyped by one character would then be a *different* vector rather than a
-///| compile error.
+
+///|
+/// compile error.
 fn wt_hex_to_bytes(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   if s.length() % 2 != 0 {
@@ -83,7 +100,8 @@ fn wt_hex_to_bytes(s : String) -> FixedArray[Byte] {
   out
 }
 
-fn wt_hex_nibble(c : UInt16) -> Int {
+///|
+fn wt_hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -106,9 +124,14 @@ fn wt_hex_nibble(c : UInt16) -> Int {
 /// 一个方向相反的开关,而两个名字相反的开关里总有一个没人会去读。
 fn cfg_kh_host() -> String {
   let given = cfg("kh_host")
-  if given == "" { "127.0.0.1" } else { given }
+  if given == "" {
+    "127.0.0.1"
+  } else {
+    given
+  }
 }
 
+///|
 async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   let given = cfg("known_hosts")
   let mut text = given
@@ -124,7 +147,9 @@ async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   if given == "" {
     text = @khstore.load(host)
     if text != "" {
-      println("known_hosts: " + text.length().to_string() + " bytes from storage")
+      println(
+        "known_hosts: " + text.length().to_string() + " bytes from storage",
+      )
     }
   }
   if text == "" {
@@ -156,7 +181,8 @@ async fn cfg_kh_policy() -> @knownhosts.KnownHostsPolicy {
   p
 }
 
-///| Loop #52: 写回真正落到 localStorage,打印只是它的一份副本。
+///|
+/// Loop #52: 写回真正落到 localStorage,打印只是它的一份副本。
 ///
 /// Loop #49/#50 的写回是**打印**的,门禁捕获那一行再手工喂回去。那对测试是够的,
 /// 对产品是零:浏览器里没人读 stdout,所以周二敲了 `--kh-tofu` 的用户,周三会发现
@@ -192,7 +218,8 @@ async fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
     println("tofu: accepted-unpinned")
     println(
       "tofu: NOT stored -- storage refused the write, so the next connection to " +
-      host + " will need kh_tofu again",
+      host +
+      " will need kh_tofu again",
     )
   }
   // 仍然打印这一行:它既是给门禁捕获的,也让用户在 DevTools 之外看得到自己
@@ -267,6 +294,7 @@ fn test_auth_key() -> @bigint.BigNat {
 ///|
 /// AuthRejected 携带的三样证据原样打印,理由字段不在这一层被拼进字符串里,
 /// 它得能被单独解析。
+
 ///|
 /// 固定类失败的一句话说明,与 `cmd/ssh_live` 的同名函数逐字一致。
 ///
@@ -285,19 +313,26 @@ fn print_pin_hint(e : @wtlive.WtAuthError) -> Unit {
       // 结构相同——两边给出不同的说法，用户就会以为其中一边在说谎。
       if reason == "no-certificate-expected" {
         println(
-          "hint: " + host + " is pinned via a @cert-authority entry, but the " +
+          "hint: " +
+          host +
+          " is pinned via a @cert-authority entry, but the " +
           "server sent a plain key instead of a certificate. Pin the host key " +
           "directly if that is what you want.",
         )
       } else if reason == "expired" || reason == "not-yet-valid" {
         println(
           "hint: the host certificate presented is outside its validity window " +
-          "(reason: " + reason + "). Check the clock on both ends, then re-issue " +
-          "the certificate on the server with principal " + host + ".",
+          "(reason: " +
+          reason +
+          "). Check the clock on both ends, then re-issue " +
+          "the certificate on the server with principal " +
+          host +
+          ".",
         )
       } else if reason == "principal-mismatch" {
         println(
-          "hint: the host certificate does not list " + host +
+          "hint: the host certificate does not list " +
+          host +
           " among its principals. Issue one whose principal is the name you " +
           "connect to.",
         )
@@ -313,7 +348,8 @@ fn print_pin_hint(e : @wtlive.WtAuthError) -> Unit {
         )
       } else {
         println(
-          "hint: the host certificate did not validate (reason: " + reason +
+          "hint: the host certificate did not validate (reason: " +
+          reason +
           "). kh_tofu does NOT apply to certificates: a certificate without a " +
           "pinned CA looks exactly like what a man in the middle would send.",
         )
@@ -321,25 +357,34 @@ fn print_pin_hint(e : @wtlive.WtAuthError) -> Unit {
     @wtlive.HostkeyCertUntrusted(h) =>
       println(
         "hint: the server sent a host certificate signed by a CA that has no " +
-        "@cert-authority entry here for " + h + ". Add the CA's public key as " +
-        "@cert-authority " + h + " ssh-ed25519 <base64>. kh_tofu does not apply " +
+        "@cert-authority entry here for " +
+        h +
+        ". Add the CA's public key as " +
+        "@cert-authority " +
+        h +
+        " ssh-ed25519 <base64>. kh_tofu does not apply " +
         "to certificates.",
       )
     @wtlive.HostkeyMismatch(h) =>
       println(
-        "hint: the key " + h + " presented does not match the pinned one. Treat this " +
+        "hint: the key " +
+        h +
+        " presented does not match the pinned one. Treat this " +
         "as a man in the middle until you have checked otherwise; kh_tofu is the " +
         "way to accept the new key and stop asking.",
       )
     @wtlive.HostkeyUnknown(h) =>
       println(
-        "hint: " + h + " has no key pinned at all. Add one, or pass kh_tofu to " +
+        "hint: " +
+        h +
+        " has no key pinned at all. Add one, or pass kh_tofu to " +
         "accept and write back the key you are being shown now.",
       )
     _ => ()
   }
 }
 
+///|
 fn print_auth_rejection(e : @wtlive.WtAuthError) -> Unit {
   match e {
     @wtlive.AuthRejected(r, sb, sg) => {
@@ -371,6 +416,7 @@ fn auth_error_name(e : @wtlive.WtAuthError) -> String {
 
 ///|
 /// tracks asyncness statically: a sync `fn main` may not touch the transport.
+
 ///|
 /// 原始字节打进标记块,和 cmd/ssh_live 同一套标记,好让两条路径的输出能直接
 /// 逐行对比。验证脚本只读上面那几行数字。
@@ -387,6 +433,7 @@ fn wt_dump_prefix(b : FixedArray[Byte]) -> String {
   sb.to_string()
 }
 
+///|
 fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   if b.length() == 0 {
     return
@@ -394,7 +441,7 @@ fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   let n = if b.length() > 512 { 512 } else { b.length() }
   let sb = StringBuilder()
   for i = 0; i < n; i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   println("--- raw ---")
   println(sb.to_string())
@@ -404,6 +451,7 @@ fn wt_print_bytes(b : FixedArray[Byte]) -> Unit {
   println("--- end raw ---")
 }
 
+///|
 fn wt_yn(b : Bool) -> String {
   if b {
     "true"
@@ -412,7 +460,8 @@ fn wt_yn(b : Bool) -> String {
   }
 }
 
-fn cfg_int(name : String, fallback : Int) -> Int {
+///|
+fn cfg_int(name : String, fallback : Int32) -> Int32 {
   let s = cfg(name)
   if s == "" {
     return fallback
@@ -433,8 +482,9 @@ fn cfg_int(name : String, fallback : Int) -> Int {
   }
 }
 
-///| `cfg("resize")` 形如 "132x43";没给或格式不对就返回 None
-fn cfg_resize() -> (Int, Int)? {
+///|
+/// `cfg("resize")` 形如 "132x43";没给或格式不对就返回 None
+fn cfg_resize() -> (Int32, Int32)? {
   let s = cfg("resize")
   if s == "" {
     return None
@@ -451,12 +501,10 @@ fn cfg_resize() -> (Int, Int)? {
         } else {
           second = second * 10 + (d - 48)
         }
+      } else if first < 0 {
+        first = d - 48
       } else {
-        if first < 0 {
-          first = d - 48
-        } else {
-          first = first * 10 + (d - 48)
-        }
+        first = first * 10 + (d - 48)
       }
     } else if d == 120 || d == 88 {
       if seen_x || first <= 0 {
@@ -524,19 +572,21 @@ fn cfg_envs() -> Array[@sshclient.EnvVar] {
   out
 }
 
-///| 取 `s[from, to)`
-fn cfg_slice(s : String, from : Int, to : Int) -> String {
+///|
+/// 取 `s[from, to)`
+fn cfg_slice(s : String, from : Int32, to : Int32) -> String {
   let sb = StringBuilder()
   let mut i = from
   while i < to {
-    sb.write_char(Int::unsafe_to_char(s[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(s[i].to_int()))
     i = i + 1
   }
   sb.to_string()
 }
 
-///| 第一个 `=` 的下标;没有就返回 -1
-fn cfg_index_of_eq(s : String) -> Int {
+///|
+/// 第一个 `=` 的下标;没有就返回 -1
+fn cfg_index_of_eq(s : String) -> Int32 {
   for i = 0; i < s.length(); i = i + 1 {
     if s[i].to_int() == 61 {
       return i
@@ -545,6 +595,7 @@ fn cfg_index_of_eq(s : String) -> Int {
   -1
 }
 
+///|
 fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
   match e {
     NoSessionState => "NoSessionState"
@@ -567,6 +618,7 @@ fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
 /// 输出字段与 `cmd/ssh_live` 的 SFTP 模式**逐字相同**,验证脚本因此可以直接把
 /// 两条输出按行对比——这才是「协议只有一份实现」的可检验形式:如果这里另写一套
 /// 打印逻辑,两份输出就会在措辞上分叉,而分叉的恰好是**断言**本身。
+
 ///|
 /// 与 `cmd/ssh_live` 的 `payload_of` 逐行相同的规则。
 ///
@@ -574,7 +626,7 @@ fn wt_exec_error_name(e : @wtlive.WtExecError) -> String {
 /// 规则抄一遍的风险由门禁消掉——两条路径写出的文件由同一个 Python 规则算出
 /// SHA-256 再对比,一旦有一侧算错,哈希立刻不等。所以这里宁可重复三行算术,
 /// 也不要引入一个「共用的生成器」再给每个后端多加一条依赖。
-fn wt_payload_of(n : Int) -> FixedArray[Byte] {
+fn wt_payload_of(n : Int32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     out[i] = ((i * 31 + 7) % 256).to_byte()
@@ -582,6 +634,7 @@ fn wt_payload_of(n : Int) -> FixedArray[Byte] {
   out
 }
 
+///|
 async fn wt_sftp_fault_run(url : String) -> Unit {
   let name = cfg("sftp_fault")
   if name == "" {
@@ -645,6 +698,7 @@ async fn wt_sftp_fault_run(url : String) -> Unit {
   wt_finish(true, "done")
 }
 
+///|
 async fn wt_sftp_run(url : String) -> Unit {
   let user = cfg("user")
   let uname = if user == "" { "hp" } else { user }
@@ -692,9 +746,7 @@ async fn wt_sftp_run(url : String) -> Unit {
     ops.push(@sftp.SftpOp::RemoveDir(rmd))
   }
   if missing {
-    ops.push(@sftp.SftpOp::Stat(
-      ".loop39/definitely-not-here-" + "0f3a91c7",
-    ))
+    ops.push(@sftp.SftpOp::Stat(".loop39/definitely-not-here-" + "0f3a91c7"))
   }
   let conn = @wt.WtConn::connect(url) catch {
     _ => {
@@ -736,7 +788,8 @@ async fn wt_sftp_run(url : String) -> Unit {
   wt_finish(true, "done")
 }
 
-fn wt_print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
+///|
+fn wt_print_sftp_op(i : Int32, op : @sftp.SftpOpResult) -> Unit {
   let tag = "op" + i.to_string()
   match op {
     @sftp.SftpOpResult::RealpathOk(p) => {
@@ -756,9 +809,14 @@ fn wt_print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
       println(tag + "_count: " + entries.length().to_string())
       for j = 0; j < entries.length(); j = j + 1 {
         println(
-          tag + "_entry" + j.to_string() + ": " +
-          wt_dump_prefix(@sftp.sftp_ascii(entries[j].0)) + " " +
-          entries[j].1.to_string() + " " +
+          tag +
+          "_entry" +
+          j.to_string() +
+          ": " +
+          wt_dump_prefix(@sftp.sftp_ascii(entries[j].0)) +
+          " " +
+          entries[j].1.to_string() +
+          " " +
           (if entries[j].2 { "dir" } else { "file" }),
         )
       }
@@ -773,9 +831,7 @@ fn wt_print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
       println(tag + ": WROTE")
       println(tag + "_bytes: " + n.to_string())
     }
-    @sftp.SftpOpResult::Changed => {
-      println(tag + ": CHANGED")
-    }
+    @sftp.SftpOpResult::Changed => println(tag + ": CHANGED")
     @sftp.SftpOpResult::Failed(code, msg) => {
       println(tag + ": FAILED")
       println(tag + "_code: " + code.to_string())
@@ -784,13 +840,15 @@ fn wt_print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
   }
 }
 
-fn wt_opt_int(v : Int?) -> String {
+///|
+fn wt_opt_int(v : Int32?) -> String {
   match v {
     None => "-"
     Some(x) => x.to_string()
   }
 }
 
+///|
 fn wt_opt_u64(v : UInt64?) -> String {
   match v {
     None => "-"
@@ -798,6 +856,7 @@ fn wt_opt_u64(v : UInt64?) -> String {
   }
 }
 
+///|
 fn wt_sftp_error_name(e : @wtlive.WtSftpError) -> String {
   match e {
     AuthFailed(a) => "AUTH_FAILED " + auth_error_name(a)
@@ -808,6 +867,7 @@ fn wt_sftp_error_name(e : @wtlive.WtSftpError) -> String {
   }
 }
 
+///|
 async fn main {
   // Loop #52: forget a pin and stop, without connecting. This exists because a
   // store you cannot clear is a store you cannot recover from when a key really
@@ -850,9 +910,13 @@ async fn main {
   }
   // Loop #39/40: SFTP read and write side.  Checked after `shell`, which keeps
   // the earlier dispatch order intact.
-  if cfg("sftp") != "" || cfg("sftp_read") != "" || cfg("sftp_missing") != "" ||
-    cfg("sftp_write") != "" || cfg("sftp_mkdir") != "" ||
-    cfg("sftp_remove") != "" || cfg("sftp_rmdir") != "" ||
+  if cfg("sftp") != "" ||
+    cfg("sftp_read") != "" ||
+    cfg("sftp_missing") != "" ||
+    cfg("sftp_write") != "" ||
+    cfg("sftp_mkdir") != "" ||
+    cfg("sftp_remove") != "" ||
+    cfg("sftp_rmdir") != "" ||
     cfg("sftp_rename_from") != "" {
     wt_sftp_run(url)
     return
@@ -900,9 +964,13 @@ async fn main {
         println("pty_granted: " + wt_yn(r.pty_granted))
         println("resize_sent: " + wt_yn(r.resize_sent))
         println("stdout_len: " + r.stdout.length().to_string())
-        println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+        println(
+          "stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)),
+        )
         println("stderr_len: " + r.stderr.length().to_string())
-        println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+        println(
+          "stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)),
+        )
         println("exit_status: " + r.exit_status.to_string())
         match r.exit_signal {
           None => println("exit_signal: none")
@@ -971,9 +1039,13 @@ async fn main {
       @wtlive.Done(r) => {
         println("result: EXEC_DONE")
         println("stdout_len: " + r.stdout.length().to_string())
-        println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+        println(
+          "stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)),
+        )
         println("stderr_len: " + r.stderr.length().to_string())
-        println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+        println(
+          "stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)),
+        )
         println("exit_status: " + r.exit_status.to_string())
         println("remote_id: " + r.remote_id.to_string())
         println("adjusts_sent: " + r.adjusts_sent.to_string())
@@ -1043,8 +1115,12 @@ async fn main {
         println("signed_blob: " + r.signed_blob_hex)
         println("sig_blob: " + r.sig_blob_hex)
         println("request: " + r.request_hex)
-        println("handshake_sent_bytes: " + r.session.handshake.sent_bytes.to_string())
-        println("handshake_recv_bytes: " + r.session.handshake.recv_bytes.to_string())
+        println(
+          "handshake_sent_bytes: " + r.session.handshake.sent_bytes.to_string(),
+        )
+        println(
+          "handshake_recv_bytes: " + r.session.handshake.recv_bytes.to_string(),
+        )
         println("total_sent_bytes: " + r.session.sent_bytes.to_string())
         println("total_recv_bytes: " + r.session.recv_bytes.to_string())
       }
@@ -1100,7 +1176,7 @@ async fn main {
   println("=== Loop #32 SSH transport handshake in a browser Worker ===")
   println("transport_url: " + url)
   let conn = @wt.WtConn::connect(url) catch {
-    e => {
+    _ => {
       println("result: FAILED")
       println("error: ConnectFailed")
       wt_finish(false, "connect failed")

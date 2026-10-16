@@ -20,7 +20,13 @@
 
 ///|
 /// 对 4 个指定位置的 UInt 应用 quarterround 并写回
-fn apply_qr(arr : FixedArray[UInt], i : Int, j : Int, k : Int, l : Int) -> Unit {
+fn apply_qr(
+  arr : FixedArray[UInt32],
+  i : Int32,
+  j : Int32,
+  k : Int32,
+  l : Int32,
+) -> Unit {
   let (a, b, c, d) = quarterround(arr[i], arr[j], arr[k], arr[l])
   arr[i] = a
   arr[j] = b
@@ -36,13 +42,13 @@ fn apply_qr(arr : FixedArray[UInt], i : Int, j : Int, k : Int, l : Int) -> Unit 
 
 ///|
 /// 输出:新分配的 FixedArray[UInt] of length 16,keystream block
-pub fn chacha_block(state : FixedArray[UInt]) -> FixedArray[UInt] {
+pub fn chacha_block(state : FixedArray[UInt32]) -> FixedArray[UInt32] {
   // 防御性检查
   if state.length() != 16 {
     abort("chacha_block: state length must be 16")
   }
   // 拷贝 state 到 working(我们不能直接修改原 state)
-  let working : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let working : FixedArray[UInt32] = FixedArray::make(16, 0U)
   for i = 0; i < 16; i = i + 1 {
     working[i] = state[i]
   }

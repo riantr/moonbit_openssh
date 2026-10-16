@@ -68,17 +68,26 @@ KNOWN_ACCEPTED = {
         "so no source line references the package and the unused-import "
         "analysis finds nothing. Loop #66 deleted the line and measured the "
         "result: 8 hard errors, one per `async test` block, reproducing the "
-        "exact message the package comment predicted."
+        "exact message the package comment predicted.\n"
+        "NOT the same as `src/wtlive`, which Loop #67 measured separately: it "
+        "has `async fn` but no `async test`, and removing the import there "
+        "leaves `moon check --target js` and `moon build cmd/wt_ssh --target "
+        "js` both green. Same warning, opposite verdict -- which is why the "
+        "table is per-site evidence rather than a per-package rule."
     ),
-    ("cmd/probe_async_wall/main.mbt", "33"): (
-        "alert_unimplemented: `extern \"js\"` returning `@js_async.Promise`. "
-        "MoonBit declares the JS Promise bridge as an alert type because it has "
-        "no static signature. This is Loop #64's probe of the synchronous wall "
-        "-- its entire purpose is to await a JS promise, so there is no "
-        "non-alert alternative."
+    ("cmd/proton_gui/main.mbt", "101"): (
+        "unused_async: `CommandRegistrar::bind` declares its handler type as "
+        "`async fn`, so a handler is async whether or not its body awaits. "
+        "`main.mbt:69` says so in the source: 'Every handler is `async` because "
+        "`CommandRegistrar::bind` says ... dropping it would leave a handler "
+        "whose *declared* type no longer says' what it is. The warning is about "
+        "the body, the requirement is about the type."
     ),
-    ("cmd/probe_async_wall/main.mbt", "55"): (
-        "alert_unimplemented: same `Promise` bridge, on the awaiting side."
+    ("cmd/proton_gui/main.mbt", "114"): (
+        "unused_async: same CommandRegistrar::bind signature requirement."
+    ),
+    ("cmd/proton_gui/main.mbt", "120"): (
+        "unused_async: same CommandRegistrar::bind signature requirement."
     ),
 }
 
@@ -103,10 +112,28 @@ def collect_one(path, target=None):
 
 
 def _is_hard_error(doc):
+    """True for a diagnostic that is a build error rather than a warning.
+
+    `level` cannot be used: under `--deny-warn` the toolchain reports warnings
+    with `"level": "error"` as well. Nor can a prefix test on the message --
+    Loop #67 found that `moon check cmd/wt_ssh --target js` reports
+
+        The type @openssh/openssh_moonbit/src/wtlive.WtAuthReport has no field
+        auth_method.
+
+    with no "Error" prefix at all, and an earlier version of this function
+    required one. It therefore called a package that does not compile "clean",
+    which is the single worst thing this file can do: the Loop #66 fixpoint was
+    measured with that bug in place, so "3 remaining warnings" was a statement
+    about packages that happened to build.
+
+    The discriminator is the message shape. Every compiler warning carries
+    `Warning (<kind>):`; nothing else does.
+    """
     msg = doc.get("message", "")
-    if "Warning (" in msg:
+    if not msg:
         return False
-    return msg.startswith("Error")
+    return not KIND_RE.search(msg)
 
 
 def _sites(docs, kind):
@@ -152,14 +179,16 @@ def unused_package_all_targets(path):
     `src/khfile`'s `moonbitlang/async`, whose absence produces eight hard
     errors, is correctly kept.
 
-    Returns None when any target failed to build, since a target that did not
-    compile cannot contribute evidence either way.
+    Returns None when no target built, since a package that does not compile
+    anywhere cannot contribute evidence either way. Targets the package does
+    not declare are skipped rather than treated as clean -- see
+    `evidence_targets`, which explains why silence is not evidence.
     """
     per_target = []
-    for t in TARGETS:
+    for t in evidence_targets(path):
         docs, ok = collect_one(path, target=t)
         if not ok:
-            return None
+            continue
         per_target.append(_sites(docs, "unused_package"))
     common = set(per_target[0])
     for s in per_target[1:]:
@@ -167,12 +196,131 @@ def unused_package_all_targets(path):
     return common
 
 
+_TARGET_NAMES_RE = re.compile(r"\"([a-z][a-z0-9-]*)\"")
+
+
+def _targets_in(text, key):
+    """Target names listed in `key: { ... }` or `key: "+a, +b"`.
+
+    The split is line-anchored because `targets:` is a substring of
+    `supported_targets:`, and splitting on the bare key would read the wrong
+    option on any package that carries both.
+    """
+    m = re.search(r"(?m)^\s*%s\s*:" % re.escape(key), text)
+    if not m:
+        return None
+    tail = text[m.end():]
+    names = set()
+    # `targets: { "file.mbt": [ "js", "wasm" ] }` -- collect every quoted name
+    # inside every bracket. File names have a dot and a target name never does,
+    # so the character class separates them without a special case.
+    for arr in re.finditer(r"\[\s*([^\]]*)\]", tail):
+        for q in _TARGET_NAMES_RE.finditer(arr.group(1)):
+            names.add(q.group(1))
+    # `supported_targets: "+native"` -- the names carry a leading plus.
+    if not names:
+        for q in re.finditer(r"\+\s*\"?([a-z][a-z0-9-]*)\"?", tail.split("\n", 1)[0]):
+            names.add(q.group(1))
+    return names or None
+
+
+def declared_targets(pkg):
+    """Targets from the per-file `targets:` option, or None.
+
+    This matters more than it looks. Loop #67 measured the case: `src/wtlive`
+    gates both of its files to js, so on native it builds with **zero active
+    files** and reports nothing at all. Intersecting `unused_package` across all
+    four targets therefore intersects with an empty set on three of them, and
+    the intersection is empty -- so a genuinely stray import in `src/wtlive` was
+    classified as a false positive and filtered out of the report. The gate's
+    own mutation M9 confirmed it: the tree carried the defect and the gate
+    passed.
+
+    **A target where a package has no files is silence, not evidence.** Only
+    targets the package declares are evidence.
+    """
+    p = os.path.join(ROOT, pkg, "moon.pkg")
+    if not os.path.exists(p):
+        return None
+    try:
+        with io.open(p, encoding="utf-8") as fh:
+            return _targets_in(fh.read(), "targets")
+    except OSError:
+        return None
+
+
+def supported_targets(pkg):
+    """Targets from `supported_targets: "+native"`, or None.
+
+    `cmd/proton_gui` is the case that made this necessary. It is native-only,
+    and bare `moon check` -- which has **no default target equal to native**,
+    measured, not assumed -- reports nothing for it at all. A collector that
+    consulted the default would have declared the package clean and lost its
+    three `unused_async` warnings silently.
+    """
+    p = os.path.join(ROOT, pkg, "moon.pkg")
+    if not os.path.exists(p):
+        return None
+    try:
+        with io.open(p, encoding="utf-8") as fh:
+            return _targets_in(fh.read(), "supported_targets")
+    except OSError:
+        return None
+
+
+def is_target_gated(pkg):
+    """True when the package's moon.pkg narrows the targets it supports.
+
+    Such a package is not supposed to build everywhere: `cmd/wt_probe` declares
+    `pkgtype(kind: "executable")` with `targets: { "main.mbt": ["js"] }`, so a
+    default-target check can fail with [4067] "Missing main function" on a
+    package that is perfectly correct. Treating that as "the package is broken"
+    is the same class of mistake as judging an import dead on one target -- the
+    Loop #66 lesson, one level up.
+    """
+    return declared_targets(pkg) is not None or supported_targets(pkg) is not None
+
+
+def evidence_targets(pkg):
+    """The targets whose diagnostics count as evidence for this package.
+
+    Declared ones if the package declares any; otherwise all four, because bare
+    `moon check` does not default to native and a package that only builds on
+    one target would otherwise be reported as clean.
+    """
+    d = declared_targets(pkg) or supported_targets(pkg)
+    if not d:
+        return TARGETS
+    ordered = [t for t in TARGETS if t in d]
+    return tuple(ordered) or TARGETS
+
+
+def collect_package(pkg):
+    """Check one package on the targets it can actually build for.
+
+    Returns (diagnostics, ok). `ok` is True when the package built on at least
+    one target. Diagnostics are gathered only from targets that built, because a
+    target that failed produces cascade noise -- `cmd/wt_ssh` once reported a
+    wall of `test_unqualified_package` purely because its `async test` expansion
+    had failed on a missing import.
+    """
+    targets = evidence_targets(pkg)
+    docs = []
+    built_any = False
+    for t in targets:
+        got, ok = collect_one(pkg, target=t)
+        if ok:
+            built_any = True
+            docs.extend(got)
+    return docs, built_any
+
+
 def collect():
     """Return (all diagnostics, {package: ok})."""
     docs = []
     status = {}
     for pkg in packages():
-        got, ok = collect_one(pkg)
+        got, ok = collect_package(pkg)
         docs.extend(got)
         status[pkg] = ok
     return docs, status

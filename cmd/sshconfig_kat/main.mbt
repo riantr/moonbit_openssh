@@ -1,4 +1,5 @@
-///| Loop #57: resolve ssh_config and print what the rules resolve to.
+///|
+/// Loop #57: resolve ssh_config and print what the rules resolve to.
 ///
 /// The comparison authority is OpenSSH's own `ssh -G`. Everything the resolver
 /// does here was checked against it first; see resolve.mbt for what was verified
@@ -38,7 +39,10 @@ async fn main {
 }
 
 ///|
-fn join_values(opts : Array[@sshconfig.SshConfigOption], keyword : String) -> String {
+fn join_values(
+  opts : Array[@sshconfig.SshConfigOption],
+  keyword : String,
+) -> String {
   let mut out = ""
   let mut first = true
   let mut i = 0
@@ -74,13 +78,20 @@ fn lower(s : String) -> String {
   let mut i = 0
   while i < s.length() {
     let c = s[i].to_int()
-    b.write_char(if c >= 65 && c <= 90 { (c + 32).unsafe_to_char() } else { s[i].unsafe_to_char() })
+    b.write_char(
+      if c >= 65 && c <= 90 {
+        (c + 32).unsafe_to_char()
+      } else {
+        s[i].unsafe_to_char()
+      },
+    )
     i = i + 1
   }
   b.to_string()
 }
 
-///| `fixture host` per line; `#` comments and blanks skipped.
+///|
+/// `fixture host` per line; `#` comments and blanks skipped.
 fn parse_cases(text : String) -> Array[(String, String)] {
   let out : Array[(String, String)] = []
   let lines = split_lines(text)
@@ -119,10 +130,11 @@ fn split_ws(s : String) -> Array[String] {
   let mut start = -1
   let mut i = 0
   while i <= s.length() {
-    let is_space = i == s.length() || {
-      let c = at(s, i)
-      c == 32 || c == 9 || c == 13
-    }
+    let is_space = i == s.length() ||
+      ({
+        let c = at(s, i)
+        c == 32 || c == 9 || c == 13
+      })
     if is_space {
       if start >= 0 {
         out.push(slice(s, start, i))
@@ -137,12 +149,16 @@ fn split_ws(s : String) -> Array[String] {
 }
 
 ///|
-fn at(s : String, i : Int) -> Int {
-  if i >= 0 && i < s.length() { s[i].to_int() } else { 0 }
+fn at(s : String, i : Int32) -> Int32 {
+  if i >= 0 && i < s.length() {
+    s[i].to_int()
+  } else {
+    0
+  }
 }
 
 ///|
-fn slice(s : String, from : Int, to : Int) -> String {
+fn slice(s : String, from : Int32, to : Int32) -> String {
   let b = StringBuilder()
   let mut i = from
   let hi = if to > s.length() { s.length() } else { to }
@@ -154,19 +170,25 @@ fn slice(s : String, from : Int, to : Int) -> String {
 }
 
 ///|
-fn is_space(c : Int) -> Bool { c == 32 || c == 9 || c == 13 }
+fn is_space(c : Int32) -> Bool {
+  c == 32 || c == 9 || c == 13
+}
 
 ///|
 fn trim(s : String) -> String {
   let mut a = 0
   let mut b = s.length()
-  while a < b && is_space(at(s, a)) { a = a + 1 }
-  while b > a && is_space(at(s, b - 1)) { b = b - 1 }
+  while a < b && is_space(at(s, a)) {
+    a = a + 1
+  }
+  while b > a && is_space(at(s, b - 1)) {
+    b = b - 1
+  }
   slice(s, a, b)
 }
 
 ///|
 async fn read_all(path : String) -> String {
-  let data = try { @fs.read_file(path) } catch { _ => abort("cannot read " + path) }
+  let data = @fs.read_file(path) catch { _ => abort("cannot read " + path) }
   data.text()
 }

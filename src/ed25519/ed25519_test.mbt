@@ -24,14 +24,14 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 ///|
 /// 解析两个 hex char 为 1 byte
 fn parse_byte(hi : UInt16, lo : UInt16) -> Byte {
-  let h : Int = hex_digit(hi)
-  let l : Int = hex_digit(lo)
+  let h : Int32 = hex_digit(hi)
+  let l : Int32 = hex_digit(lo)
   ((h * 16 + l).reinterpret_as_uint() & 0xFFU).to_byte()
 }
 
 ///|
-fn hex_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hex_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -64,7 +64,7 @@ test "rfc8032_test1_empty" {
   let msg : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let (pk, sk) = @ed25519.keypair_from_seed(seed)
   // check pk matches
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if pk[i] != expected_pk[i] {
       diff_count = diff_count + 1
@@ -99,7 +99,7 @@ test "rfc8032_test2_1byte" {
   )
   let msg = hex_to_bytes("72")
   let (pk, sk) = @ed25519.keypair_from_seed(seed)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if pk[i] != expected_pk[i] {
       diff_count = diff_count + 1
@@ -132,7 +132,7 @@ test "rfc8032_test3_2byte" {
   )
   let msg = hex_to_bytes("af82")
   let (pk, sk) = @ed25519.keypair_from_seed(seed)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if pk[i] != expected_pk[i] {
       diff_count = diff_count + 1
@@ -159,7 +159,7 @@ test "deterministic" {
   let (_pk, sk) = @ed25519.keypair_from_seed(seed)
   let sig1 = @ed25519.sign(msg, sk)
   let sig2 = @ed25519.sign(msg, sk)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 64; i = i + 1 {
     if sig1[i] != sig2[i] {
       diff = diff + 1
@@ -296,7 +296,7 @@ test "sk_format" {
   )
   let (pk, sk) = @ed25519.keypair_from_seed(seed)
   // sk[0..32] = seed
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if sk[i] != seed[i] {
       diff = diff + 1

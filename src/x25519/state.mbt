@@ -4,15 +4,15 @@
 
 ///|
 /// Field element 大小(byte 数)
-pub let fe_len : Int = 32
+pub let fe_len : Int32 = 32
 
 ///|
 /// Group element 大小(byte 数,X25519 输出)
-pub let ge_len : Int = 32
+pub let ge_len : Int32 = 32
 
 ///|
 /// Scalar 大小(byte 数)
-pub let scalar_len : Int = 32
+pub let scalar_len : Int32 = 32
 
 ///| 2^255 - 19 拆为 32 byte 小端表示(minusp = 2*p,用于 sub 和 freeze)
 
@@ -48,7 +48,7 @@ pub let scalar_len : Int = 32
 
 ///|
 /// OK minusp = [19, 0,..., 0, 128] 是正确的
-pub let minusp : FixedArray[UInt] = [
+pub let minusp : FixedArray[UInt32] = [
   19U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
   0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 128U,
 ]

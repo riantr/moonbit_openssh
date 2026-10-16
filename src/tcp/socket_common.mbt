@@ -19,7 +19,7 @@ pub struct TcpConn {
 
 ///|
 /// Open a TCP connection. Returns None if the connect fails.
-pub fn TcpConn::connect(host : String, port : Int) -> TcpConn? {
+pub fn TcpConn::connect(host : String, port : Int32) -> TcpConn? {
   let hb = Bytes::from_array(ascii_bytes(host))
   match mb_tcp_connect(hb, host.length(), port) {
     h if h < 0L => None
@@ -70,7 +70,7 @@ pub fn TcpConn::send(self : TcpConn, data : FixedArray[Byte]) -> Bool {
 ///   bytes C received would be written into a temporary that is then
 ///   discarded -- which shows up as a client that connects and then silently
 ///   reads nothing but zeros.
-pub fn TcpConn::recv_some(self : TcpConn, n : Int) -> FixedArray[Byte] {
+pub fn TcpConn::recv_some(self : TcpConn, n : Int32) -> FixedArray[Byte] {
   if self.closed || n <= 0 {
     return FixedArray::make(0, b'\x00')
   }
@@ -87,7 +87,7 @@ pub fn TcpConn::recv_some(self : TcpConn, n : Int) -> FixedArray[Byte] {
 ///|
 /// Read exactly `n` bytes. Returns None on EOF or error before that point,
 /// which is how a truncated packet is distinguished from a short read.
-pub fn TcpConn::read_exact(self : TcpConn, n : Int) -> FixedArray[Byte]? {
+pub fn TcpConn::read_exact(self : TcpConn, n : Int32) -> FixedArray[Byte]? {
   let out : FixedArray[Byte] = FixedArray::make(
     if n < 0 {
       0

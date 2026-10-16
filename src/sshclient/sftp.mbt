@@ -21,7 +21,8 @@
 ///    Clamping mid-packet is fine: the server reassembles, because SFTP framing
 ///    is a byte stream (`atomicio6`, sftp-client.c:185-204).
 
-///| 驱动层失败的原因
+///|
+/// 驱动层失败的原因
 pub(all) enum SftpError {
   /// 认证没过
   AuthFailed(AuthError)
@@ -35,22 +36,24 @@ pub(all) enum SftpError {
   Closed
 }
 
-///| 一次 SFTP 会话的结果
+///|
+/// 一次 SFTP 会话的结果
 pub(all) struct SftpReport {
   /// 服务端在 VERSION 里报的协议版本
-  version : Int
+  version : Int32
   /// VERSION 里跟着的扩展对数(sftp-server.c:716-727 会发十一条)
-  extensions : Int
+  extensions : Int32
   /// 每个操作一个结果,与传入的 ops 一一对应
   ops : Array[@sftp.SftpOpResult]
-  requests_sent : Int
-  replies_recv : Int
+  requests_sent : Int32
+  replies_recv : Int32
   /// 收到的 SFTP 字节数(重组后的完整包,不含长度前缀)
-  sftp_bytes_in : Int
-  total_sent_bytes : Int
-  total_recv_bytes : Int
+  sftp_bytes_in : Int32
+  total_sent_bytes : Int32
+  total_recv_bytes : Int32
 }
 
+///|
 pub(all) enum SftpOutcome {
   Done(SftpReport)
   Failed(SftpError)
@@ -91,11 +94,10 @@ pub fn[T : @transport.Transport] live_sftp_named(
     Failed(e) => return SftpOutcome::Failed(SftpError::AuthFailed(e))
   }
   let st = match state_opt {
-    None => {
+    None =>
       return SftpOutcome::Failed(
         SftpError::ChannelFailed(ExecError::NoSessionState),
       )
-    }
     Some(v) => v
   }
   match run_sftp_session(conn, st, subsystem, ops) {
@@ -129,24 +131,24 @@ fn[T : @transport.Transport] run_sftp_session(
     Ok(v) => v
   }
   if !opened.0 {
-    return Err(SftpError::ChannelFailed(ExecError::Malformed("no_open_confirmation")))
+    return Err(
+      SftpError::ChannelFailed(ExecError::Malformed("no_open_confirmation")),
+    )
   }
   st = opened.1
   chan = opened.2
 
   // 3) subsystem 请求。必须在确认之后 —— recipient 是对端给的号。
   match chan.subsystem_action(subsystem) {
-    None => {
+    None =>
       return Err(
         SftpError::ChannelFailed(ExecError::Malformed("subsystem_before_open")),
       )
-    }
-    Some(a) => {
+    Some(a) =>
       match send_chan(conn, st, a) {
         None => return Err(SftpError::ChannelFailed(ExecError::SendFailed))
         Some(s) => st = s
       }
-    }
   }
   // 4) **等 CHANNEL_SUCCESS**。want_reply=TRUE,而这个 FAILURE 是「没有这个
   //    子系统」的唯一信号。不等的话 INIT 会打进一个被拒绝的通道,而名字错了
@@ -217,12 +219,11 @@ fn[T : @transport.Transport] run_sftp_session(
   chan = c1
   match eof_a {
     None => ()
-    Some(a) => {
+    Some(a) =>
       match send_chan(conn, st, a) {
         None => ()
         Some(s) => st = s
       }
-    }
   }
   Ok({
     version: sess.version_of(),
@@ -264,15 +265,15 @@ fn[T : @transport.Transport] pump_once(
       }
       match err {
         None => ()
-        Some(chan_err) => {
+        Some(chan_err) =>
           return Err(SftpError::ChannelFailed(chan_error(chan_err)))
-        }
       }
       if t == 0x5e {
         match @channel.parse_data(pl) {
-          None => {
-            return Err(SftpError::ChannelFailed(ExecError::Malformed("channel_data")))
-          }
+          None =>
+            return Err(
+              SftpError::ChannelFailed(ExecError::Malformed("channel_data")),
+            )
           Some((_who, d)) => sess.feed(d)
         }
       }
@@ -292,7 +293,7 @@ fn[T : @transport.Transport] pump_until(
   st : SessionState,
   chan : @channel.ChanState,
   sess : @sftp.SftpSession,
-  mode : Int,
+  mode : Int32,
 ) -> Result[(Bool, SessionState, @channel.ChanState), SftpError] {
   let mut rounds = 0
   let mut cur = (st, chan)
@@ -310,7 +311,8 @@ fn[T : @transport.Transport] pump_until(
   Ok((false, cur.0, cur.1))
 }
 
-fn wait_pred(mode : Int, st : @channel.ChanState) -> Bool {
+///|
+fn wait_pred(mode : Int32, st : @channel.ChanState) -> Bool {
   if mode == 0 {
     st.open_done
   } else {
@@ -318,6 +320,7 @@ fn wait_pred(mode : Int, st : @channel.ChanState) -> Bool {
   }
 }
 
+///|
 fn[T : @transport.Transport] send_chan(
   conn : T,
   st : SessionState,
@@ -335,8 +338,12 @@ fn[T : @transport.Transport] send_chan(
   }
 }
 
+///|
 fn sftp_cat2(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
-  let out : FixedArray[Byte] = FixedArray::make(a.length() + b.length(), b'\x00')
+  let out : FixedArray[Byte] = FixedArray::make(
+    a.length() + b.length(),
+    b'\x00',
+  )
   for i = 0; i < a.length(); i = i + 1 {
     out[i] = a[i]
   }

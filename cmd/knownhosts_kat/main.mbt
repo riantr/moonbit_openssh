@@ -1,5 +1,6 @@
 ///| cmd/knownhosts_kat -- Loop #56: MoonBit's side of the known_hosts KAT.
 ///
+
 ///|
 ///
 /// The chain for this component is older than any gate:
@@ -27,6 +28,7 @@
 /// disagreement about what a pinning rule *means* would show up rather than a
 /// disagreement about arithmetic.
 ///
+
 ///|
 ///
 /// **The case table below is not uniform, and that is the point.** The vector
@@ -42,6 +44,7 @@
 /// recurring: any vector carrying an `_expected_status` must be claimed by some
 /// row, or this program aborts instead of quietly skipping it.
 ///
+
 ///|
 ///
 /// The verdict encoding is the vector file's, not one invented here:
@@ -69,9 +72,17 @@ async fn main {
   // the block loop rather than just the padding path.
   println(
     "V0c_sha1_long_hex = " +
-    hex(@knownhosts.sha1(b("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), 56)),
+    hex(
+      @knownhosts.sha1(
+        b("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        56,
+      ),
+    ),
   )
-  println("V0d_hmac_case1_hex = " + hex(@knownhosts.hmac_sha1(fill(20, b'\x0b'), b("Hi There"), 8)))
+  println(
+    "V0d_hmac_case1_hex = " +
+    hex(@knownhosts.hmac_sha1(fill(20, b'\x0b'), b("Hi There"), 8)),
+  )
   println(
     "V0e_hmac_case2_hex = " +
     hex(@knownhosts.hmac_sha1(b("Jefe"), b("what do ya want for nothing?"), 28)),
@@ -81,7 +92,13 @@ async fn main {
   // in it would otherwise only show as a mysterious "no match".
   println(
     "V4a_hmac_hex = " +
-    hex(@knownhosts.hmac_sha1(hx(kv_get(kv, "V4_salt_hex")), b(kv_get(kv, "V4_host")), kv_get(kv, "V4_host").length())),
+    hex(
+      @knownhosts.hmac_sha1(
+        hx(kv_get(kv, "V4_salt_hex")),
+        b(kv_get(kv, "V4_host")),
+        kv_get(kv, "V4_host").length(),
+      ),
+    ),
   )
   // ---- the pinning decisions
   for i = 0; i < cases.length(); i = i + 1 {
@@ -109,7 +126,9 @@ async fn main {
     // 不发 `V7_strict_got_status`：V7 本来就是 strict 案，`_strict` 那行是它自己的
     // 重复，只是前缀不同骗过了解析器。
     if !ends_with(id, "b") {
-      println(base + "_expected_status = " + kv_get(kv, base + "_expected_status"))
+      println(
+        base + "_expected_status = " + kv_get(kv, base + "_expected_status"),
+      )
     }
   }
   // ---- V8: markers, which is not a check_host_key verdict at all
@@ -119,7 +138,9 @@ async fn main {
   let v1_line = kv_get(kv, "V1_knownhosts_line")
   println("V8a_revoked_parsed = " + marker_parsed("@revoked " + v1_line))
   println("V8b_revoked_marker = " + marker_of("@revoked " + v1_line))
-  println("V8c_certauth_parsed = " + marker_parsed("@cert-authority " + v1_line))
+  println(
+    "V8c_certauth_parsed = " + marker_parsed("@cert-authority " + v1_line),
+  )
   println("V8d_certauth_marker = " + marker_of("@cert-authority " + v1_line))
   // C's harness checks empty entries inline (knownhosts_harness.c:673) against a
   // literal 2 rather than a vector key, so this row has no vector-file source
@@ -127,7 +148,14 @@ async fn main {
   // different test that happens to share the number.
   println(
     "E1_empty_entries_got_status = " +
-    status_code(@knownhosts.check_host_key([], "any.host", 0, hx(kv_get(kv, "V1_blob_hex")))),
+    status_code(
+      @knownhosts.check_host_key(
+        [],
+        "any.host",
+        0,
+        hx(kv_get(kv, "V1_blob_hex")),
+      ),
+    ),
   )
   println("ALL PASS")
 }
@@ -140,40 +168,89 @@ async fn main {
 /// `key:X` 从向量文件取，`lit:X` 是字面量。host 只有 V10b 是字面量——它就是
 /// C 那边 harness.c:698 那个 `check_host_key_v2(..., "foo.example.com", V10_PORT, ...)`。
 ///
+
 ///| 刻意**不用** `<id>_*` 拼键名。向量文件里 V2 没有自己的行（它复用 V1 的），
+
 ///| V3/V6/V7 用的公钥是 `V1_blob_hex` 而不是自己的 `V*_blob_hex`。按 id 拼会喂进
-///| 空条目表，然后被判成 `Unknown`——一个真判定，但不是这里要看的那个。
+
+///|
+/// 空条目表，然后被判成 `Unknown`——一个真判定，但不是这里要看的那个。
 let cases : Array[(String, String, String, String, String, Bool, String)] = [
   // harness.c:583-591  V1 single host match
-  ("V1", "key:V1_knownhosts_line", "key:V1_blob_hex", "key:V1_host", "lit:0", false, ""),
+  (
+    "V1", "key:V1_knownhosts_line", "key:V1_blob_hex", "key:V1_host", "lit:0", false,
+    "",
+  ),
   // harness.c:592-602  V2 wildcard host —— 复用 V1 的行和 blob
-  ("V2", "key:V1_knownhosts_line", "key:V1_blob_hex", "key:V2_host", "lit:0", false, ""),
+  (
+    "V2", "key:V1_knownhosts_line", "key:V1_blob_hex", "key:V2_host", "lit:0", false,
+    "",
+  ),
   // harness.c:603-612  V3 `!` 前缀不影响其它匹配
-  ("V3", "key:V3_knownhosts_line", "key:V1_blob_hex", "key:V3_host", "lit:0", false, ""),
+  (
+    "V3", "key:V3_knownhosts_line", "key:V1_blob_hex", "key:V3_host", "lit:0", false,
+    "",
+  ),
   // harness.c:613-623  V4 `|1|` HMAC-SHA1 哈希主机
-  ("V4", "key:V4_knownhosts_line", "key:V4_blob_hex", "key:V4_host", "lit:0", false, ""),
+  (
+    "V4", "key:V4_knownhosts_line", "key:V4_blob_hex", "key:V4_host", "lit:0", false,
+    "",
+  ),
   // harness.c:624-633  V5 命中主机但公钥不同
-  ("V5", "key:V5_knownhosts_line", "key:V5_presented_blob_hex", "key:V5_host", "lit:0", false, ""),
+  (
+    "V5", "key:V5_knownhosts_line", "key:V5_presented_blob_hex", "key:V5_host", "lit:0",
+    false, "",
+  ),
   // harness.c:634-643  V6 未知主机
-  ("V6", "key:V6_knownhosts_line", "key:V1_blob_hex", "key:V6_host", "lit:0", false, ""),
+  (
+    "V6", "key:V6_knownhosts_line", "key:V1_blob_hex", "key:V6_host", "lit:0", false,
+    "",
+  ),
   // harness.c:644-653  V7 strict：Unknown 升级成 Invalid
-  ("V7", "key:V7_knownhosts_line", "key:V1_blob_hex", "key:V7_host", "lit:0", true, ""),
+  (
+    "V7", "key:V7_knownhosts_line", "key:V1_blob_hex", "key:V7_host", "lit:0", true,
+    "",
+  ),
   // harness.c:677-687  V9 明文主机 + 默认端口
-  ("V9", "key:V9_knownhosts_line", "key:V9_presented_blob_hex", "key:V9_host", "key:V9_port", false, ""),
+  (
+    "V9", "key:V9_knownhosts_line", "key:V9_presented_blob_hex", "key:V9_host", "key:V9_port",
+    false, "",
+  ),
   // harness.c:688-700  V10 `[host]:port` 两种写法各来一次
-  ("V10a", "key:V10_knownhosts_line", "key:V10_presented_blob_hex", "key:V10_host", "lit:0", false, ""),
-  ("V10b", "key:V10_knownhosts_line", "key:V10_presented_blob_hex", "lit:foo.example.com", "key:V10_port", false, ""),
+  (
+    "V10a", "key:V10_knownhosts_line", "key:V10_presented_blob_hex", "key:V10_host",
+    "lit:0", false, "",
+  ),
+  (
+    "V10b", "key:V10_knownhosts_line", "key:V10_presented_blob_hex", "lit:foo.example.com",
+    "key:V10_port", false, "",
+  ),
   // harness.c:702-712  V11 端口不符
-  ("V11", "key:V11_knownhosts_line", "key:V11_presented_blob_hex", "key:V11_host", "key:V11_port", false, ""),
+  (
+    "V11", "key:V11_knownhosts_line", "key:V11_presented_blob_hex", "key:V11_host",
+    "key:V11_port", false, "",
+  ),
   // harness.c:713-723  V12 `@revoked` 命中
-  ("V12", "key:V12_knownhosts_line", "key:V12_presented_blob_hex", "key:V12_host", "key:V12_port", false, ""),
+  (
+    "V12", "key:V12_knownhosts_line", "key:V12_presented_blob_hex", "key:V12_host",
+    "key:V12_port", false, "",
+  ),
   // Loop #56 @cert-authority. C1: CA covers the host and there is no direct entry.
-  ("C1", "key:C1_knownhosts_line", "key:C1_presented_blob_hex", "key:C1_host", "key:C1_port", false, ""),
+  (
+    "C1", "key:C1_knownhosts_line", "key:C1_presented_blob_hex", "key:C1_host", "key:C1_port",
+    false, "",
+  ),
   // C2: a direct entry and a CA entry for the same host; the direct one speaks.
-  ("C2", "key:C2_knownhosts_line", "key:C2_presented_blob_hex", "key:C2_host", "key:C2_port", false, "key:C2_knownhosts_line_ca"),
+  (
+    "C2", "key:C2_knownhosts_line", "key:C2_presented_blob_hex", "key:C2_host", "key:C2_port",
+    false, "key:C2_knownhosts_line_ca",
+  ),
   // C3: presenting the CA entry's OWN key. This one carries the loop -- before
   // Loop #51 it came back Ok, i.e. fail-open.
-  ("C3", "key:C3_knownhosts_line", "key:C3_presented_blob_hex", "key:C3_host", "key:C3_port", false, ""),
+  (
+    "C3", "key:C3_knownhosts_line", "key:C3_presented_blob_hex", "key:C3_host", "key:C3_port",
+    false, "",
+  ),
 ]
 
 ///|
@@ -188,7 +265,11 @@ fn assert_full_coverage(kv : Array[String]) -> Unit {
     if ends_with(key, SUFFIX_STATUS) {
       let id = slice(key, 0, key.length() - SUFFIX_STATUS.length())
       if id != "V" && !claimed(id) {
-        abort("vector " + id + " has an _expected_status but no row in the case table")
+        abort(
+          "vector " +
+          id +
+          " has an _expected_status but no row in the case table",
+        )
       }
     }
     i = i + 2
@@ -248,7 +329,11 @@ fn status_code(s : @knownhosts.HostStatus) -> String {
 
 ///|
 fn marker_parsed(line : String) -> String {
-  if @knownhosts.parse_file(line + "\n").length() == 1 { "1" } else { "0" }
+  if @knownhosts.parse_file(line + "\n").length() == 1 {
+    "1"
+  } else {
+    "0"
+  }
 }
 
 ///|
@@ -311,7 +396,7 @@ fn kv_get(kv : Array[String], key : String) -> String {
 
 ///|
 /// 第一个 `=` 的下标
-fn index_of_eq(s : String) -> Int? {
+fn index_of_eq(s : String) -> Int32? {
   let mut i = 0
   while i < s.length() {
     if at(s, i) == 61 {
@@ -324,7 +409,7 @@ fn index_of_eq(s : String) -> Int? {
 
 ///|
 /// 字符码；越界返回 0（调用点只比较 ASCII，不会走到）
-fn at(s : String, i : Int) -> Int {
+fn at(s : String, i : Int32) -> Int32 {
   if i >= 0 && i < s.length() {
     s[i].to_int()
   } else {
@@ -364,19 +449,19 @@ fn ends_with(s : String, suffix : String) -> Bool {
 }
 
 ///|
-fn slice(s : String, from : Int, to : Int) -> String {
+fn slice(s : String, from : Int32, to : Int32) -> String {
   let b = StringBuilder()
   let mut i = from
   let hi = if to > s.length() { s.length() } else { to }
   while i < hi {
-    b.write_char(Int::unsafe_to_char(s[i].to_int()))
+    b.write_char(Int32::unsafe_to_char(s[i].to_int()))
     i = i + 1
   }
   b.to_string()
 }
 
 ///|
-fn is_space(c : Int) -> Bool {
+fn is_space(c : Int32) -> Bool {
   c == 32 || c == 9 || c == 13
 }
 
@@ -394,7 +479,7 @@ fn trim(s : String) -> String {
 }
 
 ///|
-fn parse_int(s : String) -> Int {
+fn parse_int(s : String) -> Int32 {
   let mut acc = 0
   let mut i = 0
   while i < s.length() {
@@ -420,7 +505,7 @@ fn b(s : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn fill(n : Int, v : Byte) -> FixedArray[Byte] {
+fn fill(n : Int32, v : Byte) -> FixedArray[Byte] {
   let arr : FixedArray[Byte] = FixedArray::make(n, v)
   let mut i = 0
   while i < n {
@@ -450,8 +535,8 @@ fn hex(a : FixedArray[Byte]) -> String {
   let b = StringBuilder()
   let mut i = 0
   while i < a.length() {
-    b.write_char(hexdigit(Int::unsafe_to_char(a[i].to_int() >> 4)))
-    b.write_char(hexdigit(Int::unsafe_to_char(a[i].to_int() & 15)))
+    b.write_char(hexdigit(Int32::unsafe_to_char(a[i].to_int() >> 4)))
+    b.write_char(hexdigit(Int32::unsafe_to_char(a[i].to_int() & 15)))
     i = i + 1
   }
   b.to_string()
@@ -460,11 +545,15 @@ fn hex(a : FixedArray[Byte]) -> String {
 ///|
 fn hexdigit(c : Char) -> Char {
   let n = c.to_int()
-  if n < 10 { Int::unsafe_to_char(48 + n) } else { Int::unsafe_to_char(87 + n) }
+  if n < 10 {
+    Int32::unsafe_to_char(48 + n)
+  } else {
+    Int32::unsafe_to_char(87 + n)
+  }
 }
 
 ///|
-fn hd(c : Int) -> Int {
+fn hd(c : Int32) -> Int32 {
   if c >= 48 && c <= 57 {
     c - 48
   } else if c >= 97 && c <= 102 {
@@ -475,7 +564,7 @@ fn hd(c : Int) -> Int {
 }
 
 ///|
-fn argv(i : Int) -> String {
+fn argv(i : Int32) -> String {
   let a = @env.args()
   if i < a.length() {
     a[i]

@@ -1,22 +1,35 @@
 ///| The MoonBit end of a man-in-the-middle SFTP session
+
 ///|
+
 ///| Package header for why this exists. The short version: Loops #41-M2 and
+
 ///| #43 drove ten malformed replies into `SftpSession` and into `ChanState`,
+
 ///| and neither can reach a transport adapter, because `run_sftp_session` is
+
 ///| private and starts from a post-authentication session state. So
+
 ///| `host/sftp_mitm.py` performs a real handshake and then misbehaves, and
+
 ///| this drives the real `live_sftp` against it.
+
 ///|
+
 ///| The claim under test is that **the SFTP layer cannot tell where the bytes
+
 ///| came from**. The expectations are the same vector table the other two
+
 ///| gates use, unchanged. A difference here would be in the transport, which
-///| is the one layer nothing else reaches.
+
+///|
+/// is the one layer nothing else reaches.
 
 // ---------------------------------------------------------------------------
 // hex
 // ---------------------------------------------------------------------------
 
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -27,6 +40,7 @@ fn hex_nibble(c : UInt16) -> Int {
   abort("bad hex digit")
 }
 
+///|
 fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -38,8 +52,10 @@ fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 const HEXCHARS : String = "0123456789abcdef"
 
+///|
 fn to_hex(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
@@ -56,13 +72,15 @@ fn to_hex(b : FixedArray[Byte]) -> String {
 // rendering, identical to cmd/sftp_test and cmd/sftp_fault
 // ---------------------------------------------------------------------------
 
-fn opt_int(v : Int?) -> String {
+///|
+fn opt_int(v : Int32?) -> String {
   match v {
     None => "-"
     Some(x) => x.to_string()
   }
 }
 
+///|
 fn opt_u64(v : UInt64?) -> String {
   match v {
     None => "-"
@@ -70,18 +88,25 @@ fn opt_u64(v : UInt64?) -> String {
   }
 }
 
+///|
 fn render_attrs(a : @sftp.SftpAttrs) -> String {
   let is_dir = match a.permissions {
     Some(p) => (p & 0xF000) == 0x4000
     None => false
   }
-  "size=" + opt_u64(a.size) +
-  ",uid=" + opt_int(a.uid) +
-  ",gid=" + opt_int(a.gid) +
-  ",perm=" + opt_int(a.permissions) +
-  ",isdir=" + (if is_dir { "1" } else { "0" })
+  "size=" +
+  opt_u64(a.size) +
+  ",uid=" +
+  opt_int(a.uid) +
+  ",gid=" +
+  opt_int(a.gid) +
+  ",perm=" +
+  opt_int(a.permissions) +
+  ",isdir=" +
+  (if is_dir { "1" } else { "0" })
 }
 
+///|
 fn msg_ascii(msg : String) -> FixedArray[Byte] {
   let out : Array[Byte] = []
   for i = 0; i < msg.length(); i = i + 1 {
@@ -94,6 +119,7 @@ fn msg_ascii(msg : String) -> FixedArray[Byte] {
   fa
 }
 
+///|
 fn render_result(r : @sftp.SftpOpResult) -> String {
   match r {
     RealpathOk(p) => "realpath=" + to_hex(@sftp.sftp_ascii(p))
@@ -123,6 +149,7 @@ fn render_result(r : @sftp.SftpOpResult) -> String {
   }
 }
 
+///|
 fn exec_error_name(e : @sshclient.ExecError) -> String {
   match e {
     NoSessionState => "NoSessionState"
@@ -135,9 +162,13 @@ fn exec_error_name(e : @sshclient.ExecError) -> String {
 }
 
 ///| The transport's own failure vocabulary, rendered. `Protocol(w)` is the one
+
 ///| that matters here: it is the session's `failure_reason` handed up through
+
 ///| the adapter, and it is how a malformed reply becomes a reportable outcome
-///| instead of a hang.
+
+///|
+/// instead of a hang.
 fn sftp_error_name(e : @sshclient.SftpError) -> String {
   match e {
     AuthFailed(a) => "AuthFailed(" + auth_error_name(a) + ")"
@@ -148,6 +179,7 @@ fn sftp_error_name(e : @sshclient.SftpError) -> String {
   }
 }
 
+///|
 fn auth_error_name(e : @sshclient.AuthError) -> String {
   match e {
     _ => "AuthError"
@@ -158,6 +190,7 @@ fn auth_error_name(e : @sshclient.AuthError) -> String {
 // one scenario over a real socket
 // ---------------------------------------------------------------------------
 
+///|
 fn ops_of(c : FaultCase) -> Array[@sftp.SftpOp] {
   let ops : Array[@sftp.SftpOp] = []
   for i = 0; i < c.ops.length(); i = i + 1 {
@@ -176,8 +209,11 @@ fn ops_of(c : FaultCase) -> Array[@sftp.SftpOp] {
 
 ///| A throwaway ECDSA private scalar.
 ///
+
 ///| The man in the middle accepts any public key -- see its module header --
-///| so this key exists only to get through the door. It is the same published
+
+///|
+/// so this key exists only to get through the door. It is the same published
 /// test key `cmd/ssh_live` uses, and **must never** be used anywhere else.
 fn test_auth_key() -> @bigint.BigNat {
   let bytes : FixedArray[Byte] = FixedArray::from_array([
@@ -189,10 +225,14 @@ fn test_auth_key() -> @bigint.BigNat {
 }
 
 ///| Run one scenario and print its verdict in the shape `host/verify_loop45.mjs`
+
 ///| parses. One scenario per process invocation, because each one needs its
+
 ///| own MITM listening on its own port -- and because a process that dies on
-///| a hang should take only that scenario with it.
-fn run_one(port : Int, c : FaultCase) -> Unit {
+
+///|
+/// a hang should take only that scenario with it.
+fn run_one(port : Int32, c : FaultCase) -> Unit {
   println("scenario: " + c.name)
   println("intent: " + c.intent)
   println("port: " + port.to_string())
@@ -239,6 +279,7 @@ fn run_one(port : Int, c : FaultCase) -> Unit {
   conn.close()
 }
 
+///|
 fn main {
   let argv = @env.args()
   // `moon run cmd/sftp_mitm -- a b` puts the user's arguments after the
@@ -261,6 +302,7 @@ fn main {
   run_one(port, find_case(args[1]))
 }
 
+///|
 fn find_case(name : String) -> FaultCase {
   for i = 0; i < fault_cases.length(); i = i + 1 {
     if fault_cases[i].name == name {
@@ -271,9 +313,12 @@ fn find_case(name : String) -> FaultCase {
 }
 
 ///| A bare decimal port, or `abort`. Deliberately not a general parser: the
+
 ///| standard library's integer parsing surface has moved between MoonBit
-///| releases, and this driver only ever takes five digits.
-fn parse_port(s : String) -> Int {
+
+///|
+/// releases, and this driver only ever takes five digits.
+fn parse_port(s : String) -> Int32 {
   let mut n = 0
   for i = 0; i < s.length(); i = i + 1 {
     let c = s[i].to_int()

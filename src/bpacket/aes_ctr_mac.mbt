@@ -32,13 +32,13 @@
 /// hmac-sha2-256 的 MAC 长度。
 ///
 /// mac.c:62 的 truncatebits = 0,所以是全长而非 16 字节截断。
-pub const HMAC_SHA256_LEN : Int = 32
+pub const HMAC_SHA256_LEN : Int32 = 32
 
 ///|
 /// aes128-ctr 的 block size,同时也是 IV / 计数器长度。
 ///
 /// cipher.c:93 第 2 列 block_size = 16;cipher_ivlen() 对 iv_len=0 回落到它。
-pub const AESCTR_BLOCK : Int = 16
+pub const AESCTR_BLOCK : Int32 = 16
 
 ///|
 /// 一个方向上的 aes128-ctr + hmac-sha2-256 状态。
@@ -107,7 +107,7 @@ fn ctr_increment(ctr : FixedArray[Byte]) -> Unit {
 
 ///|
 /// 把计数器向前推进 `nbytes` 个密文字节所对应的块数。
-fn AesCtrMacCtx::advance(self : AesCtrMacCtx, nbytes : Int) -> Unit {
+fn AesCtrMacCtx::advance(self : AesCtrMacCtx, nbytes : Int32) -> Unit {
   let blocks = (nbytes + AESCTR_BLOCK - 1) / AESCTR_BLOCK
   let mut i = 0
   while i < blocks {
@@ -141,7 +141,7 @@ pub fn AesCtrMacCtx::crypt(
 pub fn AesCtrMacCtx::peek_len(
   self : AesCtrMacCtx,
   ct_head : FixedArray[Byte],
-) -> UInt? {
+) -> UInt32? {
   if ct_head.length() < 4 {
     return None
   }
@@ -168,7 +168,7 @@ pub fn AesCtrMacCtx::peek_len(
 /// hmac-sha2-256 无 truncatebits,返回完整 32 字节。
 pub fn AesCtrMacCtx::mac(
   self : AesCtrMacCtx,
-  seqnr : UInt,
+  seqnr : UInt32,
   plaintext : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   let n = plaintext.length()
@@ -187,7 +187,7 @@ pub fn AesCtrMacCtx::mac(
 /// 时序差异可被用来逐字节爆破原像的地方,这里没有性能压力,不需要提前退出。
 pub fn AesCtrMacCtx::mac_ok(
   self : AesCtrMacCtx,
-  seqnr : UInt,
+  seqnr : UInt32,
   plaintext : FixedArray[Byte],
   received : FixedArray[Byte],
 ) -> Bool {

@@ -16,7 +16,8 @@
 /// 1. subsystem 是 want_reply=TRUE,必须等 CHANNEL_SUCCESS 再发 INIT;
 /// 2. 请求走 `ChanState::stdin_take`(Loop #37 已 KAT 的窗口夹取),不写第二份。
 
-///| 浏览器侧 SFTP 的失败原因。与 `src/sshclient` 的 `SftpError` 一一对应,
+///|
+/// 浏览器侧 SFTP 的失败原因。与 `src/sshclient` 的 `SftpError` 一一对应,
 /// 只是传输层那一个换成了 `WtExecError`。
 pub(all) enum WtSftpError {
   /// 认证没过
@@ -31,18 +32,20 @@ pub(all) enum WtSftpError {
   Closed
 }
 
-///| 一次浏览器侧 SFTP 会话的结果
+///|
+/// 一次浏览器侧 SFTP 会话的结果
 pub(all) struct WtSftpReport {
-  version : Int
-  extensions : Int
+  version : Int32
+  extensions : Int32
   ops : Array[@sftp.SftpOpResult]
-  requests_sent : Int
-  replies_recv : Int
-  sftp_bytes_in : Int
-  total_sent_bytes : Int
-  total_recv_bytes : Int
+  requests_sent : Int32
+  replies_recv : Int32
+  sftp_bytes_in : Int32
+  total_sent_bytes : Int32
+  total_recv_bytes : Int32
 }
 
+///|
 pub(all) enum WtSftpOutcome {
   Done(WtSftpReport)
   Failed(WtSftpError)
@@ -85,9 +88,7 @@ async fn wt_run_sftp_session(
 
   // 1) CHANNEL_OPEN
   match wt_sftp_send_chan(conn, st, chan.open_action()) {
-    None => {
-      return Err(WtSftpError::ChannelFailed(WtExecError::SendFailed))
-    }
+    None => return Err(WtSftpError::ChannelFailed(WtExecError::SendFailed))
     Some(s) => st = s
   }
   // 2) 等 OPEN_CONFIRMATION
@@ -105,17 +106,17 @@ async fn wt_run_sftp_session(
 
   // 3) subsystem 请求。必须在确认之后 —— recipient 是对端给的号。
   match chan.subsystem_action("sftp") {
-    None => {
+    None =>
       return Err(
-        WtSftpError::ChannelFailed(WtExecError::Malformed("subsystem_before_open")),
+        WtSftpError::ChannelFailed(
+          WtExecError::Malformed("subsystem_before_open"),
+        ),
       )
-    }
-    Some(a) => {
+    Some(a) =>
       match wt_sftp_send_chan(conn, st, a) {
         None => return Err(WtSftpError::ChannelFailed(WtExecError::SendFailed))
         Some(s) => st = s
       }
-    }
   }
   // 4) **等 CHANNEL_SUCCESS**。want_reply=TRUE,而这个 FAILURE 是「没有这个
   //    子系统」的唯一信号(session.c:1945-1948)。
@@ -153,9 +154,8 @@ async fn wt_run_sftp_session(
         }
         Some(a) => {
           match wt_sftp_send_chan(conn, st, a) {
-            None => {
+            None =>
               return Err(WtSftpError::ChannelFailed(WtExecError::SendFailed))
-            }
             Some(s) => st = s
           }
           rest = left
@@ -187,12 +187,11 @@ async fn wt_run_sftp_session(
   chan = c1
   match eof_a {
     None => ()
-    Some(a) => {
+    Some(a) =>
       match wt_sftp_send_chan(conn, st, a) {
         None => ()
         Some(s) => st = s
       }
-    }
   }
   Ok({
     version: sess.version_of(),
@@ -220,7 +219,8 @@ async fn wt_sftp_pump_once(
   sess.pump()
   match wt_recv_plain_packet(conn, st.counters, st.recv) {
     Closed => Err(WtSftpError::Closed)
-    BadPacket(why) => Err(WtSftpError::ChannelFailed(WtExecError::BadPacket(why)))
+    BadPacket(why) =>
+      Err(WtSftpError::ChannelFailed(WtExecError::BadPacket(why)))
     Packet(t, pl) => {
       let (chan2, actions, err) = @channel.chan_step(chan, t, pl)
       // WINDOW_ADJUST 等回包必须真的发出去,否则对端窗口耗尽后会停发,
@@ -228,27 +228,22 @@ async fn wt_sftp_pump_once(
       let mut st2 = st
       for i = 0; i < actions.length(); i = i + 1 {
         match wt_sftp_send_chan(conn, st2, actions[i]) {
-          None => {
+          None =>
             return Err(WtSftpError::ChannelFailed(WtExecError::SendFailed))
-          }
           Some(s) => st2 = s
         }
       }
       match err {
         None => ()
-        Some(chan_err) => {
-          return Err(
-            WtSftpError::ChannelFailed(wt_chan_error(chan_err)),
-          )
-        }
+        Some(chan_err) =>
+          return Err(WtSftpError::ChannelFailed(wt_chan_error(chan_err)))
       }
       if t == 0x5e {
         match @channel.parse_data(pl) {
-          None => {
+          None =>
             return Err(
               WtSftpError::ChannelFailed(WtExecError::Malformed("channel_data")),
             )
-          }
           Some((_who, d)) => sess.feed(d)
         }
       }
@@ -268,7 +263,7 @@ async fn wt_sftp_pump_until(
   st : WtSessionState,
   chan : @channel.ChanState,
   sess : @sftp.SftpSession,
-  mode : Int,
+  mode : Int32,
 ) -> Result[(Bool, WtSessionState, @channel.ChanState), WtSftpError] {
   let mut rounds = 0
   let mut cur = (st, chan)
@@ -286,7 +281,8 @@ async fn wt_sftp_pump_until(
   Ok((false, cur.0, cur.1))
 }
 
-fn wt_sftp_wait_pred(mode : Int, st : @channel.ChanState) -> Bool {
+///|
+fn wt_sftp_wait_pred(mode : Int32, st : @channel.ChanState) -> Bool {
   if mode == 0 {
     st.open_done
   } else {
@@ -294,6 +290,7 @@ fn wt_sftp_wait_pred(mode : Int, st : @channel.ChanState) -> Bool {
   }
 }
 
+///|
 async fn wt_sftp_send_chan(
   conn : @wt.WtConn,
   st : WtSessionState,
@@ -311,11 +308,9 @@ async fn wt_sftp_send_chan(
   }
 }
 
-///| `SftpSession::take_out` 可能吐出多帧,这里按字节拼起来再交给窗口夹取。
-fn wt_sftp_cat2(
-  a : FixedArray[Byte],
-  b : FixedArray[Byte],
-) -> FixedArray[Byte] {
+///|
+/// `SftpSession::take_out` 可能吐出多帧,这里按字节拼起来再交给窗口夹取。
+fn wt_sftp_cat2(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(
     a.length() + b.length(),
     b'\x00',

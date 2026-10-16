@@ -1,4 +1,5 @@
 ///| ssh_config 解析 (OpenSSH ssh_config(5) subset)
+
 ///|
 /// Loop #24 G2: 解析 ssh_config 行级
 ///   - 空行 / `#` comment 跳过
@@ -43,7 +44,7 @@ fn strip_comment(line : String) -> String {
 }
 
 ///|
-fn slice_to(s : String, from : Int, to : Int) -> String {
+fn slice_to(s : String, from : Int32, to : Int32) -> String {
   let sb = StringBuilder()
   let mut i = from
   while i < to && i < s.length() {
@@ -101,7 +102,9 @@ fn is_keyword_shaped(s : String) -> Bool {
   let mut i = 0
   while i < s.length() {
     let c = s[i].to_int()
-    let ok = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57)
+    let ok = (c >= 65 && c <= 90) ||
+      (c >= 97 && c <= 122) ||
+      (c >= 48 && c <= 57)
     if !ok {
       return false
     }
@@ -114,11 +117,19 @@ fn is_keyword_shaped(s : String) -> Bool {
 /// 字符串 trim (leading + trailing whitespace)
 fn trim(s : String) -> String {
   let mut start = 0
-  while start < s.length() && (s[start].to_int() == ' '.to_int() || s[start].to_int() == '\t'.to_int()) {
+  while start < s.length() &&
+        (
+          s[start].to_int() == ' '.to_int() ||
+          s[start].to_int() == '\t'.to_int()
+        ) {
     start = start + 1
   }
   let mut end = s.length()
-  while end > start && (s[end - 1].to_int() == ' '.to_int() || s[end - 1].to_int() == '\t'.to_int()) {
+  while end > start &&
+        (
+          s[end - 1].to_int() == ' '.to_int() ||
+          s[end - 1].to_int() == '\t'.to_int()
+        ) {
     end = end - 1
   }
   let sb = StringBuilder()
@@ -219,7 +230,10 @@ pub fn parse_ssh_config(content : String) -> Array[SshConfigSection] {
           // the pre-Host options away; now they are flushed as a leading
           // pattern-less section, which applies to every host.
           if saw_any {
-            sections.push({ patterns: current_patterns, options: current_options })
+            sections.push({
+              patterns: current_patterns,
+              options: current_options,
+            })
           }
           let sb2 = StringBuilder()
           let mut k = 4
@@ -234,7 +248,7 @@ pub fn parse_ssh_config(content : String) -> Array[SshConfigSection] {
         } else {
           let (keyword, value) = split_option(line)
           if keyword.length() > 0 {
-            current_options.push({ keyword, value })
+            current_options.push({ keyword, value, })
             saw_any = true
           }
         }
@@ -246,13 +260,14 @@ pub fn parse_ssh_config(content : String) -> Array[SshConfigSection] {
   }
 
   if saw_any {
-    sections.push({ patterns: current_patterns, options: current_options })
+    sections.push({ patterns: current_patterns, options: current_options, })
   }
 
   sections
 }
 
-///| keyword 大小写不敏感（readconf.c 用 strcasecmp）。实测 `HOST` / `host` 都生效。
+///|
+/// keyword 大小写不敏感（readconf.c 用 strcasecmp）。实测 `HOST` / `host` 都生效。
 fn starts_with_ci(s : String, prefix : String) -> Bool {
   if s.length() < prefix.length() {
     return false
@@ -283,8 +298,12 @@ fn lower_eq(s : String, target : String) -> Bool {
 }
 
 ///|
-fn lower_char(c : Int) -> Int {
-  if c >= 65 && c <= 90 { c + 32 } else { c }
+fn lower_char(c : Int32) -> Int32 {
+  if c >= 65 && c <= 90 {
+    c + 32
+  } else {
+    c
+  }
 }
 
 ///|
@@ -299,7 +318,9 @@ pub fn option_to_string(o : SshConfigOption) -> String {
 
 ///|
 /// 解析 ssh_config + 报告行数 (debug)
-pub fn parse_ssh_config_debug(content : String) -> (Array[SshConfigSection], Int) {
+pub fn parse_ssh_config_debug(
+  content : String,
+) -> (Array[SshConfigSection], Int32) {
   let sections : Array[SshConfigSection] = []
   let mut current_patterns : Array[String] = []
   let mut current_options : Array[SshConfigOption] = []
@@ -323,7 +344,10 @@ pub fn parse_ssh_config_debug(content : String) -> (Array[SshConfigSection], Int
       if line.length() > 0 && !starts_with(line, "#") {
         if starts_with(line, "Host ") || line == "Host" {
           if in_section && current_patterns.length() > 0 {
-            sections.push({ patterns: current_patterns, options: current_options })
+            sections.push({
+              patterns: current_patterns,
+              options: current_options,
+            })
           }
           let sb2 = StringBuilder()
           let mut k = 4
@@ -345,7 +369,7 @@ pub fn parse_ssh_config_debug(content : String) -> (Array[SshConfigSection], Int
               value = value + " " + parts[k]
               k = k + 1
             }
-            current_options.push({ keyword, value })
+            current_options.push({ keyword, value, })
           }
         }
       }
@@ -356,7 +380,7 @@ pub fn parse_ssh_config_debug(content : String) -> (Array[SshConfigSection], Int
   }
 
   if in_section && current_patterns.length() > 0 {
-    sections.push({ patterns: current_patterns, options: current_options })
+    sections.push({ patterns: current_patterns, options: current_options, })
   }
 
   (sections, line_count)

@@ -26,7 +26,10 @@
 ///|
 /// Concatenate two byte arrays.
 pub fn cat(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
-  let out : FixedArray[Byte] = FixedArray::make(a.length() + b.length(), b'\x00')
+  let out : FixedArray[Byte] = FixedArray::make(
+    a.length() + b.length(),
+    b'\x00',
+  )
   for i = 0; i < a.length(); i = i + 1 {
     out[i] = a[i]
   }
@@ -73,10 +76,7 @@ pub fn mpint_body(v : @bigint.BigNat) -> FixedArray[Byte] {
 ///|
 /// BigNat as a fixed-width big-endian byte string, left-padded with zeros.
 /// Returns None when the value does not fit.
-pub fn bignat_to_fixed_be(
-  v : @bigint.BigNat,
-  n : Int
-) -> FixedArray[Byte]? {
+pub fn bignat_to_fixed_be(v : @bigint.BigNat, n : Int32) -> FixedArray[Byte]? {
   let raw = @bigint.BigNat::to_bytes_be(v)
   if raw.length() > n {
     return None
@@ -91,7 +91,7 @@ pub fn bignat_to_fixed_be(
 
 ///|
 /// Field size in bytes (32 for P-256, 48 for P-384).
-pub fn Curve::field_bytes(c : Curve) -> Int {
+pub fn Curve::field_bytes(c : Curve) -> Int32 {
   c.bits / 8
 }
 
@@ -192,7 +192,10 @@ pub fn encode_pubkey_blob(c : Curve, q : Point) -> FixedArray[Byte]? {
     Some(pt) =>
       Some(
         cat(
-          cat(put_string(str_bytes(c.ssh_name())), put_string(str_bytes(c.curve_name()))),
+          cat(
+            put_string(str_bytes(c.ssh_name())),
+            put_string(str_bytes(c.curve_name())),
+          ),
           put_string(pt),
         ),
       )
@@ -224,7 +227,7 @@ pub fn decode_pubkey_blob(blob : FixedArray[Byte]) -> (Curve, Point)? {
               }
               match Curve::from_name(as_string(cname)) {
                 None => None
-                Some(c) => {
+                Some(c) =>
                   if c.ssh_name() != an {
                     None
                   } else {
@@ -233,7 +236,6 @@ pub fn decode_pubkey_blob(blob : FixedArray[Byte]) -> (Curve, Point)? {
                       Some(q) => Some((c, q))
                     }
                   }
-                }
               }
             }
           }
@@ -292,7 +294,7 @@ pub fn encode_sig_blob(c : Curve, sig : Signature) -> FixedArray[Byte] {
 ///   right and interoperates only by luck.
 pub fn decode_ecdsa_int(
   b : FixedArray[Byte],
-  field_len : Int
+  field_len : Int32,
 ) -> @bigint.BigNat? {
   if b.length() == 0 {
     return Some(@bigint.BigNat::from_uint64(0UL))
@@ -349,10 +351,8 @@ pub fn decode_sig_blob(c : Curve, blob : FixedArray[Byte]) -> Signature? {
                   if so != body.length() {
                     return None
                   }
-                  match (
-                    decode_ecdsa_int(rbytes, fs),
-                    decode_ecdsa_int(sbytes, fs),
-                  ) {
+                  match
+                    (decode_ecdsa_int(rbytes, fs), decode_ecdsa_int(sbytes, fs)) {
                     (Some(r), Some(s)) => Some(Signature::new(r, s))
                     _ => None
                   }
@@ -374,13 +374,15 @@ pub fn decode_sig_blob(c : Curve, blob : FixedArray[Byte]) -> Signature? {
 /// Read an SSH `string` at `off`; returns the bytes and the next offset.
 pub fn read_string(
   b : FixedArray[Byte],
-  off : Int
-) -> (FixedArray[Byte], Int)? {
+  off : Int32,
+) -> (FixedArray[Byte], Int32)? {
   if off < 0 || off + 4 > b.length() {
     return None
   }
-  let len = ((b[off].to_int() << 24) | (b[off + 1].to_int() << 16) |
-             (b[off + 2].to_int() << 8) | b[off + 3].to_int())
+  let len = (b[off].to_int() << 24) |
+    (b[off + 1].to_int() << 16) |
+    (b[off + 2].to_int() << 8) |
+    b[off + 3].to_int()
   if len < 0 || off + 4 + len > b.length() {
     return None
   }
@@ -396,7 +398,7 @@ pub fn read_string(
 fn as_string(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   sb.to_string()
 }

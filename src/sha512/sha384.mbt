@@ -1,27 +1,40 @@
 ///| SHA-384 (FIPS 180-4 § 4)
+
 ///|
+
 ///| SHA-384 is SHA-512 with a different initial hash value and a 48-byte
+
 ///| (384-bit) truncated output. It shares the compression function and the
+
 ///| padding rules with SHA-512, so this only adds the SHA-384 IV and the
+
 ///| truncation.
 
 ///| SHA-384 initial hash value
+
 ///|   (fractional parts of the square roots of the 9th..16th primes)
-///|   FIPS 180-4 § 5.3.3
+
+///|
+///   FIPS 180-4 § 5.3.3
 pub let init_h384 : FixedArray[UInt64] = [
   0xcbbb9d5dc1059ed8UL, 0x629a292a367cd507UL, 0x9159015a3070dd17UL, 0x152fecd8f70e5939UL,
   0x67332667ffc00b31UL, 0x8eb44a8768581511UL, 0xdb0c2e0d64f98fa7UL, 0x47b5481dbefa4fa4UL,
 ]
 
-///| SHA-384 block size in bytes (same as SHA-512)
-pub let block_len_384 : Int = 128
+///|
+/// SHA-384 block size in bytes (same as SHA-512)
+pub let block_len_384 : Int32 = 128
 
-///| SHA-384 output length in bytes
-pub let hash_len_384 : Int = 48
+///|
+/// SHA-384 output length in bytes
+pub let hash_len_384 : Int32 = 48
 
 ///| sha384(message) -> 48 byte hash
+
 ///|
-///| 符合 FIPS 180-4 § 4
+
+///|
+/// 符合 FIPS 180-4 § 4
 pub fn sha384(message : FixedArray[Byte]) -> FixedArray[Byte] {
   // 1. Initialize with the SHA-384 IV
   let state : FixedArray[UInt64] = FixedArray::make(8, 0UL)

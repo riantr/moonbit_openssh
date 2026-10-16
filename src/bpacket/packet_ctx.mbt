@@ -5,11 +5,11 @@
 
 ///|
 /// 包长上限(packet.c:99 PACKET_MAX_SIZE = 256*1024)
-pub const MAX_PACKET_SIZE : Int = 262144
+pub const MAX_PACKET_SIZE : Int32 = 262144
 
 ///|
 /// 包长下限(packet.c:1660/1687 要求 packlen >= 1+4)
-pub const MIN_PACKET_LENGTH : Int = 5
+pub const MIN_PACKET_LENGTH : Int32 = 5
 
 ///|
 /// SSH2_MSG_NEWKEYS(ssh2.h:94)
@@ -41,7 +41,7 @@ pub(all) enum Mode {
 
 ///|
 /// block size:none 与 chachapoly 在 OpenSSH cipher 表中都是 8
-fn block_size_of(mode : Mode) -> Int {
+fn block_size_of(mode : Mode) -> Int32 {
   match mode {
     Unencrypted => 8
     Aead(_) => 8
@@ -51,7 +51,7 @@ fn block_size_of(mode : Mode) -> Int {
 
 ///|
 /// 不加密参与密码学的明文前缀长度(length 字段)
-fn aadlen_of(mode : Mode) -> Int {
+fn aadlen_of(mode : Mode) -> Int32 {
   match mode {
     Unencrypted => 0
     Aead(_) => 4
@@ -61,7 +61,7 @@ fn aadlen_of(mode : Mode) -> Int {
 
 ///|
 /// 认证标签长度
-fn authlen_of(mode : Mode) -> Int {
+fn authlen_of(mode : Mode) -> Int32 {
   match mode {
     Unencrypted => 0
     Aead(_) => 16
@@ -74,7 +74,7 @@ fn authlen_of(mode : Mode) -> Int {
 ///
 /// packet.c:1647 `maclen = mac && mac->enabled ? mac->mac_len : 0`;
 /// AEAD 不另带 MAC(authlen 已经是它的认证标签),所以那里是 0。
-fn maclen_of(mode : Mode) -> Int {
+fn maclen_of(mode : Mode) -> Int32 {
   match mode {
     Unencrypted => 0
     Aead(_) => 0
@@ -94,7 +94,7 @@ fn maclen_of(mode : Mode) -> Int {
 /// 调过 setter,所以这个标志从建立起就一直是 true。
 pub struct SendCtx {
   priv mut mode : Mode
-  priv mut seqnr : UInt
+  priv mut seqnr : UInt32
   priv strict_kex : Bool
   priv mut initial_kex : Bool
 }
@@ -106,8 +106,8 @@ pub struct SendCtx {
 /// 0 表示正在等包头)。对应 state->p_read。
 pub struct RecvCtx {
   priv mut mode : Mode
-  priv mut seqnr : UInt
-  priv mut packlen : UInt
+  priv mut seqnr : UInt32
+  priv mut packlen : UInt32
   priv strict_kex : Bool
   priv mut initial_kex : Bool
 }
@@ -116,7 +116,7 @@ pub struct RecvCtx {
 /// 构造发送上下文
 pub fn SendCtx::make(
   mode : Mode,
-  seqnr : UInt,
+  seqnr : UInt32,
   strict_kex : Bool,
   initial_kex : Bool,
 ) -> SendCtx {
@@ -131,7 +131,7 @@ pub fn SendCtx::new() -> SendCtx {
 
 ///|
 /// 当前序号(测试与集成层观测用)
-pub fn SendCtx::seqnr(self : SendCtx) -> UInt {
+pub fn SendCtx::seqnr(self : SendCtx) -> UInt32 {
   self.seqnr
 }
 
@@ -176,7 +176,7 @@ pub fn SendCtx::in_initial_kex(self : SendCtx) -> Bool {
 /// 构造接收上下文(参数含义同 SendCtx::make)
 pub fn RecvCtx::make(
   mode : Mode,
-  seqnr : UInt,
+  seqnr : UInt32,
   strict_kex : Bool,
   initial_kex : Bool,
 ) -> RecvCtx {
@@ -191,7 +191,7 @@ pub fn RecvCtx::new() -> RecvCtx {
 
 ///|
 /// 当前序号(测试与集成层观测用)
-pub fn RecvCtx::seqnr(self : RecvCtx) -> UInt {
+pub fn RecvCtx::seqnr(self : RecvCtx) -> UInt32 {
   self.seqnr
 }
 
@@ -218,7 +218,7 @@ pub fn RecvCtx::in_initial_kex(self : RecvCtx) -> Bool {
 ///
 /// 返回 None 表示回绕到 0 且处于初始 KEX——两端都必须断连
 /// (packet.c:1363-1367 / 1778-1783)。非初始 KEX 的回绕正常允许。
-fn bump_seqnr(seqnr : UInt, initial_kex : Bool) -> UInt? {
+fn bump_seqnr(seqnr : UInt32, initial_kex : Bool) -> UInt32? {
   let next = seqnr + 1U
   if next == 0U && initial_kex {
     None
@@ -229,7 +229,7 @@ fn bump_seqnr(seqnr : UInt, initial_kex : Bool) -> UInt? {
 
 ///|
 /// 大端写 u32(POKE_U32)
-fn write_u32be(buf : FixedArray[Byte], offset : Int, v : UInt) -> Unit {
+fn write_u32be(buf : FixedArray[Byte], offset : Int32, v : UInt32) -> Unit {
   buf[offset] = ((v >> 24) & 0xFFU).to_byte()
   buf[offset + 1] = ((v >> 16) & 0xFFU).to_byte()
   buf[offset + 2] = ((v >> 8) & 0xFFU).to_byte()
@@ -238,7 +238,7 @@ fn write_u32be(buf : FixedArray[Byte], offset : Int, v : UInt) -> Unit {
 
 ///|
 /// 大端读 u32(PEEK_U32)
-fn read_u32be(buf : FixedArray[Byte], offset : Int) -> UInt {
+fn read_u32be(buf : FixedArray[Byte], offset : Int32) -> UInt32 {
   (buf[offset].to_uint() << 24) |
   (buf[offset + 1].to_uint() << 16) |
   (buf[offset + 2].to_uint() << 8) |
@@ -249,8 +249,8 @@ fn read_u32be(buf : FixedArray[Byte], offset : Int) -> UInt {
 /// 取 bytes[from..until) 的拷贝
 fn copy_bytes(
   bytes : FixedArray[Byte],
-  from : Int,
-  until : Int,
+  from : Int32,
+  until : Int32,
 ) -> FixedArray[Byte] {
   let n = until - from
   let arr : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -264,9 +264,9 @@ fn copy_bytes(
 /// 接收端错误分类(navigator §7,全部为连接终止级)
 pub enum PacketError {
   /// 包长越界(packlen ∉ [5, 262144])
-  BadLength(UInt)
+  BadLength(UInt32)
   /// 加密体不对齐(need % block_size != 0)
-  AlignError(UInt)
+  AlignError(UInt32)
   /// Poly1305 tag 校验失败
   AuthFailed
   /// hmac-sha2-256 MAC 校验失败(encrypt-and-MAC 路径)
@@ -275,13 +275,13 @@ pub enum PacketError {
   /// 而 MAC 失败意味着我们和对端对同一段明文的看法不一致,继续读只会解出乱码。
   MacInvalid
   /// padding 长度小于 4
-  BadPadlen(UInt)
+  BadPadlen(UInt32)
   /// padding 超过剩余数据(consume_end 失败的显式化)
-  PadOverflow(UInt)
+  PadOverflow(UInt32)
   /// 去掉 header/padding 后无 payload(get_u8 失败的显式化)
   EmptyPayload
   /// 消息号为 0(< SSH2_MSG_MIN)
-  BadType(UInt)
+  BadType(UInt32)
   /// 初始 KEX 期间序号回绕
   SeqnrWrapInitial
 }
@@ -292,7 +292,7 @@ pub enum RecvEvent {
   /// 数据不足一整包;保留内部状态,调用方继续攒字节后再喂
   NeedMore
   /// 完整解析出一个包:(使用的 seqnr, 消息号, payload 不含消息号本身)
-  Packet(UInt, Byte, FixedArray[Byte])
+  Packet(UInt32, Byte, FixedArray[Byte])
   /// 协议级错误,连接必须终止
   Failed(PacketError)
 }
@@ -302,6 +302,6 @@ pub enum RecvEvent {
 ///
 /// 错误/未完成时 consumed 为 0(错误即断连,消费量失去意义)。
 pub struct RecvResult {
-  consumed : Int
+  consumed : Int32
   event : RecvEvent
 }

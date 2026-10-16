@@ -30,15 +30,12 @@
 ///   `RecvOutcome` can separate a closed transport from a bad packet.
 pub(open) trait Transport {
   fn wire_send(Self, FixedArray[Byte]) -> Bool
-  fn wire_read_exact(Self, Int) -> FixedArray[Byte]?
+  fn wire_read_exact(Self, Int32) -> FixedArray[Byte]?
   fn wire_close(Self) -> Unit
 }
 
 ///|
-pub impl Transport for @tcp.TcpConn with fn wire_send(
-  self,
-  data,
-) {
+pub impl Transport for @tcp.TcpConn with fn wire_send(self, data) {
   self.send(data)
 }
 

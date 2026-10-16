@@ -23,7 +23,8 @@
 /// means the exit code never arrives and the loop ends on a close with no
 /// status at all — which looks like "the command produced no output".
 
-///| 要发给对端的包(payload 已组好,不含消息号)
+///|
+/// 要发给对端的包(payload 已组好,不含消息号)
 pub(all) enum ChanAction {
   Send(Byte, FixedArray[Byte])
 }
@@ -33,10 +34,10 @@ pub(all) enum ChanAction {
 /// 走 `ExecReport::exit_status`。
 pub(all) enum ChanError {
   /// 通道没能打开。对端带着 reason code 和描述回绝。
-  OpenFailed(Int, String)
+  OpenFailed(Int32, String)
   /// 对端拒绝了 exec 请求
   ExecRejected
-  ///|
+  ///
   /// 对端拒绝了 subsystem 请求。
   ///
   /// 单列而不是复用 `ExecRejected`:subsystem 的 `want_reply` 是 TRUE,这个
@@ -51,19 +52,19 @@ pub(all) enum ChanError {
 ///|
 /// 一次 `exec` 的最终结果
 pub(all) struct ExecReport {
-  remote_id : Int
-  local_channel : Int
+  remote_id : Int32
+  local_channel : Int32
   stdout : FixedArray[Byte]
   stderr : FixedArray[Byte]
-  exit_status : Int
+  exit_status : Int32
   /// 对端通告的最大包长
-  remote_max_packet : Int
+  remote_max_packet : Int32
   /// 我们一共发出的 WINDOW_ADJUST 次数
-  adjusts_sent : Int
+  adjusts_sent : Int32
   /// 作为 stdin 发出的字节数
-  stdin_sent : Int
+  stdin_sent : Int32
   /// 发出的 CHANNEL_DATA 包数——窗口夹取的直接证据
-  stdin_packets : Int
+  stdin_packets : Int32
   /// CHANNEL_EOF 有没有在缓冲排空后发出去
   eof_sent : Bool
 }
@@ -71,59 +72,59 @@ pub(all) struct ExecReport {
 ///|
 /// 通道状态
 pub(all) struct ChanState {
-  local_channel : Int
-  remote_id : Int
-  remote_window : Int
-  remote_max_packet : Int
+  local_channel : Int32
+  remote_id : Int32
+  remote_window : Int32
+  remote_max_packet : Int32
   window : LocalWindow
   stdout : Array[FixedArray[Byte]]
   stderr : Array[FixedArray[Byte]]
-  stdout_len : Int
-  stderr_len : Int
-  exit_status : Int
+  stdout_len : Int32
+  stderr_len : Int32
+  exit_status : Int32
   exec_acked : Bool
   open_done : Bool
   close_sent : Bool
   close_recv : Bool
-  adjusts_sent : Int
-  ///|
+  adjusts_sent : Int32
+  ///
   /// 收到过几个 CHANNEL_SUCCESS。
   ///
   /// exec 只需要一个;pty-req + shell 是两个,而且驱动层必须知道哪一个是哪个
   /// ——靠计数推断顺序在服务器并发回包时会错位,所以计数只当「收到了几个」用,
   /// 具体对应哪个请求由驱动层自己按顺序对齐。
-  success_count : Int
-  ///|
+  success_count : Int32
+  ///
   /// 收到过几个 CHANNEL_FAILURE。
   ///
   /// 只有交互式流程会用到:那里的 CHANNEL_FAILURE 通常是在说「服务端不给
   /// pty」,而 OpenSSH 客户端的做法是 `c->client_tty = 0` 然后继续开 shell
   /// (clientloop.c:2750)。exec 流程里同一个包仍然是致命的 exec 被拒,所以
   /// 那一支照旧报 `ExecRejected`。
-  failure_count : Int
-  ///|
+  failure_count : Int32
+  ///
   /// 交互式流程(pty-req + shell)与 exec 流程的失败语义不同,所以显式区分,
   /// 而不是让 `chan_step` 去猜哪个请求被拒了——它并不跟踪待确认的请求。
   interactive : Bool
-  ///| 被信号杀死时的 exit-signal(RFC 4254 §6.10):(信号名, 是否 core dump)
+  /// 被信号杀死时的 exit-signal(RFC 4254 §6.10):(信号名, 是否 core dump)
   exit_signal : (String, Bool)?
-  ///| exit-signal 里的 error message(没有 signal 时是空串)
+  /// exit-signal 里的 error message(没有 signal 时是空串)
   exit_signal_message : String
-  ///|
+  ///
   /// 我们作为 stdin 发出去的字节数,以及为此发了多少个 CHANNEL_DATA。
   ///
   /// 两个数分开:字节数对得上只说明内容没丢,包数对得上才说明**夹取**是对的
   /// ——同一堆字节按 32 KiB 发和按 64 KiB 发,远端都照收不误。
-  stdin_sent : Int
-  stdin_packets : Int
-  ///|
+  stdin_sent : Int32
+  stdin_packets : Int32
+  ///
   /// CHANNEL_EOF 发出去没有。
   ///
   /// 单独记一个布尔而不是从 `eof_sent` 反推:EOF 必须在**缓冲排空之后**才发
   /// (nchan.c:127-146 的 `chan_ibuf_empty` 先看 `sshbuf_len(c->input) != 0`
   /// 就直接 return),否则对端以为没有更多 stdin,远端命令读到的是截断的流。
   eof_sent : Bool
-  ///|
+  ///
   /// 发过 subsystem 请求没有。
   ///
   /// 存在的唯一理由是让 `chan_step` 认出「这个 CHANNEL_FAILURE 回答的是
@@ -135,7 +136,7 @@ pub(all) struct ChanState {
 
 ///|
 /// 开始一次 exec:本地窗口已按 `CHAN_WINDOW_DEFAULT` 建立
-pub fn ChanState::new(local_channel : Int) -> ChanState {
+pub fn ChanState::new(local_channel : Int32) -> ChanState {
   {
     local_channel,
     remote_id: -1,
@@ -171,8 +172,8 @@ pub fn ChanState::new(local_channel : Int) -> ChanState {
 /// 把这个开关摆在状态里而不是让驱动去解释错误,是因为驱动层要分清
 /// 「pty 被拒但还能继续」和「exec 被拒,到此为止」,而同一个包在两种流程里
 /// 含义相反。
-pub fn ChanState::new_interactive(local_channel : Int) -> ChanState {
-  { ..ChanState::new(local_channel), interactive: true }
+pub fn ChanState::new_interactive(local_channel : Int32) -> ChanState {
+  { ..ChanState::new(local_channel), interactive: true, }
 }
 
 ///|
@@ -191,12 +192,7 @@ pub fn ChanState::subsystem_action(
     return None
   }
   self.subsystem_sent = true
-  Some(
-    Send(
-      0x62,
-      channel_subsystem_payload(self.remote_id, name),
-    ),
-  )
+  Some(Send(0x62, channel_subsystem_payload(self.remote_id, name)))
 }
 
 ///|
@@ -239,10 +235,10 @@ pub fn ChanState::exec_action(
 pub fn ChanState::pty_req_action(
   self : ChanState,
   term : String,
-  cols : Int,
-  rows : Int,
-  pixel_width : Int,
-  pixel_height : Int,
+  cols : Int32,
+  rows : Int32,
+  pixel_width : Int32,
+  pixel_height : Int32,
   modes : FixedArray[Byte],
 ) -> ChanAction? {
   if !self.open_done {
@@ -264,7 +260,8 @@ pub fn ChanState::pty_req_action(
   )
 }
 
-///| 交互式会话的第 2 步:CHANNEL_REQUEST "shell"
+///|
+/// 交互式会话的第 2 步:CHANNEL_REQUEST "shell"
 pub fn ChanState::shell_action(self : ChanState) -> ChanAction? {
   if !self.open_done {
     return None
@@ -279,10 +276,10 @@ pub fn ChanState::shell_action(self : ChanState) -> ChanAction? {
 /// OPEN_CONFIRMATION 之后就一直有效。
 pub fn ChanState::window_change_action(
   self : ChanState,
-  cols : Int,
-  rows : Int,
-  pixel_width : Int,
-  pixel_height : Int,
+  cols : Int32,
+  rows : Int32,
+  pixel_width : Int32,
+  pixel_height : Int32,
 ) -> ChanAction {
   Send(
     0x62,
@@ -392,7 +389,7 @@ pub fn ChanState::eof_action(self : ChanState) -> (ChanState, ChanAction?) {
     return (self, None)
   }
   (
-    { ..self, eof_sent: true },
+    { ..self, eof_sent: true, },
     Some(Send(0x60, channel_bare_payload(self.remote_id))),
   )
 }
@@ -404,15 +401,15 @@ pub fn ChanState::eof_action(self : ChanState) -> (ChanState, ChanAction?) {
 /// `exit-signal` 而不是 `exit-status`,把两者混成一个字段的话「被 KILL」
 /// 会和「正常返回」长得一模一样。
 pub(all) struct ShellReport {
-  remote_id : Int
+  remote_id : Int32
   stdout : FixedArray[Byte]
   stderr : FixedArray[Byte]
-  exit_status : Int
+  exit_status : Int32
   exit_signal : (String, Bool)?
   exit_signal_message : String
-  adjusts_sent : Int
-  ///| 收到过几个 CHANNEL_SUCCESS(pty-req + shell 应为 2)
-  success_count : Int
+  adjusts_sent : Int32
+  /// 收到过几个 CHANNEL_SUCCESS(pty-req + shell 应为 2)
+  success_count : Int32
 }
 
 ///|
@@ -425,7 +422,11 @@ pub fn ChanState::shell_report(self : ChanState) -> ShellReport {
     remote_id: self.remote_id,
     stdout: ch_cat_all(self.stdout),
     stderr: ch_cat_all(self.stderr),
-    exit_status: if self.exit_status < 0 { 255 } else { self.exit_status },
+    exit_status: if self.exit_status < 0 {
+      255
+    } else {
+      self.exit_status
+    },
     exit_signal: self.exit_signal,
     exit_signal_message: self.exit_signal_message,
     adjusts_sent: self.adjusts_sent,
@@ -438,6 +439,7 @@ pub fn ChanState::shell_report(self : ChanState) -> ShellReport {
 ///
 /// 返回的动作列表至多两三个,最多的是「收到 DATA 后按窗口条件补一个
 /// WINDOW_ADJUST」。驱动层负责把它们发出去。
+
 ///|
 ///
 ///
@@ -477,9 +479,11 @@ pub fn chan_step(
       // CHANNEL_SUCCESS —— exec / pty-req / shell 被接受。只数个数:具体是哪个
       // 请求被确认由驱动层按发送顺序对齐,状态机不去猜。
       if st.open_done {
-        ({ ..st, exec_acked: true, success_count: st.success_count + 1 },
-         none,
-         None)
+        (
+          { ..st, exec_acked: true, success_count: st.success_count + 1, },
+          none,
+          None,
+        )
       } else {
         (st, none, Some(ChanError::Malformed("success_before_open")))
       }
@@ -494,7 +498,7 @@ pub fn chan_step(
         // 交互式流程:CHANNEL_FAILURE 只说明「这个请求被拒了」。最常见的是服务端
         // 不给 pty(`PermitTTY no`),而真实客户端会退回无 pty 继续开 shell
         // (clientloop.c:2750)。当成致命错误会让整个 shell 用不了。
-        ({ ..st, failure_count: st.failure_count + 1 }, none, None)
+        ({ ..st, failure_count: st.failure_count + 1, }, none, None)
       } else {
         (st, none, Some(ChanError::ExecRejected))
       }
@@ -565,17 +569,13 @@ pub fn chan_step(
               None => (st, none, Some(ChanError::Malformed("exit_status")))
               Some((code, o2)) =>
                 if o2 != payload.length() {
-                  (
-                    st,
-                    none,
-                    Some(ChanError::Malformed("exit_status_trailing")),
-                  )
+                  (st, none, Some(ChanError::Malformed("exit_status_trailing")))
                 } else {
                   // want_reply 是 FALSE:带 want_reply 的 exit-status 按 RFC 要
                   // 回 CHANNEL_SUCCESS。真 ssh 会回,这里不回只会被对端忽略,
                   // 但把分支显式写出来,免得这一差异只是碰巧。
                   let _ = want
-                  ({ ..st, exit_status: code }, none, None)
+                  ({ ..st, exit_status: code, }, none, None)
                 }
             }
           } else if rtype == "exit-signal" {
@@ -584,10 +584,15 @@ pub fn chan_step(
             match parse_exit_signal(payload, off) {
               None => (st, none, Some(ChanError::Malformed("exit_signal")))
               Some((name, core, msg)) =>
-                ({ ..st, exit_signal: Some((name, core)),
-                   exit_signal_message: msg },
-                 none,
-                 None)
+                (
+                  {
+                    ..st,
+                    exit_signal: Some((name, core)),
+                    exit_signal_message: msg,
+                  },
+                  none,
+                  None,
+                )
             }
           } else {
             // "pty-req" 之类的请求一律不回。真实客户端对 want_reply=FALSE 的
@@ -599,7 +604,7 @@ pub fn chan_step(
       match parse_window_adjust(payload) {
         None => (st, none, Some(ChanError::Malformed("window_adjust")))
         Some((_, n)) =>
-          ({ ..st, remote_window: st.remote_window + n }, none, None)
+          ({ ..st, remote_window: st.remote_window + n, }, none, None)
       }
     0x60 =>
       // CHANNEL_EOF:数据方向由发起 exec 的一方先关。我们收到对端的 EOF
@@ -612,10 +617,10 @@ pub fn chan_step(
       // CHANNEL_CLOSE:必须回一个 CLOSE(channels.c 的 CHAN_CLOSE_RCVD 路径),
       // 否则对端会一直等下去。
       if st.close_sent {
-        ({ ..st, close_recv: true }, none, None)
+        ({ ..st, close_recv: true, }, none, None)
       } else {
         (
-          { ..st, close_recv: true, close_sent: true },
+          { ..st, close_recv: true, close_sent: true, },
           one_action(Send(0x61, channel_bare_payload(st.remote_id))),
           None,
         )
@@ -624,7 +629,8 @@ pub fn chan_step(
   }
 }
 
-///| 单个动作的数组(状态机里的动作几乎总是 0 或 1 个)
+///|
+/// 单个动作的数组(状态机里的动作几乎总是 0 或 1 个)
 fn one_action(a : ChanAction) -> Array[ChanAction] {
   let out : Array[ChanAction] = []
   out.push(a)
@@ -645,6 +651,7 @@ fn arr_append(
   out.push(b)
   out
 }
+
 ///|
 /// 窗口到了阈值就补一个 WINDOW_ADJUST(channels.c:2452-2458)
 ///
@@ -660,24 +667,21 @@ fn maybe_adjust(
   w : LocalWindow,
 ) -> (ChanState, Array[ChanAction]) {
   match w.take_adjust() {
-    None => ({ ..st, window: w }, [])
-    Some(w2) => (
-      {
-        ..st,
-        window: w2,
-        adjusts_sent: st.adjusts_sent + 1,
-      },
-      one_action(
-        Send(
-          0x5d,
-          // `w`, not `w2`: take_adjust already reset consumed to 0, so reading
-          // the amount off the post-take window sends WINDOW_ADJUST with a
-          // 0-byte payload.  The connection still runs -- it just never gets
-          // its window back, and only dies once the peer runs dry.
-          channel_window_adjust_payload(st.remote_id, w.adjust_amount()),
+    None => ({ ..st, window: w, }, [])
+    Some(w2) =>
+      (
+        { ..st, window: w2, adjusts_sent: st.adjusts_sent + 1, },
+        one_action(
+          Send(
+            0x5d,
+            // `w`, not `w2`: take_adjust already reset consumed to 0, so reading
+            // the amount off the post-take window sends WINDOW_ADJUST with a
+            // 0-byte payload.  The connection still runs -- it just never gets
+            // its window back, and only dies once the peer runs dry.
+            channel_window_adjust_payload(st.remote_id, w.adjust_amount()),
+          ),
         ),
-      ),
-    )
+      )
   }
 }
 
@@ -696,7 +700,11 @@ pub fn ChanState::report(self : ChanState) -> ExecReport {
     local_channel: self.local_channel,
     stdout: ch_cat_all(self.stdout),
     stderr: ch_cat_all(self.stderr),
-    exit_status: if self.exit_status < 0 { 255 } else { self.exit_status },
+    exit_status: if self.exit_status < 0 {
+      255
+    } else {
+      self.exit_status
+    },
     remote_max_packet: self.remote_max_packet,
     adjusts_sent: self.adjusts_sent,
     stdin_sent: self.stdin_sent,

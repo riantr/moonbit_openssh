@@ -17,14 +17,14 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 
 ///|
 fn parse_byte(hi : UInt16, lo : UInt16) -> Byte {
-  let h : Int = hex_digit(hi)
-  let l : Int = hex_digit(lo)
+  let h : Int32 = hex_digit(hi)
+  let l : Int32 = hex_digit(lo)
   ((h * 16 + l).reinterpret_as_uint() & 0xFFU).to_byte()
 }
 
 ///|
-fn hex_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hex_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -66,7 +66,7 @@ test "kat_rfc7748_bob" {
     "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
   )
   let actual = x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -88,7 +88,7 @@ test "kat_rfc7748_ecdh" {
     "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
   )
   let actual = x25519(a_priv, b_pub)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -109,7 +109,7 @@ test "kat_random_00" {
     "eb7a3f57d6266fbdea4dd3f953b1f421a6d68dd64eebb5953403ca573dd7a07c",
   )
   let actual = x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -130,7 +130,7 @@ test "kat_random_01" {
     "2438198a3b1edbf26f0c8389788112407b15452ea7f7d3f3f3eaa81999f9ec41",
   )
   let actual = x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -151,7 +151,7 @@ test "kat_random_02" {
     "059df9afe8778350a48e7f2a51f91bec5af97bf31245744b5f864a01ec428f5c",
   )
   let actual = x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -172,7 +172,7 @@ test "kat_random_03" {
     "a47a82dac6e2c56452fe2d0b1e1110a1a945563c314f4626c18210f7007d8d14",
   )
   let actual = x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -193,7 +193,7 @@ test "kat_random_04" {
     "4dcc18d4a90a11af59237508117022b57728a2374c5b656607acef7b2606e93a",
   )
   let actual = x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1

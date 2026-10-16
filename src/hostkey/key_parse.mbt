@@ -6,15 +6,15 @@
 
 ///|
 /// 签名数据上限(sshkey.h L53:1<<20)
-pub const MAX_SIGN_DATA_SIZE : Int = 1048576
+pub const MAX_SIGN_DATA_SIZE : Int32 = 1048576
 
 ///|
 /// RSA 最小模长位数(sshkey.h L53)
-pub const RSA_MIN_MODULUS_BITS : Int = 1024
+pub const RSA_MIN_MODULUS_BITS : Int32 = 1024
 
 ///|
 /// bignum 字节上限(sshbuf.h L36 SSHBUF_MAX_BIGNUM = 16384/8)
-pub const MAX_BIGNUM_BYTES : Int = 2048
+pub const MAX_BIGNUM_BYTES : Int32 = 2048
 
 ///|
 /// 错误分类(navigator §2,ssherr 一一对应)
@@ -73,14 +73,14 @@ pub(all) enum VerifyResult {
 pub(all) enum HostKey {
   Ed25519Key(FixedArray[Byte])
   RsaKey(FixedArray[Byte], FixedArray[Byte])
-  EcdsaKey(Int, FixedArray[Byte])
+  EcdsaKey(Int32, FixedArray[Byte])
 }
 
 ///|
 /// offset 式解析游标(错误短路;调用方检查 failed)
 priv struct HkCursor {
   bytes : FixedArray[Byte]
-  mut off : Int
+  mut off : Int32
   mut err : KeyError?
 }
 
@@ -97,14 +97,14 @@ fn HkCursor::fail(self : HkCursor, e : KeyError) -> Unit {
 }
 
 ///|
-fn HkCursor::remaining(self : HkCursor) -> Int {
+fn HkCursor::remaining(self : HkCursor) -> Int32 {
   self.bytes.length() - self.off
 }
 
 ///|
 /// 已消费的字节数。证书的 signed_data 就是「读到 reserved 为止」的切片长度,
 /// 所以这个偏移必须由游标自己报告,而不是在调用方重新推算一遍。
-fn HkCursor::offset(self : HkCursor) -> Int {
+fn HkCursor::offset(self : HkCursor) -> Int32 {
   self.off
 }
 
@@ -166,7 +166,7 @@ fn HkCursor::get_cstring(self : HkCursor) -> String {
   // 逐字节构造(String 索引返回 UInt16)
   let sb = StringBuilder()
   for i = 0; i < raw.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(raw[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(raw[i].to_int()))
   }
   sb.to_string()
 }
@@ -215,13 +215,13 @@ fn HkCursor::get_bignum2(self : HkCursor) -> FixedArray[Byte] {
 
 ///|
 /// 无条件前进 n 字节(调用方已确认缓冲足够)。
-fn HkCursor::skip(self : HkCursor, n : Int) -> Unit {
+fn HkCursor::skip(self : HkCursor, n : Int32) -> Unit {
   self.off = self.off + n
 }
 
 ///|
 /// 大端读 u32
-fn read_u32hk(buf : FixedArray[Byte], off : Int) -> UInt {
+fn read_u32hk(buf : FixedArray[Byte], off : Int32) -> UInt32 {
   (buf[off].to_uint() << 24) |
   (buf[off + 1].to_uint() << 16) |
   (buf[off + 2].to_uint() << 8) |
@@ -230,7 +230,7 @@ fn read_u32hk(buf : FixedArray[Byte], off : Int) -> UInt {
 
 ///|
 /// 大端读 u64
-fn read_u64hk(buf : FixedArray[Byte], off : Int) -> UInt64 {
+fn read_u64hk(buf : FixedArray[Byte], off : Int32) -> UInt64 {
   let mut v = 0UL
   let mut i = 0
   while i < 8 {
@@ -244,8 +244,8 @@ fn read_u64hk(buf : FixedArray[Byte], off : Int) -> UInt64 {
 /// 取 [from, to) 的拷贝。证书的 signed_data 就是这么切出来的。
 fn copy_range(
   src : FixedArray[Byte],
-  from : Int,
-  to : Int,
+  from : Int32,
+  to : Int32,
 ) -> FixedArray[Byte] {
   let n = to - from
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -264,7 +264,7 @@ fn is_cert_name(name : String) -> Bool {
 
 ///|
 /// trim 后大端字节的 bit length;空 → 0
-fn bit_length_be(bytes : FixedArray[Byte]) -> Int {
+fn bit_length_be(bytes : FixedArray[Byte]) -> Int32 {
   let n = bytes.length()
   if n == 0 {
     return 0
@@ -281,8 +281,12 @@ fn bit_length_be(bytes : FixedArray[Byte]) -> Int {
 
 ///|
 /// 曲线名 → 位数
-fn ecdsa_curve_bits(name : String) -> Int {
-  if name == "nistp256" { 256 } else { 384 }
+fn ecdsa_curve_bits(name : String) -> Int32 {
+  if name == "nistp256" {
+    256
+  } else {
+    384
+  }
 }
 
 ///|
@@ -291,7 +295,7 @@ fn ecdsa_curve_bits(name : String) -> Int {
 /// 得到与输入等价的规范形式,便于后续直接使用。
 fn ecdsa_canonical_point(
   name : String,
-  qb : FixedArray[Byte]
+  qb : FixedArray[Byte],
 ) -> FixedArray[Byte]? {
   match @ecdsa.Curve::from_name(name) {
     None => None

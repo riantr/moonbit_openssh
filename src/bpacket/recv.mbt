@@ -31,14 +31,14 @@
 pub fn RecvCtx::wire_len_from_header(
   self : RecvCtx,
   hdr : FixedArray[Byte],
-) -> Int? {
+) -> Int32? {
   if self.packlen != 0U {
     return None
   }
   if hdr.length() < 4 {
     return None
   }
-  let plen : UInt = match self.mode {
+  let plen : UInt32 = match self.mode {
     Unencrypted => read_u32be(hdr, 0)
     Aead(ctx) => ctx.get_length(self.seqnr, hdr)
     MacEncrypt(ctx) =>
@@ -71,7 +71,7 @@ pub fn RecvCtx::recv(self : RecvCtx, input : FixedArray[Byte]) -> RecvResult {
     if input.length() < min_hdr {
       return { consumed: 0, event: NeedMore, }
     }
-    let plen : UInt = match self.mode {
+    let plen : UInt32 = match self.mode {
       Aead(ctx) => ctx.get_length(self.seqnr, input)
       Unencrypted => read_u32be(input, 0)
       MacEncrypt(ctx) =>

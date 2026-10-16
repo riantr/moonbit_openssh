@@ -27,14 +27,14 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 
 ///|
 fn parse_byte(hi : UInt16, lo : UInt16) -> Byte {
-  let h : Int = hex_digit(hi)
-  let l : Int = hex_digit(lo)
+  let h : Int32 = hex_digit(hi)
+  let l : Int32 = hex_digit(lo)
   ((h * 16 + l).reinterpret_as_uint() & 0xFFU).to_byte()
 }
 
 ///|
-fn hex_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hex_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -66,7 +66,7 @@ test "kat_rfc8032_test1" {
   )
   let msg : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let (pk, sk) = keypair_from_seed(seed)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if pk[i] != expected_pk[i] {
       diff_count = diff_count + 1
@@ -102,7 +102,7 @@ test "kat_rfc8032_test2" {
   )
   let msg = hex_to_bytes("72")
   let (pk, sk) = keypair_from_seed(seed)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if pk[i] != expected_pk[i] {
       diff_count = diff_count + 1
@@ -138,7 +138,7 @@ test "kat_rfc8032_test3" {
   )
   let msg = hex_to_bytes("af82")
   let (pk, sk) = keypair_from_seed(seed)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if pk[i] != expected_pk[i] {
       diff_count = diff_count + 1
@@ -162,7 +162,7 @@ test "fe_roundtrip" {
   )
   let fe = fe_unpack(bytes)
   let out = fe_pack(fe)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if out[i] != bytes[i] {
       diff = diff + 1
@@ -187,7 +187,7 @@ test "sc_roundtrip" {
   )
   let sc = sc_from32bytes(bytes)
   let out = sc_to32bytes(sc)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if out[i] != bytes[i] {
       diff = diff + 1
@@ -204,7 +204,7 @@ test "sc_zero" {
   )
   let sc = sc_from32bytes(bytes)
   let out = sc_to32bytes(sc)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if out[i] != bytes[i] {
       diff = diff + 1
@@ -221,7 +221,7 @@ test "sc_one" {
   )
   let sc = sc_from32bytes(bytes)
   let out = sc_to32bytes(sc)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if out[i] != bytes[i] {
       diff = diff + 1
@@ -243,7 +243,7 @@ test "sc_reduce_add_sub_l1" {
     "ecd3f55c1a631258d69cf7a2de9f130dde14000000000000000000000000000010",
   )
   let out = sc_to32bytes(r)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if out[i] != expected[i] {
       diff = diff + 1
@@ -284,7 +284,7 @@ test "ge_pack_base" {
   let packed = ge_pack(ge25519_base)
   let expected_hex = "5866666666666666666666666666666666666666666666666666666666666666"
   let expected = hex_to_bytes(expected_hex)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if packed[i] != expected[i] {
       diff = diff + 1
@@ -307,7 +307,7 @@ test "scalarmult_base_one" {
   let packed_r = ge_pack(r)
   let expected_hex = "5866666666666666666666666666666666666666666666666666666666666666"
   let expected = hex_to_bytes(expected_hex)
-  let mut diff : Int = 0
+  let mut diff : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if packed_r[i] != expected[i] {
       diff = diff + 1

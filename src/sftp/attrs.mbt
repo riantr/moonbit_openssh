@@ -31,21 +31,28 @@
 /// tell "size is 0" from "size was not reported".
 pub(all) struct SftpAttrs {
   mut size : UInt64?
-  mut uid : Int?
-  mut gid : Int?
-  mut permissions : Int?
-  mut atime : Int?
-  mut mtime : Int?
+  mut uid : Int32?
+  mut gid : Int32?
+  mut permissions : Int32?
+  mut atime : Int32?
+  mut mtime : Int32?
   /// count of vendor extension pairs, in the order they appeared
-  mut ext_count : Int
+  mut ext_count : Int32
 }
 
 ///|
 /// Flags with nothing selected -- what a client sends in an OPEN when it has
 /// no opinion, and what the draft's "no attributes" encoding looks like.
 pub fn SftpAttrs::none() -> SftpAttrs {
-  { size: None, uid: None, gid: None, permissions: None,
-    atime: None, mtime: None, ext_count: 0 }
+  {
+    size: None,
+    uid: None,
+    gid: None,
+    permissions: None,
+    atime: None,
+    mtime: None,
+    ext_count: 0,
+  }
 }
 
 ///|
@@ -116,10 +123,18 @@ pub fn SftpCursor::attrs(self : SftpCursor) -> SftpAttrs {
 /// write, which is the mirror-image version of the bug above.
 pub fn SftpAttrs::encode(self : SftpAttrs) -> FixedArray[Byte] {
   let mut flags = 0
-  if self.size is Some(_) { flags = flags | ATTR_SIZE }
-  if self.uid is Some(_) { flags = flags | ATTR_UIDGID }
-  if self.permissions is Some(_) { flags = flags | ATTR_PERMISSIONS }
-  if self.atime is Some(_) { flags = flags | ATTR_ACMODTIME }
+  if self.size is Some(_) {
+    flags = flags | ATTR_SIZE
+  }
+  if self.uid is Some(_) {
+    flags = flags | ATTR_UIDGID
+  }
+  if self.permissions is Some(_) {
+    flags = flags | ATTR_PERMISSIONS
+  }
+  if self.atime is Some(_) {
+    flags = flags | ATTR_ACMODTIME
+  }
   // Vendor extensions are not produced by this client yet; if ext_count is
   // nonzero on an encode we deliberately drop them rather than write a flag
   // bit with no pairs behind it.
@@ -172,7 +187,7 @@ pub fn sftp_cat(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
 /// reads like a parse failure. -1 already means "size not reported", so it
 /// doubles as "size reported but unrepresentable" and neither is mistaken for
 /// a real count.
-pub fn sftp_u64_to_int(v : UInt64) -> Int {
+pub fn sftp_u64_to_int(v : UInt64) -> Int32 {
   // `UInt64` has no `reinterpret_as_uint` -- only `UInt` does -- so the
   // narrowing goes through `Int`, and the signedness has to be checked before
   // the narrowing rather than after it.
@@ -184,7 +199,8 @@ pub fn sftp_u64_to_int(v : UInt64) -> Int {
 
 ///|
 /// ASCII bytes of a `String`.
-pub fn sftp_ascii(s : String) -> FixedArray[Byte] {  let out : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
+pub fn sftp_ascii(s : String) -> FixedArray[Byte] {
+  let out : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
   for i = 0; i < s.length(); i = i + 1 {
     out[i] = (s[i].to_int() & 0xFF).to_byte()
   }

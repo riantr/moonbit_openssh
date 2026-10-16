@@ -30,8 +30,8 @@ fn parse_byte_strict(hi : UInt16, lo : UInt16) -> Byte {
 }
 
 ///|
-fn hex_digit_strict(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hex_digit_strict(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {

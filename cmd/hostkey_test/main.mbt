@@ -1,32 +1,55 @@
 ///| cmd/hostkey_test -- Loop #38 RFC 8332 主机密钥算法
+
 ///|
+
 ///| 只依赖 `src/hostkey` 和 `src/rsa`,两者都不碰 `@tcp`,所以四个后端都能跑。
+
 ///| 和 Loop #34/#35 拆出 `src/userauth` / `src/channel` 是同一个理由。
+
 ///|
+
 ///| 对着三份彼此独立的来源核对:
+
 ///|
+
 ///|   1. **真 OpenSSH** —— `real_*` 向量是 OpenSSH 8.0p1 sshd 真的发上线上的字节,
+
 ///|      覆盖的是它真的算出来的 exchange hash。这几条没法辩。
+
 ///|   2. **paramiko 5.0** —— 其余 blob 由一个真 SSH 库拼,布局是它的意见不是我们的。
+
 ///|   3. **ssh-rsa.c** —— 每个期望结果都按行号从 C 的判定顺序重新推导一遍。
+
 ///|
+
 ///| 第 3 类里最要紧的是 `ssh-rsa.c:526-535`:签名名和协商名**各自解析成摘要之后
+
 ///| 必须相等**,不是两个字符串相等。照 ed25519 的模板写成「签名名 == 密钥类型」的话,
+
 ///| 每一条 RFC 8332 签名都会被拒掉,而且报 TypeMismatch —— 指向一个看起来完全正常
+
 ///| 的名字。`rsa_sig512_negotiated256` / `rsa_sig256_negotiated512` 两条就是钉这个。
+
 ///|
+
 ///| 名字有三层,向量里刻意把它们拆开:`real_rsa_sha2_512` 的 key blob 自称
+
 ///| `ssh-rsa`,协商名是 `rsa-sha2-512`,签名 blob 里写的也是 `rsa-sha2-512`。
+
 ///| 三者两两不同是正常的,只有第三个必须等于第二个。
+
 ///|
+
 ///| `err` 按**变体名**比对而不是构造序号:枚举若新增变体,序号比对会静默错位继续
-///| 通过,名字比对则必须写全分支、编译不过。
+
+///|
+/// 通过,名字比对则必须写全分支、编译不过。
 
 // ---------------------------------------------------------------------------
 // hex / byte helpers
 // ---------------------------------------------------------------------------
 
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -37,6 +60,7 @@ fn hex_nibble(c : UInt16) -> Int {
   abort("hex_to_bytes: bad digit")
 }
 
+///|
 fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -48,6 +72,7 @@ fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn pf(ok : Bool) -> String {
   if ok {
     "PASS"
@@ -83,6 +108,7 @@ fn key_error_of(name : String) -> @hostkey.KeyError {
   }
 }
 
+///|
 fn key_error_name(e : @hostkey.KeyError) -> String {
   match e {
     @hostkey.InvalidFormat => "InvalidFormat"
@@ -102,6 +128,7 @@ fn key_error_name(e : @hostkey.KeyError) -> String {
   }
 }
 
+///|
 fn verify_name(r : @hostkey.VerifyResult) -> String {
   match r {
     @hostkey.Accepted => "Accepted"
@@ -113,6 +140,7 @@ fn verify_name(r : @hostkey.VerifyResult) -> String {
 // chk_key_blobs -- parse + describe
 // ---------------------------------------------------------------------------
 
+///|
 fn chk_key_blobs(fails : Array[String]) -> Unit {
   for i = 0; i < kat_key_cases.length(); i = i + 1 {
     let c = kat_key_cases[i]
@@ -124,25 +152,31 @@ fn chk_key_blobs(fails : Array[String]) -> Unit {
           let (tn, bits) = @hostkey.HostKey::describe(k)
           if tn != c.type_name || bits != c.bits {
             fails.push(
-              c.name + ": describe -> " + tn + "/" + bits.to_string() +
-              " want " + c.type_name + "/" + c.bits.to_string(),
+              c.name +
+              ": describe -> " +
+              tn +
+              "/" +
+              bits.to_string() +
+              " want " +
+              c.type_name +
+              "/" +
+              c.bits.to_string(),
             )
           }
         }
-        @hostkey.Rejected(e) => fails.push(
-          c.name + ": parsed as Rejected(" + key_error_name(e) + ")",
-        )
+        @hostkey.Rejected(e) =>
+          fails.push(c.name + ": parsed as Rejected(" + key_error_name(e) + ")")
       }
     } else {
       match r {
-        @hostkey.Parsed(_) => fails.push(c.name + ": parsed but should be Rejected")
-        @hostkey.Rejected(e) => {
+        @hostkey.Parsed(_) =>
+          fails.push(c.name + ": parsed but should be Rejected")
+        @hostkey.Rejected(e) =>
           if key_error_name(e) != c.err {
             fails.push(
               c.name + ": Rejected(" + key_error_name(e) + ") want " + c.err,
             )
           }
-        }
       }
     }
   }
@@ -152,6 +186,7 @@ fn chk_key_blobs(fails : Array[String]) -> Unit {
 // chk_sig_verify -- the whole point of the loop
 // ---------------------------------------------------------------------------
 
+///|
 fn chk_sig_verify(fails : Array[String]) -> Unit {
   for i = 0; i < kat_sig_cases.length(); i = i + 1 {
     let c = kat_sig_cases[i]
@@ -179,6 +214,7 @@ fn chk_sig_verify(fails : Array[String]) -> Unit {
 // chk_pkcs1_shapes -- RFC 8017 §9.2, no RSA maths involved
 // ---------------------------------------------------------------------------
 
+///|
 fn chk_pkcs1_shapes(fails : Array[String]) -> Unit {
   for i = 0; i < kat_pkcs1_cases.length(); i = i + 1 {
     let c = kat_pkcs1_cases[i]
@@ -186,11 +222,12 @@ fn chk_pkcs1_shapes(fails : Array[String]) -> Unit {
     let msg = hex_to_bytes(c.msg_hex)
     match @rsa.rsa_digest_info_prefix(c.digest) {
       None => {
-        fails.push(c.name + ": no DigestInfo prefix for digest " +
-          c.digest.to_string())
+        fails.push(
+          c.name + ": no DigestInfo prefix for digest " + c.digest.to_string(),
+        )
         continue
       }
-      Some(prefix) => {
+      Some(prefix) =>
         match @rsa.rsa_digest(msg, c.digest) {
           None => {
             fails.push(c.name + ": no digest for id " + c.digest.to_string())
@@ -205,7 +242,6 @@ fn chk_pkcs1_shapes(fails : Array[String]) -> Unit {
             }
           }
         }
-      }
     }
   }
 }
@@ -220,19 +256,14 @@ fn chk_pkcs1_shapes(fails : Array[String]) -> Unit {
 /// 这是**主动的**差异而不是遗漏,写在这里是为了让它可见:哪天接了证书支持,这一格
 /// 会红,提醒把 C 那份函数表补上。
 fn chk_digest_tables(fails : Array[String]) -> Unit {
-  let known : Array[(String, Int)] = [
+  let known : Array[(String, Int32)] = [
     ("rsa-sha2-256", @rsa.RSA_DIGEST_SHA256),
     ("rsa-sha2-512", @rsa.RSA_DIGEST_SHA512),
   ]
   let unknown : Array[String] = [
     // SHA-1 时代的主机密钥签名名。映射到本项目没有的 SHA-1,所以是 None,
     // 而客户端干脆不报它(见 LIVE_HOSTKEY_ALGS 的注释)
-    "ssh-rsa",
-    "ssh-dss",
-    "ssh-ed25519",
-    "ecdsa-sha2-nistp256",
-    "RSA-SHA2-512",
-    "rsa-sha2-512 ",
+    "ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256", "RSA-SHA2-512", "rsa-sha2-512 ",
     "",
   ]
   let cert : Array[String] = ["ssh-rsa-cert-v01@openssh.com"]
@@ -309,7 +340,10 @@ fn chk_agreement(fails : Array[String]) -> Unit {
   let (tn2, bits2) = @hostkey.HostKey::describe(ed)
   if tn2 != "ssh-ed25519" || bits2 != 256 {
     fails.push(
-      "describe ed -> " + tn2 + "/" + bits2.to_string() +
+      "describe ed -> " +
+      tn2 +
+      "/" +
+      bits2.to_string() +
       " want ssh-ed25519/256",
     )
   }
@@ -319,6 +353,7 @@ fn chk_agreement(fails : Array[String]) -> Unit {
 // coverage -- a KAT that silently lost its hard cases is worse than none
 // ---------------------------------------------------------------------------
 
+///|
 fn chk_coverage(fails : Array[String]) -> Unit {
   // Every error name a vector mentions has to resolve to a real variant.
   // `key_error_of` is an exhaustive match with no catch-all, so a name that
@@ -352,7 +387,9 @@ fn chk_coverage(fails : Array[String]) -> Unit {
   }
   if real.length() != kat_real_capture_count {
     fails.push(
-      "real capture count " + real.length().to_string() + " != declared " +
+      "real capture count " +
+      real.length().to_string() +
+      " != declared " +
       kat_real_capture_count.to_string(),
     )
   }
@@ -361,8 +398,7 @@ fn chk_coverage(fails : Array[String]) -> Unit {
   // the *key* vectors: OpenSSH enforces the floor while deserialising the key,
   // so a short modulus never reaches the verify path at all.
   let sig_errs = [
-    "SignatureInvalid", "TypeMismatch", "InvalidFormat", "TrailingData",
-    "KeyBitsMismatch",
+    "SignatureInvalid", "TypeMismatch", "InvalidFormat", "TrailingData", "KeyBitsMismatch",
   ]
   for i = 0; i < sig_errs.length(); i = i + 1 {
     let e = sig_errs[i]
@@ -376,12 +412,11 @@ fn chk_coverage(fails : Array[String]) -> Unit {
   println("hostkey_real_captures: " + real.length().to_string())
   println("hostkey_accepted_cases: " + accepted.length().to_string())
   println("hostkey_rejected_cases: " + rejected.length().to_string())
-  println(
-    "hostkey_pkcs1_cases: " + kat_pkcs1_cases.length().to_string(),
-  )
+  println("hostkey_pkcs1_cases: " + kat_pkcs1_cases.length().to_string())
 }
 
-fn main() -> Unit {
+///|
+fn main {
   let fails : Array[String] = []
   chk_key_blobs(fails)
   println("chk_key_blobs: " + pf(fails.length() == 0))

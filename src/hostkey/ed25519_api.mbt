@@ -212,7 +212,7 @@ fn equal_32(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
 
 ///|
 /// 辅助:从 FixedArray 切片取 32 字节
-fn slice_32(src : FixedArray[Byte], offset : Int) -> FixedArray[Byte] {
+fn slice_32(src : FixedArray[Byte], offset : Int32) -> FixedArray[Byte] {
   let r : FixedArray[Byte] = FixedArray::make(32, b'\x00')
   for i = 0; i < 32; i = i + 1 {
     r[i] = src[offset + i]

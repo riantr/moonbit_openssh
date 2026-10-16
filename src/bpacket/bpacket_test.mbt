@@ -16,8 +16,8 @@ fn bp_hex(hex : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn bp_hex_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn bp_hex_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -31,7 +31,7 @@ fn bp_hex_digit(c : UInt16) -> Int {
 
 ///|
 /// 确定性 payload:n 字节,值 = seed+i
-fn bp_payload(n : Int, seed : Byte) -> FixedArray[Byte] {
+fn bp_payload(n : Int32, seed : Byte) -> FixedArray[Byte] {
   let arr : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     arr[i] = bp_byte(seed.to_int() + i)
@@ -41,13 +41,13 @@ fn bp_payload(n : Int, seed : Byte) -> FixedArray[Byte] {
 
 ///|
 /// Int 截断到低 8 位转 Byte
-fn bp_byte(v : Int) -> Byte {
+fn bp_byte(v : Int32) -> Byte {
   (v.reinterpret_as_uint() & 0xFFU).to_byte()
 }
 
 ///|
 /// 确定性 padding 源(生产环境应接 CSPRNG)
-fn bp_pad_src(n : Int) -> FixedArray[Byte] {
+fn bp_pad_src(n : Int32) -> FixedArray[Byte] {
   let arr : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     arr[i] = bp_byte(0xA5 ^ i)
@@ -66,13 +66,13 @@ fn bp_key64() -> FixedArray[Byte] {
 ///|
 /// 手工组明文帧(plain 模式无密码学保护,可自由构造畸形帧做负向测试)
 fn bp_manual_frame(
-  packlen : Int,
-  padlen : Int,
+  packlen : Int32,
+  padlen : Int32,
   body : FixedArray[Byte], // packlen 字节:type ‖ payload ‖ padding
 ) -> FixedArray[Byte] {
   let total = 4 + packlen
   let arr : FixedArray[Byte] = FixedArray::make(total, b'\x00')
-  let v : UInt = packlen.reinterpret_as_uint()
+  let v : UInt32 = packlen.reinterpret_as_uint()
   arr[0] = ((v >> 24) & 0xFFU).to_byte()
   arr[1] = ((v >> 16) & 0xFFU).to_byte()
   arr[2] = ((v >> 8) & 0xFFU).to_byte()
@@ -88,7 +88,7 @@ fn bp_manual_frame(
 /// 断言事件为 Packet 并返回内容
 fn bp_expect_packet(
   res : @bpacket.RecvResult,
-  want_seqnr : UInt,
+  want_seqnr : UInt32,
   want_type : Byte,
   want_payload : FixedArray[Byte],
   label : String,
@@ -135,8 +135,8 @@ fn bp_expect_error(
 /// 取 bytes[from..until)
 fn bp_slice(
   bytes : FixedArray[Byte],
-  from : Int,
-  until : Int,
+  from : Int32,
+  until : Int32,
 ) -> FixedArray[Byte] {
   let n = until - from
   let arr : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -209,8 +209,18 @@ test "t2_plain_framing_math" {
 ///|
 test "t3_aead_roundtrip_and_alignment" {
   let key = bp_key64()
-  let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
-  let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let s = @bpacket.SendCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
+  let r = @bpacket.RecvCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
   let payload = bp_payload(10, b'\x42')
   match s.emit(b'\x14', payload, bp_pad_src(32)) {
     Ok(sp) => {
@@ -249,8 +259,18 @@ test "t3_aead_roundtrip_and_alignment" {
 ///|
 test "t5_pipelined_stream" {
   let key = bp_key64()
-  let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
-  let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let s = @bpacket.SendCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
+  let r = @bpacket.RecvCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
   let mut stream : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   for round = 0; round < 3; round = round + 1 {
     match
@@ -301,8 +321,18 @@ test "t6_fragmented_delivery" {
   // plain 与 aead 各来一轮
   for variant = 0; variant < 2; variant = variant + 1 {
     let key = bp_key64()
-    let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
-    let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let s = @bpacket.SendCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
+    let r = @bpacket.RecvCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
     let payload = bp_payload(9, b'\x77')
     match s.emit(b'\x04', payload, bp_pad_src(32)) {
       Ok(sp) => {
@@ -331,8 +361,18 @@ test "t6_fragmented_delivery" {
 ///|
 test "t7_tamper_body_auth_fail" {
   let key = bp_key64()
-  let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
-  let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let s = @bpacket.SendCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
+  let r = @bpacket.RecvCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
   match s.emit(b'\x05', bp_payload(8, b'\x11'), bp_pad_src(32)) {
     Ok(sp) => {
       sp.wire[10] = sp.wire[10] ^ b'\x01'
@@ -350,15 +390,25 @@ test "t8_tamper_header_three_outcomes" {
   //   byte0 ^= 0x80 → 解出的 packlen 置高位 → BadLength
   //   byte3 ^= 0x01 → packlen 变奇数 → AlignError
   //   byte3 ^= 0x08 → packlen +8 仍对齐但在解密时 tag 失败 → AuthFailed
-  let flips : Array[(Int, Byte, String)] = [
+  let flips : Array[(Int32, Byte, String)] = [
     (0, b'\x80', "badlength"),
     (3, b'\x01', "alignerror"),
     (3, b'\x08', "authfailed"),
   ]
   for flip in flips {
     let (pos, mask, name) = flip
-    let s = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
-    let r = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let s = @bpacket.SendCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
+    let r = @bpacket.RecvCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
     match s.emit(b'\x06', bp_payload(8, b'\x22'), bp_pad_src(32)) {
       Ok(sp) => {
         sp.wire[pos] = sp.wire[pos] ^ mask
@@ -618,7 +668,7 @@ test "t16_seqnr_wrap" {
 ///|
 test "t17_property_sweep" {
   let key = bp_key64()
-  let sizes : Array[Int] = [
+  let sizes : Array[Int32] = [
     0, 1, 3, 5, 7, 9, 11, 13, 15, 17, 23, 31, 47, 63, 64, 65, 69,
   ]
   for n in sizes {
@@ -654,8 +704,18 @@ test "t17_property_sweep" {
       SeqnrWrapFatal => abort("t17: unexpected wrap")
     }
     // aead
-    let sa = @bpacket.SendCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
-    let ra = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let sa = @bpacket.SendCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
+    let ra = @bpacket.RecvCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
     match sa.emit(bp_byte(150 + n % 50), pay, bp_pad_src(32)) {
       Ok(pkt) => {
         let f = pkt.frame
@@ -703,7 +763,7 @@ fn bp_assert_bytes(
 
 ///|
 /// V3 的确定性 payload:(i*7+rnd)&0xFF,长度 5+rnd
-fn bp_v3_payload(rnd : Int) -> FixedArray[Byte] {
+fn bp_v3_payload(rnd : Int32) -> FixedArray[Byte] {
   let n = 5 + rnd
   let arr : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
@@ -763,7 +823,12 @@ test "t18_python_kat_vectors" {
   // ---- V3:三包拼接流逐包消费 ----
   let stream_hex = "94450e4911e24236a3f3ba74b7c6fac00fe0ec8adf1e66d1ca95d141dd568e2b12a3e73dc922a7b561077dd13e1ca55e88d5d98912b4b4b0587d43062f4ed25affca4710776192703cc39c034a96b2fe1a6a7971e19b1c6a6b51e9bbf09fb6c83e1042377227b2b06b6d1c71"
   let stream = bp_hex(stream_hex)
-  let rs = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+  let rs = @bpacket.RecvCtx::make(
+    Aead(@bpacket.ChachaPolyCtx::new64(key)),
+    0U,
+    false,
+    true,
+  )
   let mut off = 0
   for rnd = 0; rnd < 3; rnd = rnd + 1 {
     let res = rs.recv(bp_slice(stream, off, stream.length()))
@@ -819,7 +884,12 @@ test "t18_python_kat_vectors" {
   ]
   for case in cases {
     let (hexstr, want) = case
-    let rt = @bpacket.RecvCtx::make(Aead(@bpacket.ChachaPolyCtx::new64(key)), 0U, false, true)
+    let rt = @bpacket.RecvCtx::make(
+      Aead(@bpacket.ChachaPolyCtx::new64(key)),
+      0U,
+      false,
+      true,
+    )
     let res = rt.recv(bp_hex(hexstr))
     let ok = match res.event {
       Failed(AuthFailed) => want == "auth" || want == "auth2"

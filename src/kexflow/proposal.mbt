@@ -6,7 +6,7 @@
 
 ///|
 /// cookie 长度(kex.h KEX_COOKIE_LEN)
-pub const KEX_COOKIE_LEN : Int = 16
+pub const KEX_COOKIE_LEN : Int32 = 16
 
 ///|
 /// 提案十类目(kex.h PROPOSAL_* 顺序)
@@ -34,16 +34,16 @@ const KEX_STRICT_MARKER_C : String = "kex-strict-c-v00@openssh.com"
 /// mac 类目按 OpenSSH 默认表前两项发送(AEAD 下协商结果弃用,
 /// 决策 D3);comp none;lang 空;follows 恒 false(决策 D4)。
 /// Loop #60: the MAC list is no longer "the first two entries of OpenSSH's
-  /// default table". `hmac-sha2-256-etm@openssh.com` used to lead it, and
-  /// `src/bpacket` has no EtM branch at all (packet_ctx.mbt:32) -- the name was
-  /// harmless only because the cipher below is an AEAD, where the MAC is never
-  /// computed. That is a coincidence, not a property: change one line of
-  /// `enc_ctos` to `aes128-ctr` and `negotiate` hands back the EtM name (its
-  /// first-match scan runs over *our* list), `we_need_for` aborts, and the
-  /// client that was "advertising OpenSSH's defaults" cannot complete a
-  /// handshake it just agreed to. The list now carries only what
-  /// `@bpacket.check_runnable` accepts.
-  pub fn Proposal::default_client(strict_kex : Bool) -> Proposal {
+/// default table". `hmac-sha2-256-etm@openssh.com` used to lead it, and
+/// `src/bpacket` has no EtM branch at all (packet_ctx.mbt:32) -- the name was
+/// harmless only because the cipher below is an AEAD, where the MAC is never
+/// computed. That is a coincidence, not a property: change one line of
+/// `enc_ctos` to `aes128-ctr` and `negotiate` hands back the EtM name (its
+/// first-match scan runs over *our* list), `we_need_for` aborts, and the
+/// client that was "advertising OpenSSH's defaults" cannot complete a
+/// handshake it just agreed to. The list now carries only what
+/// `@bpacket.check_runnable` accepts.
+pub fn Proposal::default_client(strict_kex : Bool) -> Proposal {
   let kex = if strict_kex {
     "curve25519-sha256,\{KEX_STRICT_MARKER_C}"
   } else {
@@ -91,9 +91,9 @@ fn pf_cat(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
 }
 
 ///|
-fn pf_u32(v : Int) -> FixedArray[Byte] {
+fn pf_u32(v : Int32) -> FixedArray[Byte] {
   let a : FixedArray[Byte] = FixedArray::make(4, b'\x00')
-  let u : UInt = v.reinterpret_as_uint()
+  let u : UInt32 = v.reinterpret_as_uint()
   a[0] = ((u >> 24) & 0xFFU).to_byte()
   a[1] = ((u >> 16) & 0xFFU).to_byte()
   a[2] = ((u >> 8) & 0xFFU).to_byte()
@@ -160,7 +160,7 @@ fn pf_bytes_to_string(b : FixedArray[Byte]) -> String {
   // 提案类目是 ASCII 名单;逐字节构造(非 UTF-8 校验,与 C 的 char* 透传一致)
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   sb.to_string()
 }

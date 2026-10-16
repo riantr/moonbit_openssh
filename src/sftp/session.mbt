@@ -22,7 +22,8 @@
 /// Results are only complete once an operation *and* its CLOSE have finished,
 /// so `results()` never returns a half-filled directory.
 
-///| One scripted operation.
+///|
+/// One scripted operation.
 pub(all) enum SftpOp {
   /// REALPATH -- where the session actually landed
   Realpath(String)
@@ -55,7 +56,8 @@ pub(all) enum SftpOp {
   Rename(String, String)
 }
 
-///| What one operation produced.
+///|
+/// What one operation produced.
 ///
 /// A failure carries the SFTP status code rather than becoming a transport
 /// error, because "no such file" is a *successful* SFTP exchange: the request
@@ -66,38 +68,46 @@ pub(all) enum SftpOpResult {
   RealpathOk(String)
   Attrs(SftpAttrs)
   /// (filename, size, is_dir) -- size is -1 when not reported or too big for Int
-  Listing(Array[(String, Int, Bool)])
+  Listing(Array[(String, Int32, Bool)])
   Contents(FixedArray[Byte])
   /// SFTP status code, and its message
-  Failed(Int, String)
+  Failed(Int32, String)
   /// A mutating operation that the server accepted: how many bytes it wrote,
   /// or 0 for the ones with nothing to report.
   ///
   /// Separate from `Failed` for the same reason the read side is: a STATUS
   /// with a non-zero code is an answer, not a broken exchange.
-  Wrote(Int)
+  Wrote(Int32)
   Changed
 }
 
-const PH_VERSION : Int = 0
-const PH_RUNNING : Int = 1
-const PH_DONE : Int = 2
-const PH_FAILED : Int = 3
+///|
+const PH_VERSION : Int32 = 0
 
-///| 一个子步骤:某个请求已经在等它的应答
+///|
+const PH_RUNNING : Int32 = 1
+
+///|
+const PH_DONE : Int32 = 2
+
+///|
+const PH_FAILED : Int32 = 3
+
+///|
+/// 一个子步骤:某个请求已经在等它的应答
 enum Step {
   WantVersion
-  WantRealpath(Int)
-  WantStat(Int)
-  WantOpenDir(Int)
-  WantReadDir(Int)
-  WantOpenFile(Int)
-  WantRead(Int)
-  WantClose(Int)
-  WantOpenWrite(Int)
-  WantWrite(Int)
+  WantRealpath(Int32)
+  WantStat(Int32)
+  WantOpenDir(Int32)
+  WantReadDir(Int32)
+  WantOpenFile(Int32)
+  WantRead(Int32)
+  WantClose(Int32)
+  WantOpenWrite(Int32)
+  WantWrite(Int32)
   /// SETSTAT / MKDIR / REMOVE / RMDIR: one request, one STATUS, no handle.
-  WantSimple(Int)
+  WantSimple(Int32)
 }
 
 ///|
@@ -107,16 +117,16 @@ pub(all) struct SftpSession {
   mut outq : Array[FixedArray[Byte]]
   mut ops : Array[SftpOp]
   mut results : Array[SftpOpResult]
-  mut op_index : Int
-  mut next_id : Int
+  mut op_index : Int32
+  mut next_id : Int32
   mut step : Step
-  mut phase : Int
+  mut phase : Int32
   /// handle held by the operation in progress (operations are serial)
   mut handle : FixedArray[Byte]
   mut offset : UInt64
   mut chunks : Array[FixedArray[Byte]]
   /// entries gathered by the current ListDir
-  mut listing : Array[(String, Int, Bool)]
+  mut listing : Array[(String, Int32, Bool)]
   /// set when the current ListDir failed part way
   mut listing_failed : SftpOpResult?
   /// the Contents the current ReadFile assembled
@@ -125,17 +135,17 @@ pub(all) struct SftpSession {
   mut pending_write : FixedArray[Byte]
   /// how many bytes of it the server has accepted so far, which is also the
   /// offset of the next WRITE
-  mut written : Int
+  mut written : Int32
   /// the extension names the server listed in VERSION, in the order it sent
   /// them. Kept as names rather than as a count: the count is already
   /// reported, and a client that decides behaviour from a number has to know
   /// which number means which thing.
   mut ext_names : Array[String]
-  mut version : Int
-  mut extensions : Int
-  mut requests_sent : Int
-  mut replies_recv : Int
-  mut sftp_bytes_in : Int
+  mut version : Int32
+  mut extensions : Int32
+  mut requests_sent : Int32
+  mut replies_recv : Int32
+  mut sftp_bytes_in : Int32
   mut failure : String?
 }
 
@@ -174,21 +184,25 @@ pub fn SftpSession::new(ops : Array[SftpOp]) -> SftpSession {
   s
 }
 
-///| 取走排队中的请求(已带长度前缀)
+///|
+/// 取走排队中的请求(已带长度前缀)
 pub fn SftpSession::take_out(self : SftpSession) -> Array[FixedArray[Byte]] {
   let out = self.outq
   self.outq = []
   out
 }
 
+///|
 pub fn SftpSession::done(self : SftpSession) -> Bool {
   self.phase == PH_DONE
 }
 
+///|
 pub fn SftpSession::failed(self : SftpSession) -> Bool {
   self.phase == PH_FAILED
 }
 
+///|
 pub fn SftpSession::failure_reason(self : SftpSession) -> String {
   match self.failure {
     Some(s) => s
@@ -196,27 +210,33 @@ pub fn SftpSession::failure_reason(self : SftpSession) -> String {
   }
 }
 
+///|
 pub fn SftpSession::results_of(self : SftpSession) -> Array[SftpOpResult] {
   self.results
 }
 
-pub fn SftpSession::version_of(self : SftpSession) -> Int {
+///|
+pub fn SftpSession::version_of(self : SftpSession) -> Int32 {
   self.version
 }
 
-pub fn SftpSession::extensions_of(self : SftpSession) -> Int {
+///|
+pub fn SftpSession::extensions_of(self : SftpSession) -> Int32 {
   self.extensions
 }
 
-pub fn SftpSession::requests_sent_count(self : SftpSession) -> Int {
+///|
+pub fn SftpSession::requests_sent_count(self : SftpSession) -> Int32 {
   self.requests_sent
 }
 
-pub fn SftpSession::replies_recv_count(self : SftpSession) -> Int {
+///|
+pub fn SftpSession::replies_recv_count(self : SftpSession) -> Int32 {
   self.replies_recv
 }
 
-pub fn SftpSession::bytes_in_count(self : SftpSession) -> Int {
+///|
+pub fn SftpSession::bytes_in_count(self : SftpSession) -> Int32 {
   self.sftp_bytes_in
 }
 
@@ -281,7 +301,7 @@ pub fn SftpSession::pump(self : SftpSession) -> Unit {
 /// operations from stealing each other's replies.
 fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
   match self.step {
-    WantVersion => {
+    WantVersion =>
       match r {
         Version(v) => {
           self.version = v.version
@@ -297,13 +317,12 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
         // does -- it waits for VERSION specifically (sftp-client.c:474-484).
         _ => ()
       }
-    }
     WantRealpath(id) => {
       if reply_id(r) != id {
         return
       }
       match r {
-        Name(nm) => {
+        Name(nm) =>
           if nm.names.length() < 1 {
             // REALPATH always answers with exactly one name. Zero entries is
             // not "an empty path" -- it means the reply is not the shape we
@@ -312,7 +331,6 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
           } else {
             self.results.push(RealpathOk(bytes_text(nm.names[0].filename)))
           }
-        }
         Status(st) => self.results.push(Failed(st.code, bytes_text(st.message)))
         _ => self.results.push(Failed(-1, "unexpected " + reply_kind(r)))
       }
@@ -358,11 +376,13 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
         Name(nm) => {
           for i = 0; i < nm.names.length(); i = i + 1 {
             let e = nm.names[i]
-            self.listing.push((
-              bytes_text(e.filename),
-              sftp_u64_to_int_of(e.attrs),
-              is_dir_perm(e.attrs),
-            ))
+            self.listing.push(
+              (
+                bytes_text(e.filename),
+                sftp_u64_to_int_of(e.attrs),
+                is_dir_perm(e.attrs),
+              ),
+            )
           }
           self.send_readdir()
         }
@@ -476,7 +496,7 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
         return
       }
       match r {
-        Status(st) => {
+        Status(st) =>
           if st.code == FX_OK {
             self.send_write()
           } else {
@@ -486,7 +506,6 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
             // channel goes away.
             self.send_close()
           }
-        }
         _ => {
           self.results.push(Failed(-1, "unexpected " + reply_kind(r)))
           self.send_close()
@@ -524,17 +543,20 @@ fn SftpSession::on_reply(self : SftpSession, r : SftpReply) -> Unit {
 // driving the script
 // ---------------------------------------------------------------------------
 
-fn SftpSession::take_id(self : SftpSession) -> Int {
+///|
+fn SftpSession::take_id(self : SftpSession) -> Int32 {
   let id = self.next_id
   self.next_id = id + 1
   id
 }
 
+///|
 fn SftpSession::queue(self : SftpSession, body : FixedArray[Byte]) -> Unit {
   self.outq.push(sftp_frame(body))
   self.requests_sent = self.requests_sent + 1
 }
 
+///|
 fn SftpSession::begin_op(self : SftpSession) -> Unit {
   if self.op_index >= self.ops.length() {
     self.phase = PH_DONE
@@ -602,7 +624,9 @@ fn SftpSession::begin_op(self : SftpSession) -> Unit {
       let id = self.take_id()
       self.step = WantSimple(id)
       if self.has_extension(EXT_POSIX_RENAME) {
-        self.queue(sftp_extended(id, EXT_POSIX_RENAME, sftp_posix_rename_body(from, to)))
+        self.queue(
+          sftp_extended(id, EXT_POSIX_RENAME, sftp_posix_rename_body(from, to)),
+        )
       } else {
         self.queue(sftp_rename(id, from, to))
       }
@@ -610,23 +634,27 @@ fn SftpSession::begin_op(self : SftpSession) -> Unit {
   }
 }
 
+///|
 fn SftpSession::next_op(self : SftpSession) -> Unit {
   self.op_index = self.op_index + 1
   self.begin_op()
 }
 
+///|
 fn SftpSession::send_readdir(self : SftpSession) -> Unit {
   let id = self.take_id()
   self.step = WantReadDir(id)
   self.queue(sftp_readdir(id, self.handle))
 }
 
+///|
 fn SftpSession::send_read(self : SftpSession) -> Unit {
   let id = self.take_id()
   self.step = WantRead(id)
   self.queue(sftp_read(id, self.handle, self.offset, sftp_read_length(32768)))
 }
 
+///|
 fn SftpSession::send_close(self : SftpSession) -> Unit {
   let id = self.take_id()
   self.step = WantClose(id)
@@ -691,7 +719,8 @@ pub fn SftpSession::has_extension(self : SftpSession, name : String) -> Bool {
   false
 }
 
-///| 版本协商里服务器报过的扩展名,原序。
+///|
+/// 版本协商里服务器报过的扩展名,原序。
 pub fn SftpSession::extension_names(self : SftpSession) -> Array[String] {
   self.ext_names
 }
@@ -700,7 +729,8 @@ pub fn SftpSession::extension_names(self : SftpSession) -> Array[String] {
 // assembling one operation's result
 // ---------------------------------------------------------------------------
 
-///| 把攒到的目录条目作为**一条**结果落定
+///|
+/// 把攒到的目录条目作为**一条**结果落定
 fn SftpSession::flush_listing(self : SftpSession) -> Unit {
   match self.listing_failed {
     Some(v) => self.results.push(v)
@@ -710,6 +740,7 @@ fn SftpSession::flush_listing(self : SftpSession) -> Unit {
   self.listing_failed = None
 }
 
+///|
 fn SftpSession::flush_contents(self : SftpSession) -> Unit {
   match self.contents {
     Some(v) => self.results.push(v)
@@ -719,8 +750,11 @@ fn SftpSession::flush_contents(self : SftpSession) -> Unit {
 }
 
 ///| S_IFMT / S_IFDIR: a directory is 0x4000 in the permission bits. The server
+
 ///| may not report permissions at all, so an absent field means "not known"
-///| and we say file rather than guess.
+
+///|
+/// and we say file rather than guess.
 fn is_dir_perm(a : SftpAttrs) -> Bool {
   match a.permissions {
     Some(p) => (p & 0xF000) == 0x4000
@@ -728,15 +762,17 @@ fn is_dir_perm(a : SftpAttrs) -> Bool {
   }
 }
 
+///|
 fn bytes_text(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   sb.to_string()
 }
 
-fn sftp_u64_to_int_of(a : SftpAttrs) -> Int {
+///|
+fn sftp_u64_to_int_of(a : SftpAttrs) -> Int32 {
   match a.size {
     Some(v) => sftp_u64_to_int(v)
     None => -1

@@ -12,13 +12,13 @@
 
 ///|
 /// SHA-256 摘要长度
-const KX_DIGEST_LEN : Int = 32
+const KX_DIGEST_LEN : Int32 = 32
 
 ///|
 /// 单密钥派生(kex.c derive_key 完整对应,含链式扩展)
 pub fn derive_single(
   letter : Byte,
-  need : Int,
+  need : Int32,
   hash : FixedArray[Byte],
   shared_secret_mpint : FixedArray[Byte],
   session_id : FixedArray[Byte],
@@ -79,7 +79,7 @@ pub struct DerivedKeys {
 pub fn derive_keys(
   hash : FixedArray[Byte],
   shared_secret_mpint : FixedArray[Byte],
-  we_need : Int,
+  we_need : Int32,
 ) -> DerivedKeys {
   let sid = hash // 首次 kex:session_id = H(C 里拷贝进 buf,值等价)
   DerivedKeys::derive_keys_with_session(hash, shared_secret_mpint, we_need, sid)
@@ -90,7 +90,7 @@ pub fn derive_keys(
 pub fn DerivedKeys::derive_keys_with_session(
   hash : FixedArray[Byte],
   shared_secret_mpint : FixedArray[Byte],
-  we_need : Int,
+  we_need : Int32,
   session_id : FixedArray[Byte],
 ) -> DerivedKeys {
   {

@@ -29,11 +29,13 @@ pub fn sftp_frame(body : FixedArray[Byte]) -> FixedArray[Byte] {
   out
 }
 
-fn put_type(t : Int) -> FixedArray[Byte] {
+///|
+fn put_type(t : Int32) -> FixedArray[Byte] {
   FixedArray::make(1, t.to_byte())
 }
 
-fn put_u32i(v : Int) -> FixedArray[Byte] {
+///|
+fn put_u32i(v : Int32) -> FixedArray[Byte] {
   @sshwire.write_u32(v.reinterpret_as_uint())
 }
 
@@ -45,7 +47,7 @@ fn put_u32i(v : Int) -> FixedArray[Byte] {
 /// server replies with *its* version plus an extension list sized for that
 /// version, so an INIT that understates ours makes the two sides disagree
 /// about which extensions are in play.
-pub fn sftp_init(version : Int) -> FixedArray[Byte] {
+pub fn sftp_init(version : Int32) -> FixedArray[Byte] {
   sftp_cat([put_type(FXP_INIT), put_u32i(version)])
 }
 
@@ -55,27 +57,30 @@ pub fn sftp_init(version : Int) -> FixedArray[Byte] {
 /// Used for "." rather than as a way to escape the chroot: `internal-sftp`
 /// confines the session, and REALPATH is how a client *learns* where it
 /// landed rather than a way to choose.
-pub fn sftp_realpath(id : Int, path : String) -> FixedArray[Byte] {
+pub fn sftp_realpath(id : Int32, path : String) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_REALPATH), put_u32i(id),
+    put_type(FXP_REALPATH),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
   ])
 }
 
 ///|
 /// SSH2_FXP_STAT (sftp.h:52) -- follows symlinks, as opposed to LSTAT.
-pub fn sftp_stat(id : Int, path : String) -> FixedArray[Byte] {
+pub fn sftp_stat(id : Int32, path : String) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_STAT), put_u32i(id),
+    put_type(FXP_STAT),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
   ])
 }
 
 ///|
 /// SSH2_FXP_OPENDIR (sftp.h:45).
-pub fn sftp_opendir(id : Int, path : String) -> FixedArray[Byte] {
+pub fn sftp_opendir(id : Int32, path : String) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_OPENDIR), put_u32i(id),
+    put_type(FXP_OPENDIR),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
   ])
 }
@@ -86,9 +91,10 @@ pub fn sftp_opendir(id : Int, path : String) -> FixedArray[Byte] {
 /// `handle` is an opaque server-issued token, so it goes back byte for byte.
 /// Re-encoding it as text would work until a server issued one containing a
 /// NUL or a non-ASCII byte.
-pub fn sftp_readdir(id : Int, handle : FixedArray[Byte]) -> FixedArray[Byte] {
+pub fn sftp_readdir(id : Int32, handle : FixedArray[Byte]) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_READDIR), put_u32i(id),
+    put_type(FXP_READDIR),
+    put_u32i(id),
     @sshwire.write_ssh_string(handle),
   ])
 }
@@ -102,13 +108,14 @@ pub fn sftp_readdir(id : Int, handle : FixedArray[Byte]) -> FixedArray[Byte] {
 /// (sftp-server.c:748, defaulting to 0666). An absent block is the
 /// four-byte "no flags" encoding, not zero bytes.
 pub fn sftp_open(
-  id : Int,
+  id : Int32,
   path : String,
-  pflags : Int,
+  pflags : Int32,
   attrs : SftpAttrs,
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_OPEN), put_u32i(id),
+    put_type(FXP_OPEN),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
     put_u32i(pflags),
     attrs.encode(),
@@ -120,13 +127,14 @@ pub fn sftp_open(
 ///
 /// `offset` is a full-file offset, not a position within the current read.
 pub fn sftp_read(
-  id : Int,
+  id : Int32,
   handle : FixedArray[Byte],
   offset : UInt64,
-  length : Int,
+  length : Int32,
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_READ), put_u32i(id),
+    put_type(FXP_READ),
+    put_u32i(id),
     @sshwire.write_ssh_string(handle),
     @sshwire.write_u64(offset),
     put_u32i(length),
@@ -146,13 +154,14 @@ pub fn sftp_read(
 /// `SFTP_MAX_MSG_LENGTH`, so `sftp_write_length` keeps one packet's worth of
 /// data comfortably under that.
 pub fn sftp_write(
-  id : Int,
+  id : Int32,
   handle : FixedArray[Byte],
   offset : UInt64,
   data : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_WRITE), put_u32i(id),
+    put_type(FXP_WRITE),
+    put_u32i(id),
     @sshwire.write_ssh_string(handle),
     @sshwire.write_u64(offset),
     @sshwire.write_ssh_string(data),
@@ -167,12 +176,13 @@ pub fn sftp_write(
 /// encoding of "I want to change nothing" is `SftpAttrs::none()` -- four zero
 /// bytes -- and it is a complete, legal request.
 pub fn sftp_setstat(
-  id : Int,
+  id : Int32,
   path : String,
   attrs : SftpAttrs,
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_SETSTAT), put_u32i(id),
+    put_type(FXP_SETSTAT),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
     attrs.encode(),
   ])
@@ -181,12 +191,13 @@ pub fn sftp_setstat(
 ///|
 /// SSH2_FXP_FSETSTAT (sftp.h:48) -- SETSTAT by handle rather than by path.
 pub fn sftp_fsetstat(
-  id : Int,
+  id : Int32,
   handle : FixedArray[Byte],
   attrs : SftpAttrs,
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_FSETSTAT), put_u32i(id),
+    put_type(FXP_FSETSTAT),
+    put_u32i(id),
     @sshwire.write_ssh_string(handle),
     attrs.encode(),
   ])
@@ -199,12 +210,13 @@ pub fn sftp_fsetstat(
 /// field the server does not read would not be noticed here, but a missing one
 /// is a `fatal_fr`, i.e. the session is torn down rather than answered.
 pub fn sftp_rename(
-  id : Int,
+  id : Int32,
   old_path : String,
   new_path : String,
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_RENAME), put_u32i(id),
+    put_type(FXP_RENAME),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(old_path)),
     @sshwire.write_ssh_string(sftp_ascii(new_path)),
   ])
@@ -217,18 +229,25 @@ pub fn sftp_rename(
 /// a STATUS, so they are one function rather than four: a reader looking for
 /// "what does REMOVE send" should find the list, not three near-identical
 /// bodies that could drift apart in the details.
-pub fn sftp_path_only(id : Int, typ : Int, path : String) -> FixedArray[Byte] {
+pub fn sftp_path_only(
+  id : Int32,
+  typ : Int32,
+  path : String,
+) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(typ), put_u32i(id),
+    put_type(typ),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
   ])
 }
 
-pub fn sftp_remove(id : Int, path : String) -> FixedArray[Byte] {
+///|
+pub fn sftp_remove(id : Int32, path : String) -> FixedArray[Byte] {
   sftp_path_only(id, FXP_REMOVE, path)
 }
 
-pub fn sftp_rmdir(id : Int, path : String) -> FixedArray[Byte] {
+///|
+pub fn sftp_rmdir(id : Int32, path : String) -> FixedArray[Byte] {
   sftp_path_only(id, FXP_RMDIR, path)
 }
 
@@ -239,12 +258,13 @@ pub fn sftp_rmdir(id : Int, path : String) -> FixedArray[Byte] {
 /// mode comes from them when the PERMISSIONS bit is set, and 0777 otherwise
 /// (`:1201-1203`). Sending zero bytes there is a parse failure, not a default.
 pub fn sftp_mkdir(
-  id : Int,
+  id : Int32,
   path : String,
   attrs : SftpAttrs,
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_MKDIR), put_u32i(id),
+    put_type(FXP_MKDIR),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(path)),
     attrs.encode(),
   ])
@@ -262,12 +282,13 @@ pub fn sftp_mkdir(
 /// work against a server that does not advertise it -- so the driver checks
 /// what VERSION said.
 pub fn sftp_extended(
-  id : Int,
+  id : Int32,
   name : String,
   body : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_EXTENDED), put_u32i(id),
+    put_type(FXP_EXTENDED),
+    put_u32i(id),
     @sshwire.write_ssh_string(sftp_ascii(name)),
     body,
   ])
@@ -293,7 +314,7 @@ pub fn sftp_posix_rename_body(
 /// becomes one SSH packet, which the channel layer then has to split across
 /// several CHANNEL_DATA messages and reassemble, so a larger chunk buys
 /// nothing and makes the window arithmetic harder to reason about.
-pub fn sftp_write_length(want : Int) -> Int {
+pub fn sftp_write_length(want : Int32) -> Int32 {
   if want > 32768 {
     return 32768
   }
@@ -302,9 +323,10 @@ pub fn sftp_write_length(want : Int) -> Int {
 
 ///|
 /// SSH2_FXP_CLOSE (sftp.h:36).
-pub fn sftp_close(id : Int, handle : FixedArray[Byte]) -> FixedArray[Byte] {
+pub fn sftp_close(id : Int32, handle : FixedArray[Byte]) -> FixedArray[Byte] {
   sftp_cat([
-    put_type(FXP_CLOSE), put_u32i(id),
+    put_type(FXP_CLOSE),
+    put_u32i(id),
     @sshwire.write_ssh_string(handle),
   ])
 }
@@ -317,7 +339,7 @@ pub fn sftp_close(id : Int, handle : FixedArray[Byte]) -> FixedArray[Byte] {
 /// than `SFTP_MAX_READ_LENGTH` is legal and simply comes back short. Asking
 /// for the clamped value ourselves keeps the KAT's byte counts honest and
 /// saves a round trip's worth of surprise.
-pub fn sftp_read_length(want : Int) -> Int {
+pub fn sftp_read_length(want : Int32) -> Int32 {
   if want > SFTP_MAX_READ_LENGTH {
     return SFTP_MAX_READ_LENGTH
   }

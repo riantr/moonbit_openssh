@@ -1,7 +1,7 @@
 ///| Loop #24 ssh_config fnmatch/parser/match byte-exact 验证
+
 ///|
 /// 10 行 byte-exact 跨 4 target × 2 mode
-
 fn main {
   // ============ G1 fnmatch KAT tests ============
   //
@@ -26,43 +26,50 @@ fn main {
   println("parsed_sections: " + parsed_sections)
 
   // ============ G3 Host pattern matching ============
-  let section_match = match @sshconfig.match_host_section("foo.example.com", sections) {
+  let section_match = match
+    @sshconfig.match_host_section("foo.example.com", sections) {
     Some(_) => "yes"
     None => "no"
   }
   println("foo.example.com match: " + section_match)
 
-  let user_for_foo = match @sshconfig.match_host_option("foo.example.com", sections, "User") {
+  let user_for_foo = match
+    @sshconfig.match_host_option("foo.example.com", sections, "User") {
     Some(v) => v
     None => "none"
   }
   println("foo.example.com User: " + user_for_foo)
 
-  let port_for_foo = match @sshconfig.match_host_option("foo.example.com", sections, "Port") {
+  let port_for_foo = match
+    @sshconfig.match_host_option("foo.example.com", sections, "Port") {
     Some(v) => v
     None => "none"
   }
   println("foo.example.com Port: " + port_for_foo)
 
-  let user_for_ngs = match @sshconfig.match_host_option("ngs.fi", sections, "User") {
+  let user_for_ngs = match
+    @sshconfig.match_host_option("ngs.fi", sections, "User") {
     Some(v) => v
     None => "none"
   }
   println("ngs.fi User: " + user_for_ngs)
 
-  let host_for_ngs = match @sshconfig.match_host_option("ngs.fi", sections, "HostName") {
+  let host_for_ngs = match
+    @sshconfig.match_host_option("ngs.fi", sections, "HostName") {
     Some(v) => v
     None => "none"
   }
   println("ngs.fi HostName: " + host_for_ngs)
 
-  let fwd_for_unknown = match @sshconfig.match_host_option("unknown.host", sections, "ForwardAgent") {
+  let fwd_for_unknown = match
+    @sshconfig.match_host_option("unknown.host", sections, "ForwardAgent") {
     Some(v) => v
     None => "none"
   }
   println("unknown.host ForwardAgent: " + fwd_for_unknown)
 
-  let no_match = match @sshconfig.match_host_option("foo.example.com", sections, "NonExistent") {
+  let no_match = match
+    @sshconfig.match_host_option("foo.example.com", sections, "NonExistent") {
     Some(v) => v
     None => "none"
   }

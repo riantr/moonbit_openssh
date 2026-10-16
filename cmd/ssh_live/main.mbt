@@ -86,6 +86,7 @@ fn auth_error_name(e : @sshclient.AuthError) -> String {
 }
 
 ///|
+
 ///|
 /// 固定类失败的一句话说明。**打印在 `error:` 之后**,因为 `error:` 是机器读的那
 /// 一行,人话跟在后面。
@@ -106,20 +107,29 @@ fn print_pin_hint(e : @sshclient.AuthError) -> Unit {
       // 理由给，不能给一句通用的话——而门禁断言的正是提示里提到了该提的那件事。
       if reason == "no-certificate-expected" {
         println(
-          "hint: " + host + " is pinned via a @cert-authority entry, but the " +
+          "hint: " +
+          host +
+          " is pinned via a @cert-authority entry, but the " +
           "server sent a plain key instead of a certificate. Pin the host key " +
-          "directly (ssh-keyscan -t ecdsa " + host + ") if that is what you want.",
+          "directly (ssh-keyscan -t ecdsa " +
+          host +
+          ") if that is what you want.",
         )
       } else if reason == "expired" || reason == "not-yet-valid" {
         println(
           "hint: the host certificate presented is outside its validity window " +
-          "(reason: " + reason + "). Check the clock on both ends, then re-issue " +
+          "(reason: " +
+          reason +
+          "). Check the clock on both ends, then re-issue " +
           "the certificate on the server (ssh-keygen -s <ca> -h -I <id> " +
-          "-n " + host + ").",
+          "-n " +
+          host +
+          ").",
         )
       } else if reason == "principal-mismatch" {
         println(
-          "hint: the host certificate does not list " + host +
+          "hint: the host certificate does not list " +
+          host +
           " among its principals. Issue one whose principal is the name you " +
           "connect to, or connect by a name the certificate already covers.",
         )
@@ -137,7 +147,8 @@ fn print_pin_hint(e : @sshclient.AuthError) -> Unit {
         )
       } else {
         println(
-          "hint: the host certificate did not validate (reason: " + reason +
+          "hint: the host certificate did not validate (reason: " +
+          reason +
           "). --kh-tofu does NOT apply to certificates: a certificate without a " +
           "pinned CA looks exactly like what a man in the middle would send.",
         )
@@ -145,25 +156,34 @@ fn print_pin_hint(e : @sshclient.AuthError) -> Unit {
     @sshclient.HostkeyCertUntrusted(h) =>
       println(
         "hint: the server sent a host certificate signed by a CA that has no " +
-        "@cert-authority entry here for " + h + ". Add the CA's public key as " +
-        "@cert-authority " + h + " ssh-ed25519 <base64>, or connect to a host whose " +
+        "@cert-authority entry here for " +
+        h +
+        ". Add the CA's public key as " +
+        "@cert-authority " +
+        h +
+        " ssh-ed25519 <base64>, or connect to a host whose " +
         "CA you already pin. --kh-tofu does not apply to certificates.",
       )
     @sshclient.HostkeyMismatch(h) =>
       println(
-        "hint: the key " + h + " presented does not match the pinned one. Treat this " +
+        "hint: the key " +
+        h +
+        " presented does not match the pinned one. Treat this " +
         "as a man in the middle until you have checked otherwise; --kh-tofu is the " +
         "way to accept the new key and stop asking.",
       )
     @sshclient.HostkeyUnknown(h) =>
       println(
-        "hint: " + h + " has no key pinned at all. Add one, or pass --kh-tofu to " +
+        "hint: " +
+        h +
+        " has no key pinned at all. Add one, or pass --kh-tofu to " +
         "accept and write back the key you are being shown now.",
       )
     _ => ()
   }
 }
 
+///|
 fn print_auth_rejection(e : @sshclient.AuthError) -> Unit {
   match e {
     @sshclient.AuthRejected(r, sb, sg) => {
@@ -197,7 +217,7 @@ fn test_auth_key() -> @bigint.BigNat {
 /// whose surface differs across MoonBit releases and this driver only ever
 /// needs a port number. `fallback = 0` means "not a port", which lets the
 /// caller scan argv without a separate validity flag.
-fn parse_port(s : String, fallback : Int) -> Int {
+fn parse_port(s : String, fallback : Int32) -> Int32 {
   let n = s.length()
   if n == 0 || n > 5 {
     return fallback
@@ -224,7 +244,7 @@ fn parse_port(s : String, fallback : Int) -> Int {
 /// instead of honouring what the caller asked for. Scanning for the first
 /// argument that actually parses as a port is backend-agnostic and cannot
 /// pick up a path component by accident -- a path segment is not all digits.
-fn find_port(argv : Array[String]) -> Int {
+fn find_port(argv : Array[String]) -> Int32 {
   let mut i = 1
   while i < argv.length() {
     // Loop #58: 跳过取值的那个 token。`--target 2222` 里的 2222 是主机名位置上的
@@ -280,6 +300,7 @@ fn auth_mode(argv : Array[String]) -> Bool {
   false
 }
 
+///|
 fn find_user(argv : Array[String]) -> String {
   let mut i = 1
   while i < argv.length() {
@@ -322,6 +343,7 @@ fn argv_value(argv : Array[String], name : String) -> String {
   ""
 }
 
+///|
 fn has_switch(argv : Array[String], name : String) -> Bool {
   let mut i = 1
   while i < argv.length() {
@@ -333,12 +355,13 @@ fn has_switch(argv : Array[String], name : String) -> Bool {
   false
 }
 
+///|
 /// 端口只接受十进制数字,其它一律回落到 0。0 的含义是「端口从 `kh_host` 的
 /// `[host]:port` 形式里读」——这是和 `cmd/wt_ssh` 的 `kh_port` 缺省值一样的
 /// 语义,两条驱动必须一致,否则同一份 known_hosts 在两边会落到不同条目上。
 /// 端口写错尤其难查:22 是最常见的那个,一个拼错的端口常常让比对**看起来通过**
 /// 或**看起来是 Unknown**,两种都更像「配置没问题」。
-fn parse_port_arg(s : String, fallback : Int) -> Int {
+fn parse_port_arg(s : String, fallback : Int32) -> Int32 {
   if s.length() == 0 {
     return fallback
   }
@@ -431,15 +454,19 @@ async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
   }
   match @khfile.append_terminated(kh.file, line) {
     @khfile.AppendResult::Appended => println("tofu: written to " + kh.file)
-    @khfile.AppendResult::Failed(why) => {
+    @khfile.AppendResult::Failed(why) =>
       // **凭据已经出去了**,这次连接是成功的;失败的是「记住」。这两件事必须
       // 分开说:报成连接失败会让用户以为拒绝了什么,报成成功会让用户以为记住了。
       println(
-        "tofu: NOT written to " + kh.file + " (" + why + ") -- this connection " +
+        "tofu: NOT written to " +
+        kh.file +
+        " (" +
+        why +
+        ") -- this connection " +
         "was accepted, but the pin was not remembered and the next one to " +
-        kh.host + " will need --kh-tofu again",
+        kh.host +
+        " will need --kh-tofu again",
       )
-    }
   }
 }
 
@@ -460,8 +487,10 @@ async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
 /// 钥匙」也表示「写回」,而 OpenSSH 要另外给 UserKnownHostsFile 一个可写的路径。
 /// 这个 moon 版本没有文件 IO(见 Loop #48),所以驱动只能把写回打印出来,由调用方
 /// 落盘。浏览器那一侧的答案是 localStorage,不是文件。
+
 ///| 要在 known_hosts 里查的主机名。`--kh-host` 没给就退回实际拨号的那个。
 ///
+
 ///|
 ///
 /// 判定(`kh_policy`)和写回(`kh_report_tofu`)必须问同一个问题:如果写回写的是
@@ -479,7 +508,11 @@ fn kh_host_name(argv : Array[String]) -> String {
   // 下一次用同一个别名连就查不到,于是每次都像第一次。
   if given == "" {
     let target = argv_value(argv, "--target")
-    if target == "" { "127.0.0.1" } else { target }
+    if target == "" {
+      "127.0.0.1"
+    } else {
+      target
+    }
   } else {
     given
   }
@@ -488,10 +521,15 @@ fn kh_host_name(argv : Array[String]) -> String {
 ///|
 /// Loop #53: 当前 Unix 秒，给证书有效期判定用。
 ///
+
 ///| `@env.now()` 返回的是**毫秒**——量出来的，不是照文档抄的（见
+
 ///| `cmd/wt_ssh/main.mbt` 的同名函数，两边的注释指向同一件事）。
+
 ///| 猜错单位的后果很安静：比较差 1000 倍，有效期判定放行该拒的、拒掉该放的，
-///| 没有任何报错可以指过去。
+
+///|
+/// 没有任何报错可以指过去。
 fn kh_now_seconds() -> UInt64 {
   @env.now() / 1000UL
 }
@@ -499,15 +537,18 @@ fn kh_now_seconds() -> UInt64 {
 ///|
 /// Loop #54: 读一次 `--known-hosts-text` 或 `--kh-file`，建出判定与写回共用的配置。
 ///
+
 ///| **优先级与浏览器那一侧逐字相同**：显式给的 `--known-hosts-text` 优先，
 /// **包括显式给空串**——「我就是要这次不固定」是一个正当的意图，和「我没配」
 /// 不是一回事，而这个客户端的缺省（Loop #50）恰好是拒绝，所以这两者必须能分开。
 /// 没有显式文本才去读 `--kh-file`。
 ///
-///| **读不出来必须说话。** 一个读不到自己信任锚的用户，不该在第二次连接时才发现，
+
+///|
+/// **读不出来必须说话。** 一个读不到自己信任锚的用户，不该在第二次连接时才发现，
 /// 而 discover 到的应该是「我读不到」而不是「这里没有条目」——后者在 strict 下
 /// 表现为拒绝，方向对，但理由是错的。
-async fn kh_resolve(argv : Array[String], port : Int) -> KhConfig {
+async fn kh_resolve(argv : Array[String], port : Int32) -> KhConfig {
   let host = kh_host_name(argv)
   let file = argv_value(argv, "--kh-file")
   let tofu = has_switch(argv, "--kh-tofu")
@@ -521,14 +562,19 @@ async fn kh_resolve(argv : Array[String], port : Int) -> KhConfig {
   // 显式给了文本(哪怕是空串)就用它,不碰文件。
   if given != "" || file == "" {
     let p = kh_policy_from(
-      given,
-      host,
-      kh_port,
-      strict,
-      now,
-      "--known-hosts-text",
+      given, host, kh_port, strict, now, "--known-hosts-text",
     )
-    return { policy: p, host, file: if given != "" { "" } else { file }, text: given, tofu }
+    return {
+      policy: p,
+      host,
+      file: if given != "" {
+        ""
+      } else {
+        file
+      },
+      text: given,
+      tofu,
+    }
   }
   let loaded = @khfile.load(file)
   let text = match loaded {
@@ -541,18 +587,18 @@ async fn kh_resolve(argv : Array[String], port : Int) -> KhConfig {
       // 强制 strict 是这里唯一正确的答案。一个读不到自己信任锚的人**绝不该**
       // 因为读不到而被放行:那等于把「存储坏了」翻译成「信任一切」。
       println(
-        "known_hosts: cannot read " + file + " (" + why + ") -- pinning is forced " +
+        "known_hosts: cannot read " +
+        file +
+        " (" +
+        why +
+        ") -- pinning is forced " +
         "on for this connection, because not being able to read your own trust " +
         "anchors must never mean trusting whatever is offered",
       )
       let p = @knownhosts.KnownHostsPolicy::from_text_at(
-        "",
-        host,
-        kh_port,
-        true,
-        now,
+        "", host, kh_port, true, now,
       )
-      return { policy: p, host, file, text: "", tofu }
+      return { policy: p, host, file, text: "", tofu, }
     }
   }
   println("known_hosts: " + text.length().to_string() + " bytes from " + file)
@@ -562,27 +608,25 @@ async fn kh_resolve(argv : Array[String], port : Int) -> KhConfig {
     // known_hosts,只是里面还没有条目。
     println("known_hosts: " + file + " is empty -- nothing is pinned here")
     let p = @knownhosts.KnownHostsPolicy::from_text_at(
-      "",
-      host,
-      kh_port,
-      strict,
-      now,
+      "", host, kh_port, strict, now,
     )
-    return { policy: p, host, file, text, tofu }
+    return { policy: p, host, file, text, tofu, }
   }
   let p = kh_policy_from(text, host, kh_port, strict, now, file)
-  { policy: p, host, file, text, tofu }
+  { policy: p, host, file, text, tofu, }
 }
 
 ///|
 /// 建策略 + 那道「解析出 0 条就报错」的闸
 ///
-///| `source` 只是给错误信息用的:用户要看到是哪个来源坏了,而不是「known_hosts
+
+///|
+/// `source` 只是给错误信息用的:用户要看到是哪个来源坏了,而不是「known_hosts
 /// 坏了」。两个调用点各写一遍这条闸,迟早有一处漏掉 `abort`。
 fn kh_policy_from(
   text : String,
   host : String,
-  kh_port : Int,
+  kh_port : Int32,
   strict : Bool,
   now : UInt64,
   source : String,
@@ -593,7 +637,9 @@ fn kh_policy_from(
     // 走的是和「钉住的钥匙对不上」同一条代码,不会有一条例外路径悄悄绕过它。
     return @knownhosts.KnownHostsPolicy::from_text_at("", host, 0, strict, now)
   }
-  let p = @knownhosts.KnownHostsPolicy::from_text_at(text, host, kh_port, strict, now)
+  let p = @knownhosts.KnownHostsPolicy::from_text_at(
+    text, host, kh_port, strict, now,
+  )
   // 「给了文本但一条都没解析出来」必须报错,不能安静地变成 skip。
   // `verify` 看到空条目就返回 Skip,而调用方「要求固定」和「忘了固定」在那一层
   // 完全一样——一个看起来跑过的检查比没跑过的检查更危险。
@@ -604,7 +650,9 @@ fn kh_policy_from(
   // 理由,而真正的原因永远不会被看见。
   if p.entries.length() == 0 {
     println(
-      "known_hosts: " + source + " 解析出 0 条 -- 拒绝继续,而不是把它读成" +
+      "known_hosts: " +
+      source +
+      " 解析出 0 条 -- 拒绝继续,而不是把它读成" +
       "「这个主机没被固定过」",
     )
     abort("known_hosts parsed to nothing")
@@ -652,7 +700,7 @@ fn exec_command(argv : Array[String]) -> String? {
 /// 里混进 ANSI 序列或非 ASCII 时会骗人。
 fn run_exec(
   host : String,
-  port : Int,
+  port : Int32,
   command : String,
   stdin_data : FixedArray[Byte],
   envs : Array[@sshclient.EnvVar],
@@ -688,14 +736,18 @@ fn run_exec(
         @sshclient.Done(r) => {
           println("result: EXEC_DONE")
           println("stdout_len: " + r.stdout.length().to_string())
-          println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+          println(
+            "stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)),
+          )
           // 原始字节也打成十六进制:长度和摘要对不上时,只有它能分清是「收到的
           // 字节不对」还是「摘要算错了」。超过 128 字节就截断并标注——长度和
           // 摘要才是判据,1.5 MB 的十六进制既刷屏又会顶掉后面的行。
           println("stdout_hex: " + dump_prefix(r.stdout))
           println("stderr_len: " + r.stderr.length().to_string())
           println("stderr_hex: " + @ecdsa.bytes_to_hex(r.stderr))
-          println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+          println(
+            "stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)),
+          )
           println("exit_status: " + r.exit_status.to_string())
           println("remote_id: " + r.remote_id.to_string())
           println("adjusts_sent: " + r.adjusts_sent.to_string())
@@ -727,11 +779,17 @@ fn run_exec(
 }
 
 ///| 原始字节打进标记块,方便人看;验证脚本只读上面那几行数字。
+
 ///|
+
 ///| 截断上限 512 而不是 128:`Loop #37 的远端 fixture 会把 stdin 的字节数、摘要、
+
 ///| 首尾各 16 字节**和**环境变量一起打出来,一共将近 200 字节。128 会把最后
+
 ///| 几行静默吃掉,而截断块里没有任何提示说「后面还有内容被丢了」——验证脚本
-///| 于是只能报一句「首尾不一致」,而真实原因是它根本没看到首尾。
+
+///|
+/// 于是只能报一句「首尾不一致」,而真实原因是它根本没看到首尾。
 fn print_bytes(b : FixedArray[Byte]) -> Unit {
   if b.length() == 0 {
     return
@@ -739,7 +797,7 @@ fn print_bytes(b : FixedArray[Byte]) -> Unit {
   let n = if b.length() > 512 { 512 } else { b.length() }
   let sb = StringBuilder()
   for i = 0; i < n; i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   println("--- raw ---")
   println(sb.to_string())
@@ -749,7 +807,8 @@ fn print_bytes(b : FixedArray[Byte]) -> Unit {
   println("--- end raw ---")
 }
 
-///| 十六进制前缀,超过 512 字节同样截断并标注
+///|
+/// 十六进制前缀,超过 512 字节同样截断并标注
 fn dump_prefix(b : FixedArray[Byte]) -> String {
   let n = if b.length() > 512 { 512 } else { b.length() }
   let head = FixedArray::make(n, b'\x00')
@@ -764,6 +823,7 @@ fn dump_prefix(b : FixedArray[Byte]) -> String {
   }
 }
 
+///|
 fn yn(b : Bool) -> String {
   if b {
     "true"
@@ -772,6 +832,7 @@ fn yn(b : Bool) -> String {
   }
 }
 
+///|
 fn exec_error_name(e : @sshclient.ExecError) -> String {
   match e {
     NoSessionState => "NoSessionState"
@@ -796,11 +857,12 @@ fn exec_error_name(e : @sshclient.ExecError) -> String {
 ///
 /// 模式串本体在 `@sshclient.ssh_stdin_pattern`:原生和 Worker 必须用同一份,
 /// 否则「两条路径字节一致」这条断言就只是在比两段各自不同的数据。
-fn stdin_pattern(n : Int) -> FixedArray[Byte] {
+fn stdin_pattern(n : Int32) -> FixedArray[Byte] {
   @sshclient.ssh_stdin_pattern(n)
 }
 
-///| `--stdin-text <str>`;没给就返回空
+///|
+/// `--stdin-text <str>`;没给就返回空
 fn text_flag(argv : Array[String]) -> FixedArray[Byte] {
   let mut i = 1
   while i < argv.length() {
@@ -812,7 +874,8 @@ fn text_flag(argv : Array[String]) -> FixedArray[Byte] {
   FixedArray::make(0, b'\x00')
 }
 
-///| 组装 stdin:`--stdin-bytes` 优先,其次 `--stdin-text`,都没有就是空(等于 `ssh -n`)
+///|
+/// 组装 stdin:`--stdin-bytes` 优先,其次 `--stdin-text`,都没有就是空(等于 `ssh -n`)
 fn stdin_bytes(argv : Array[String]) -> FixedArray[Byte] {
   let n = int_flag(argv, "--stdin-bytes", 0)
   if n > 0 {
@@ -821,8 +884,9 @@ fn stdin_bytes(argv : Array[String]) -> FixedArray[Byte] {
   text_flag(argv)
 }
 
-///| 第一个 `=` 的下标;没有就返回 -1
-fn index_of_eq(s : String) -> Int {
+///|
+/// 第一个 `=` 的下标;没有就返回 -1
+fn index_of_eq(s : String) -> Int32 {
   for i = 0; i < s.length(); i = i + 1 {
     if s[i].to_int() == 61 {
       return i
@@ -831,12 +895,13 @@ fn index_of_eq(s : String) -> Int {
   -1
 }
 
-///| 取 `s[from, to)`
-fn slice_str(s : String, from : Int, to : Int) -> String {
+///|
+/// 取 `s[from, to)`
+fn slice_str(s : String, from : Int32, to : Int32) -> String {
   let sb = StringBuilder()
   let mut i = from
   while i < to {
-    sb.write_char(Int::unsafe_to_char(s[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(s[i].to_int()))
     i = i + 1
   }
   sb.to_string()
@@ -872,7 +937,7 @@ fn env_flags(argv : Array[String]) -> Array[@sshclient.EnvVar] {
 ///|
 /// `--shell <cmd>` 之后的整段是远端要敲的命令,`--cols/--rows/--resize` 控制
 /// 窗口尺寸(给了 `--resize` 就再发一条 window-change)。
-fn shell_mode(argv : Array[String]) -> (String, Int, Int, (Int, Int)?) {
+fn shell_mode(argv : Array[String]) -> (String, Int32, Int32, (Int32, Int32)?) {
   let mut i = 1
   while i < argv.length() {
     if argv[i] == "--shell" && i + 1 < argv.length() {
@@ -904,7 +969,7 @@ fn shell_mode(argv : Array[String]) -> (String, Int, Int, (Int, Int)?) {
 /// did raise the failure would be a crash rather than a default. Scanning
 /// digits is what `int_flag` already does, and one rule for the whole driver
 /// is worth more than a second, subtly different one.
-fn parse_uint(s : String) -> Int {
+fn parse_uint(s : String) -> Int32 {
   let mut v = 0
   let mut k = 0
   let mut any = false
@@ -916,11 +981,16 @@ fn parse_uint(s : String) -> Int {
     }
     k = k + 1
   }
-  if any { v } else { 0 }
+  if any {
+    v
+  } else {
+    0
+  }
 }
 
-///| 扫一个 `--flag <n>` 形式的数值参数
-fn int_flag(argv : Array[String], name : String, fallback : Int) -> Int {
+///|
+/// 扫一个 `--flag <n>` 形式的数值参数
+fn int_flag(argv : Array[String], name : String, fallback : Int32) -> Int32 {
   let mut i = 1
   while i < argv.length() {
     if argv[i] == name && i + 1 < argv.length() {
@@ -945,12 +1015,13 @@ fn int_flag(argv : Array[String], name : String, fallback : Int) -> Int {
   fallback
 }
 
-///| 把 "132x43" 这样的字符串拆成 `(132, 43)`;不是这个形状就返回 None
+///|
+/// 把 "132x43" 这样的字符串拆成 `(132, 43)`;不是这个形状就返回 None
 ///
 /// 守卫用一个显式的 `seen_x`,而不是拿 `second` 是否为 0 代替——后者在读完
 /// 第一个数、还没遇到 'x' 时也是 0,于是 "132x43" 被判成非法,而失败方式
 /// 是「resize 没生效」而不是报错。
-fn parse_size(s : String) -> (Int, Int)? {
+fn parse_size(s : String) -> (Int32, Int32)? {
   let mut first = -1
   let mut second = -1
   let mut seen_x = false
@@ -964,12 +1035,10 @@ fn parse_size(s : String) -> (Int, Int)? {
         } else {
           second = second * 10 + (d - 48)
         }
+      } else if first < 0 {
+        first = d - 48
       } else {
-        if first < 0 {
-          first = d - 48
-        } else {
-          first = first * 10 + (d - 48)
-        }
+        first = first * 10 + (d - 48)
       }
       any_digit = true
     } else if d == 120 || d == 88 {
@@ -988,8 +1057,9 @@ fn parse_size(s : String) -> (Int, Int)? {
   }
 }
 
-///| `--resize <cols>x<rows>`;没给就返回 None(不发 window-change)
-fn resize_flag(argv : Array[String]) -> (Int, Int)? {
+///|
+/// `--resize <cols>x<rows>`;没给就返回 None(不发 window-change)
+fn resize_flag(argv : Array[String]) -> (Int32, Int32)? {
   let mut i = 1
   while i < argv.length() {
     if argv[i] == "--resize" && i + 1 < argv.length() {
@@ -1004,11 +1074,11 @@ fn resize_flag(argv : Array[String]) -> (Int, Int)? {
 /// Loop #36:开一个交互式 shell(带 pty),敲一条命令,可选地 resize,再退出。
 fn run_shell(
   host : String,
-  port : Int,
+  port : Int32,
   command : String,
-  cols : Int,
-  rows : Int,
-  resize : (Int, Int)?,
+  cols : Int32,
+  rows : Int32,
+  resize : (Int32, Int32)?,
   user : String,
   kh : KhConfig,
 ) -> Unit {
@@ -1048,23 +1118,28 @@ fn run_shell(
           println("pty_granted: " + yn(r.pty_granted))
           println("resize_sent: " + yn(r.resize_sent))
           println("stdout_len: " + r.stdout.length().to_string())
-          println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+          println(
+            "stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)),
+          )
           println("stderr_len: " + r.stderr.length().to_string())
-          println("stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)))
+          println(
+            "stderr_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stderr)),
+          )
           println("exit_status: " + r.exit_status.to_string())
           match r.exit_signal {
             None => println("exit_signal: none")
             Some((n, core)) =>
-              println(
-                "exit_signal: " + n + " core=" + yn(core),
-              )
+              println("exit_signal: " + n + " core=" + yn(core))
           }
           println("adjusts_sent: " + r.adjusts_sent.to_string())
           println("total_sent_bytes: " + r.sent_bytes.to_string())
           println("total_recv_bytes: " + r.recv_bytes.to_string())
           // 标志串是否出现在 stdout 里:pty 会把命令回显出来,这是「shell 真的
           // 跑起来了」最直接的证据——exit-status 0 只说明它正常退出了。
-          let seen = @sshclient.sh_contains_bytes(r.stdout, @sshclient.sh_ascii(command))
+          let seen = @sshclient.sh_contains_bytes(
+            r.stdout,
+            @sshclient.sh_ascii(command),
+          )
           println("marker_seen: " + yn(seen))
           print_bytes(r.stdout)
           print_bytes(r.stderr)
@@ -1084,12 +1159,14 @@ fn run_shell(
   }
 }
 
-///| 参数是不是一个开关(以 `--` 开头)
+///|
+/// 参数是不是一个开关(以 `--` 开头)
 fn is_switch(s : String) -> Bool {
   s.length() > 2 && s[0].to_int() == 45 && s[1].to_int() == 45
 }
 
 ///|
+
 ///|
 /// `--proposal`: print the algorithm set this client offers, then exit.
 ///
@@ -1108,6 +1185,7 @@ fn proposal_flag(argv : Array[String]) -> Bool {
   false
 }
 
+///|
 fn run_proposal() -> Unit {
   let p = @sshclient.live_proposal()
   println("=== proposal (no connection attempted) ===")
@@ -1132,6 +1210,7 @@ fn run_proposal() -> Unit {
 /// `--subsystem <name>` 故意传一个不存在的子系统名。这时必须报
 /// `SubsystemRejected`,而不是「发了 INIT 之后莫名其妙没反应」:want_reply=TRUE
 /// 的 CHANNEL_FAILURE 是「没有这个子系统」的唯一信号(session.c:1945-1948)。
+
 ///|
 /// The payload a `--sftp-write` produces, from its length alone.
 ///
@@ -1142,7 +1221,7 @@ fn run_proposal() -> Unit {
 /// re-derives in Python and compares by SHA-256 makes disagreement *visible*
 /// instead. There is no SHA-256, no RNG and no encoding step here precisely
 /// so that native, js, wasm and wasm-gc cannot produce different bytes.
-fn payload_of(n : Int) -> FixedArray[Byte] {
+fn payload_of(n : Int32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     out[i] = ((i * 31 + 7) % 256).to_byte()
@@ -1150,11 +1229,12 @@ fn payload_of(n : Int) -> FixedArray[Byte] {
   out
 }
 
-///| 最后一个 `@` 的下标;没有就 -1。
+///|
+/// 最后一个 `@` 的下标;没有就 -1。
 ///
 /// 手写而不是用 `last_index_of`:那个方法在本仓这版 moon 上不存在,而为一个
 /// 只用一次的查找去引新依赖不值得。
-fn last_at(s : String) -> Int {
+fn last_at(s : String) -> Int32 {
   let mut k = s.length()
   while k > 0 {
     k = k - 1
@@ -1174,19 +1254,22 @@ fn last_at(s : String) -> Int {
 /// CONNECT_FAILED,看起来像客户端坏了,其实是一个自造的参数冲突。
 ///
 /// 分隔符用 `@` 而不是 `:`:Windows 路径 `C:/...` 里本来就有冒号。
-fn split_at_last(spec : String) -> (String, Int) {
+fn split_at_last(spec : String) -> (String, Int32) {
   let at = last_at(spec)
   if at < 0 {
     return (spec, 0)
   }
-  (spec.unsafe_substring(start=0, end=at),
-   parse_uint(spec.unsafe_substring(start=at + 1, end=spec.length())))
+  (
+    spec.unsafe_substring(start=0, end=at),
+    parse_uint(spec.unsafe_substring(start=at + 1, end=spec.length())),
+  )
 }
 
+///|
 fn sftp_mode(
   argv : Array[String],
   host : String,
-  port : Int,
+  port : Int32,
   user : String,
   kh : KhConfig,
 ) -> Bool {
@@ -1251,10 +1334,7 @@ fn sftp_mode(
         ops.push(
           @sftp.SftpOp::Rename(
             argv[i + 1].unsafe_substring(start=0, end=at),
-            argv[i + 1].unsafe_substring(
-              start=at + 1,
-              end=argv[i + 1].length(),
-            ),
+            argv[i + 1].unsafe_substring(start=at + 1, end=argv[i + 1].length()),
           ),
         )
         saw_any = true
@@ -1317,11 +1397,13 @@ fn sftp_mode(
   }
 }
 
-///| 一个必定不存在的路径,拿来跑「不是传输错误,而是一次成功的 SFTP 交换」。
+///|
+/// 一个必定不存在的路径,拿来跑「不是传输错误,而是一次成功的 SFTP 交换」。
 fn no_such_path() -> String {
   ".loop39/definitely-not-here-" + "0f3a91c7"
 }
 
+///|
 fn print_sftp_outcome(outcome : @sshclient.SftpOutcome) -> Unit {
   match outcome {
     @sshclient.SftpOutcome::Done(r) => {
@@ -1344,7 +1426,8 @@ fn print_sftp_outcome(outcome : @sshclient.SftpOutcome) -> Unit {
   }
 }
 
-fn print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
+///|
+fn print_sftp_op(i : Int32, op : @sftp.SftpOpResult) -> Unit {
   let tag = "op" + i.to_string()
   match op {
     @sftp.SftpOpResult::RealpathOk(p) => {
@@ -1364,9 +1447,14 @@ fn print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
       println(tag + "_count: " + entries.length().to_string())
       for j = 0; j < entries.length(); j = j + 1 {
         println(
-          tag + "_entry" + j.to_string() + ": " +
-          dump_prefix(@sftp.sftp_ascii(entries[j].0)) + " " +
-          entries[j].1.to_string() + " " +
+          tag +
+          "_entry" +
+          j.to_string() +
+          ": " +
+          dump_prefix(@sftp.sftp_ascii(entries[j].0)) +
+          " " +
+          entries[j].1.to_string() +
+          " " +
           (if entries[j].2 { "dir" } else { "file" }),
         )
       }
@@ -1381,9 +1469,7 @@ fn print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
       println(tag + ": WROTE")
       println(tag + "_bytes: " + n.to_string())
     }
-    @sftp.SftpOpResult::Changed => {
-      println(tag + ": CHANGED")
-    }
+    @sftp.SftpOpResult::Changed => println(tag + ": CHANGED")
     @sftp.SftpOpResult::Failed(code, msg) => {
       println(tag + ": FAILED")
       println(tag + "_code: " + code.to_string())
@@ -1392,13 +1478,15 @@ fn print_sftp_op(i : Int, op : @sftp.SftpOpResult) -> Unit {
   }
 }
 
-fn opt_int_text(v : Int?) -> String {
+///|
+fn opt_int_text(v : Int32?) -> String {
   match v {
     None => "-"
     Some(x) => x.to_string()
   }
 }
 
+///|
 fn opt_u64_text(v : UInt64?) -> String {
   match v {
     None => "-"
@@ -1406,6 +1494,7 @@ fn opt_u64_text(v : UInt64?) -> String {
   }
 }
 
+///|
 fn sftp_error_name(e : @sshclient.SftpError) -> String {
   match e {
     AuthFailed(a) => "AUTH_FAILED " + auth_error_name(a)
@@ -1422,6 +1511,7 @@ fn sftp_error_name(e : @sshclient.SftpError) -> String {
 /// 只有 `main` 和 `kh_resolve` 是 async；`run_*` 全部保持**同步**，只是多收一个
 /// `KhConfig`。另一种做法是让每个 `run_*` 自己去解析，于是读文件的代价变成 6 次、
 /// 参数解析也变成 6 次，而且读侧和写侧各拿一份——那正是这个结构最初要消灭的漂移。
+
 ///|
 /// Loop #58: connection parameters resolved from an ssh_config file.
 ///
@@ -1490,7 +1580,8 @@ fn target_arg(argv : Array[String]) -> String {
   kh_host_name(argv)
 }
 
-///| 收下所有 `-o Key=Value`,大小写不敏感地存成 key→value。
+///|
+/// 收下所有 `-o Key=Value`,大小写不敏感地存成 key→value。
 fn o_overrides(argv : Array[String]) -> Array[(String, String)] {
   let out : Array[(String, String)] = []
   let mut i = 1
@@ -1547,14 +1638,20 @@ fn ci_lower(s : String) -> String {
   let mut i = 0
   while i < s.length() {
     let c = s[i].to_int()
-    b.write_char(if c >= 65 && c <= 90 { (c + 32).unsafe_to_char() } else { s[i].unsafe_to_char() })
+    b.write_char(
+      if c >= 65 && c <= 90 {
+        (c + 32).unsafe_to_char()
+      } else {
+        s[i].unsafe_to_char()
+      },
+    )
     i = i + 1
   }
   b.to_string()
 }
 
 ///|
-fn cc_slice(s : String, from : Int, to : Int) -> String {
+fn cc_slice(s : String, from : Int32, to : Int32) -> String {
   let b = StringBuilder()
   let mut i = from
   let hi = if to > s.length() { s.length() } else { to }
@@ -1569,13 +1666,19 @@ fn cc_slice(s : String, from : Int, to : Int) -> String {
 fn cc_trim(s : String) -> String {
   let mut a = 0
   let mut b = s.length()
-  while a < b && cc_space(s[a].to_int()) { a = a + 1 }
-  while b > a && cc_space(s[b - 1].to_int()) { b = b - 1 }
+  while a < b && cc_space(s[a].to_int()) {
+    a = a + 1
+  }
+  while b > a && cc_space(s[b - 1].to_int()) {
+    b = b - 1
+  }
   cc_slice(s, a, b)
 }
 
 ///|
-fn cc_space(c : Int) -> Bool { c == 32 || c == 9 || c == 13 }
+fn cc_space(c : Int32) -> Bool {
+  c == 32 || c == 9 || c == 13
+}
 
 ///|
 /// 读一次配置文件、解析一次、算出最终参数。判定侧和拨号侧共用这一份——
@@ -1603,14 +1706,35 @@ async fn cfg_resolve(argv : Array[String]) -> ConnConfig {
     if o_id != "" {
       ids.push(o_id)
     }
-    return { config_path: "", target, hostname, user, port, identity_files: ids }
+    return {
+      config_path: "",
+      target,
+      hostname,
+      user,
+      port,
+      identity_files: ids,
+    }
   }
-  let text = try { (@fs.read_file(path)).text() } catch { _ => abort("cannot read config " + path) }
+  let text = @fs.read_file(path).text() catch {
+    _ => abort("cannot read config " + path)
+  }
   let sections = @sshconfig.parse_ssh_config(text)
   // `-o` 赢过文件，所以先问命令行，问不到再问文件。
-  let hostname = if hostname != "" { hostname } else { @sshconfig.resolved_value(target, sections, "HostName") }
-  let user = if user != "" { user } else { @sshconfig.resolved_value(target, sections, "User") }
-  let port = if port != "" { port } else { @sshconfig.resolved_value(target, sections, "Port") }
+  let hostname = if hostname != "" {
+    hostname
+  } else {
+    @sshconfig.resolved_value(target, sections, "HostName")
+  }
+  let user = if user != "" {
+    user
+  } else {
+    @sshconfig.resolved_value(target, sections, "User")
+  }
+  let port = if port != "" {
+    port
+  } else {
+    @sshconfig.resolved_value(target, sections, "Port")
+  }
   let file_ids = @sshconfig.resolved_values(target, sections, "IdentityFile")
   let o_id = o_lookup(overrides, "identityfile")
   if o_id != "" {
@@ -1629,7 +1753,7 @@ async fn cfg_resolve(argv : Array[String]) -> ConnConfig {
       i = i + 1
     }
   }
-  { config_path: path, target, hostname, user, port, identity_files: ids }
+  { config_path: path, target, hostname, user, port, identity_files: ids, }
 }
 
 ///|
@@ -1640,16 +1764,27 @@ async fn cfg_resolve(argv : Array[String]) -> ConnConfig {
 /// 所以它不受也不影响 `--kh-file` 的解析。
 fn print_conn_effective(cfg : ConnConfig) -> Unit {
   println("=== ssh_config effective ===")
-  println("config: " + (if cfg.config_path == "" { "(none)" } else { cfg.config_path }))
+  println(
+    "config: " +
+    (if cfg.config_path == "" { "(none)" } else { cfg.config_path }),
+  )
   println("target: " + cfg.target)
-  if cfg.hostname != "" { println("hostname = " + cfg.hostname) }
-  if cfg.user != "" { println("user = " + cfg.user) }
-  if cfg.port != "" { println("port = " + cfg.port) }
+  if cfg.hostname != "" {
+    println("hostname = " + cfg.hostname)
+  }
+  if cfg.user != "" {
+    println("user = " + cfg.user)
+  }
+  if cfg.port != "" {
+    println("port = " + cfg.port)
+  }
   if cfg.identity_files.length() > 0 {
     let b = StringBuilder()
     let mut i = 0
     while i < cfg.identity_files.length() {
-      if i > 0 { b.write_char('|') }
+      if i > 0 {
+        b.write_char('|')
+      }
       b.write_string(cfg.identity_files[i])
       i = i + 1
     }
@@ -1769,16 +1904,16 @@ async fn main {
             // 和「密钥类型」混为一谈,而那正是 Loop #38 要修的那个混淆。
             println("hostkey_alg: " + r.session.handshake.hostkey_alg)
             println("hostkey_type: " + r.session.handshake.hostkey_type)
-            println("hostkey_bits: " + r.session.handshake.hostkey_bits.to_string())
+            println(
+              "hostkey_bits: " + r.session.handshake.hostkey_bits.to_string(),
+            )
             println("signed_blob: " + r.signed_blob_hex)
             println("sig_blob: " + r.sig_blob_hex)
             // 请求载荷也一并带出来:验证脚本要能**独立地**从它重建出
             // signed_blob 并逐字节比对——那正是服务端做的事。用自己签的
             // 那串字节证明"我签的和请求里的一样"是没有意义的。
             println("request: " + r.request_hex)
-            println(
-              "session_id_head: " + r.session.session_id_head,
-            )
+            println("session_id_head: " + r.session.session_id_head)
             println(
               "handshake_sent_bytes: " +
               r.session.handshake.sent_bytes.to_string(),
@@ -1787,12 +1922,8 @@ async fn main {
               "handshake_recv_bytes: " +
               r.session.handshake.recv_bytes.to_string(),
             )
-            println(
-              "total_sent_bytes: " + r.session.sent_bytes.to_string(),
-            )
-            println(
-              "total_recv_bytes: " + r.session.recv_bytes.to_string(),
-            )
+            println("total_sent_bytes: " + r.session.sent_bytes.to_string())
+            println("total_recv_bytes: " + r.session.recv_bytes.to_string())
           }
           @sshclient.Failed(e) => {
             println("result: FAILED")
@@ -1815,8 +1946,7 @@ async fn main {
         return
       }
       Some(conn) => {
-        let outcome =
-          @sshclient.live_session(conn, fixed_x(), kh.policy)
+        let outcome = @sshclient.live_session(conn, fixed_x(), kh.policy)
         conn.close()
         match outcome {
           @sshclient.ServiceAccepted(r) => {
@@ -1860,8 +1990,7 @@ async fn main {
       return
     }
     Some(conn) => {
-      let outcome =
-        @sshclient.live_handshake(conn, fixed_x(), kh.policy)
+      let outcome = @sshclient.live_handshake(conn, fixed_x(), kh.policy)
       conn.close()
       match outcome {
         @sshclient.Established(r) => {

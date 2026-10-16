@@ -11,8 +11,8 @@
 
 ///|
 /// constant-time 实现
-pub fn freeze(a : FixedArray[UInt]) -> Unit {
-  let aorig : FixedArray[UInt] = FixedArray::make(32, 0U)
+pub fn freeze(a : FixedArray[UInt32]) -> Unit {
+  let aorig : FixedArray[UInt32] = FixedArray::make(32, 0U)
   for j = 0; j < 32; j = j + 1 {
     aorig[j] = a[j]
   }
@@ -23,7 +23,11 @@ pub fn freeze(a : FixedArray[UInt]) -> Unit {
   // squeeze 后 a ∈ [0, 2^255+19),若原 a < p 则 a+2p < 3p < 2^256,bit 255 = 0
   //                                     若原 a >= p 则 a+2p ≥ 3p,bit 255 = 1
   // 总之 negative 取决于原 a, 而原 a 不再是 secret(public key 派生),所以可分支
-  let negative : UInt = if ((a[31] >> 7) & 1U) != 0 { 0xFFFFFFFFU } else { 0U }
+  let negative : UInt32 = if ((a[31] >> 7) & 1U) != 0 {
+    0xFFFFFFFFU
+  } else {
+    0U
+  }
   for j = 0; j < 32; j = j + 1 {
     a[j] = a[j] ^ (negative & (aorig[j] ^ a[j]))
   }

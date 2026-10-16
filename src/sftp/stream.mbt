@@ -27,13 +27,14 @@
 pub(all) struct SftpInbuf {
   mut buf : Array[Byte]
   /// set once a length prefix has been read and the body is on its way
-  mut want : Int
+  mut want : Int32
   /// sticky: a stream that has gone wrong stays wrong
   mut failed : SftpError?
 }
 
+///|
 pub fn SftpInbuf::new() -> SftpInbuf {
-  { buf: [], want: -1, failed: None }
+  { buf: [], want: -1, failed: None, }
 }
 
 ///|
@@ -54,7 +55,7 @@ pub fn SftpInbuf::feed(self : SftpInbuf, chunk : FixedArray[Byte]) -> Unit {
 /// Reported by the harness so a test can assert the buffer really did hold a
 /// partial packet across the boundary rather than accidentally getting lucky
 /// with message sizes.
-pub fn SftpInbuf::pending(self : SftpInbuf) -> Int {
+pub fn SftpInbuf::pending(self : SftpInbuf) -> Int32 {
   self.buf.length()
 }
 
@@ -74,7 +75,7 @@ pub fn SftpInbuf::take(self : SftpInbuf) -> FixedArray[Byte]? {
     if self.buf.length() < 4 {
       return None
     }
-    let n = (@sshwire.read_u32(self.fixed_buf(), 0)).reinterpret_as_int()
+    let n = @sshwire.read_u32(self.fixed_buf(), 0).reinterpret_as_int()
     if n < 0 || n > SFTP_MAX_MSG_LENGTH {
       // sftp-client.c:195 rejects an over-long message *before* reserving for
       // it. Same order here: the length arrived on the wire and must be
@@ -135,7 +136,8 @@ fn SftpInbuf::fixed_buf(self : SftpInbuf) -> FixedArray[Byte] {
   out
 }
 
-fn SftpInbuf::drop(self : SftpInbuf, n : Int) -> Unit {
+///|
+fn SftpInbuf::drop(self : SftpInbuf, n : Int32) -> Unit {
   let keep = self.buf.length() - n
   let next : Array[Byte] = []
   for i = 0; i < keep; i = i + 1 {

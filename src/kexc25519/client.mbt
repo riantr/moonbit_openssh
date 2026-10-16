@@ -14,7 +14,7 @@
 /// 内部游标:严格解析用,任何越界/截断 → None
 priv struct Cursor {
   bytes : FixedArray[Byte]
-  mut pos : Int
+  mut pos : Int32
 }
 
 ///|
@@ -23,12 +23,12 @@ fn Cursor::make(bytes : FixedArray[Byte]) -> Cursor {
 }
 
 ///|
-fn Cursor::remaining(self : Cursor) -> Int {
+fn Cursor::remaining(self : Cursor) -> Int32 {
   self.bytes.length() - self.pos
 }
 
 ///|
-fn Cursor::read_u32(self : Cursor) -> UInt? {
+fn Cursor::read_u32(self : Cursor) -> UInt32? {
   if self.remaining() < 4 {
     return None
   }
@@ -41,7 +41,7 @@ fn Cursor::read_u32(self : Cursor) -> UInt? {
 }
 
 ///|
-fn Cursor::read_bytes(self : Cursor, n : Int) -> FixedArray[Byte]? {
+fn Cursor::read_bytes(self : Cursor, n : Int32) -> FixedArray[Byte]? {
   if n < 0 || self.remaining() < n {
     return None
   }

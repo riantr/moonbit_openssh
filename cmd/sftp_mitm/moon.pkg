@@ -43,6 +43,7 @@ pkgtype(kind: "executable")
 // `live_sftp` takes a `@tcp.TcpConn` and `src/tcp` is a real socket, so this
 // package is native by necessity rather than by choice. Declaring it means a
 // wasm check is a *declared* impossibility instead of a surprise.
+
 options(
   supported_targets: "+native",
 )

@@ -6,7 +6,7 @@
 ///   Loop #32 supplies WebTransport/WebSocket, which is also why the transport
 ///   is kept behind a read/write contract instead of being spread through the
 ///   SSH layer.
-fn mb_tcp_connect(host : Bytes, host_len : Int, port : Int) -> Int64 {
+fn mb_tcp_connect(host : Bytes, host_len : Int32, port : Int32) -> Int64 {
   ignore(host)
   ignore(host_len)
   ignore(port)
@@ -14,7 +14,7 @@ fn mb_tcp_connect(host : Bytes, host_len : Int, port : Int) -> Int64 {
 }
 
 ///|
-fn mb_tcp_send(h : Int64, buf : Bytes, off : Int, n : Int) -> Int64 {
+fn mb_tcp_send(h : Int64, buf : Bytes, off : Int32, n : Int32) -> Int64 {
   ignore(h)
   ignore(buf)
   ignore(off)
@@ -23,7 +23,7 @@ fn mb_tcp_send(h : Int64, buf : Bytes, off : Int, n : Int) -> Int64 {
 }
 
 ///|
-fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int) -> Int64 {
+fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int32) -> Int64 {
   ignore(h)
   ignore(buf)
   ignore(n)
@@ -31,7 +31,7 @@ fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int) -> Int64 {
 }
 
 ///|
-fn mb_tcp_close(h : Int64) -> Int {
+fn mb_tcp_close(h : Int64) -> Int32 {
   ignore(h)
   -1
 }

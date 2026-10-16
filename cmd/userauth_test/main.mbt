@@ -19,8 +19,9 @@
 /// rather than compared against stored blobs, so the RFC 4252 section 7 field
 /// order is what is under test.
 
-///| hex 字符串 -> 字节(MoonBit 的 String 下标返回 UInt16,不是 Char)
-fn hex_nibble(c : UInt16) -> Int {
+///|
+/// hex 字符串 -> 字节(MoonBit 的 String 下标返回 UInt16,不是 Char)
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -31,6 +32,7 @@ fn hex_nibble(c : UInt16) -> Int {
   abort("hex_to_bytes: bad digit")
 }
 
+///|
 fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -44,6 +46,7 @@ fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn bytes_equal(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   if a.length() != b.length() {
     return false
@@ -58,6 +61,7 @@ fn bytes_equal(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   true
 }
 
+///|
 fn pf(ok : Bool) -> String {
   if ok {
     "PASS"
@@ -71,7 +75,9 @@ fn pf(ok : Bool) -> String {
 /// r / s 是约 256 位宽,一半的取值最高位是 1,必须补一个 0x00 才不会
 /// 被读成负数。向量集刻意覆盖了这条路径——漏掉它的签名在宽松解析器下
 /// **仍然验得过**,所以单条向量根本发现不了。
-///| 这个 mpint 是否**已经**被补了前导 0x00
+
+///|
+/// 这个 mpint 是否**已经**被补了前导 0x00
 ///
 /// r / s 是 256 位整数,定长编码就是 32 字节;只有最高位为 1 时才需要多一个
 /// 0x00,变成 33 字节。判断依据是长度,不是首字节——补过之后首字节恰恰是
@@ -81,7 +87,8 @@ fn mpint_pad(v : FixedArray[Byte]) -> Bool {
   v.length() == 33
 }
 
-///| 签名 blob 里 r 或 s 是否有任意一个需要前导 0x00
+///|
+/// 签名 blob 里 r 或 s 是否有任意一个需要前导 0x00
 ///
 /// blob 布局是 `string key_type || string( mpint r || mpint s )`
 /// (RFC 5656 §3.1.2 + ssh-ecdsa.c:431-432),外面还有一层 string 包装。
@@ -115,6 +122,7 @@ fn mpint_pair_padded(sig_blob : FixedArray[Byte]) -> Bool {
   }
 }
 
+///|
 fn main {
   let d = @bigint.BigNat::from_bytes_be(hex_to_bytes(KAT_D_HEX))
   let c = @ecdsa.Curve::p256()
@@ -221,8 +229,7 @@ fn main {
     @bigint.BigNat::from_uint64(1UL),
   )
   println(
-    "userauth_accept_n_minus_1: " +
-    pf(c.public_key(n_minus_1) is Some(_)),
+    "userauth_accept_n_minus_1: " + pf(c.public_key(n_minus_1) is Some(_)),
   )
 
   // ---- 4. RFC 6979 A.2.5 已公布向量 ----
@@ -243,28 +250,35 @@ fn main {
     }
     Some(v) => v
   }
-  println("rfc6979_k: " + to_hex(pad_left(@bigint.BigNat::to_bytes_be(knonce), 32)))
   println(
-    "rfc6979_r: " + to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.r()), 32)),
+    "rfc6979_k: " + to_hex(pad_left(@bigint.BigNat::to_bytes_be(knonce), 32)),
   )
   println(
-    "rfc6979_s: " + to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.s()), 32)),
+    "rfc6979_r: " +
+    to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.r()), 32)),
+  )
+  println(
+    "rfc6979_s: " +
+    to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.s()), 32)),
   )
   // RFC 6979 A.2.5 published values for NIST P-256, SHA-256, msg = "sample"
   let a25_k = "a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60"
   let a25_r = "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"
   let a25_s = "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"
   let k_ok = to_hex(pad_left(@bigint.BigNat::to_bytes_be(knonce), 32)) == a25_k
-  let r_ok = to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.r()), 32)) == a25_r
-  let s_ok = to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.s()), 32)) == a25_s
+  let r_ok = to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.r()), 32)) ==
+    a25_r
+  let s_ok = to_hex(pad_left(@bigint.BigNat::to_bytes_be(sample_sig.s()), 32)) ==
+    a25_s
   println("rfc6979_a25_k: " + pf(k_ok))
   println("rfc6979_a25_r: " + pf(r_ok))
   println("rfc6979_a25_s: " + pf(s_ok))
   println("rfc6979_a25: " + pf(k_ok && r_ok && s_ok))
 }
 
-///| 左补零到 n 字节
-fn pad_left(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+///|
+/// 左补零到 n 字节
+fn pad_left(b : FixedArray[Byte], n : Int32) -> FixedArray[Byte] {
   if b.length() >= n {
     return b
   }
@@ -276,6 +290,7 @@ fn pad_left(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn byte_to_hex(b : Byte) -> String {
   let hex_chars : String = "0123456789abcdef"
   let hi = b.to_int() / 16
@@ -284,6 +299,7 @@ fn byte_to_hex(b : Byte) -> String {
   hex_chars.unsafe_substring(start=lo, end=lo + 1)
 }
 
+///|
 fn to_hex(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {

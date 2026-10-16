@@ -19,8 +19,8 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn hxd(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hxd(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -89,7 +89,11 @@ fn b_inputs() -> @kexc25519.ExchangeInputs {
 
 ///|
 test "keygen_rfc7748_alice" {
-  assert_eq_bytes(@kexc25519.c25519_keygen(alice_sk()), alice_pk(), "keygen alice")
+  assert_eq_bytes(
+    @kexc25519.c25519_keygen(alice_sk()),
+    alice_pk(),
+    "keygen alice",
+  )
 }
 
 ///|
@@ -153,7 +157,13 @@ test "kex_gen_hash_e2e" {
   let ss_mpint = hex_to_bytes(
     "000000204a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
   )
-  let h = @kexc25519.kex_gen_hash(b_inputs(), ks_blob, alice_pk(), bob_pk(), ss_mpint)
+  let h = @kexc25519.kex_gen_hash(
+    b_inputs(),
+    ks_blob,
+    alice_pk(),
+    bob_pk(),
+    ss_mpint,
+  )
   assert_eq_bytes(
     h,
     hex_to_bytes(
@@ -181,8 +191,20 @@ test "kex_gen_hash_field_sensitivity" {
     ic,
     b_inputs().server_kexinit,
   )
-  let h1 = @kexc25519.kex_gen_hash(b_inputs(), ks_blob, alice_pk(), bob_pk(), ss_mpint)
-  let h2 = @kexc25519.kex_gen_hash(inputs_mut, ks_blob, alice_pk(), bob_pk(), ss_mpint)
+  let h1 = @kexc25519.kex_gen_hash(
+    b_inputs(),
+    ks_blob,
+    alice_pk(),
+    bob_pk(),
+    ss_mpint,
+  )
+  let h2 = @kexc25519.kex_gen_hash(
+    inputs_mut,
+    ks_blob,
+    alice_pk(),
+    bob_pk(),
+    ss_mpint,
+  )
   let mut same = true
   for i = 0; i < 32; i = i + 1 {
     if h1[i] != h2[i] {

@@ -42,6 +42,7 @@ import {
 /// turn "the browser is in private mode" into a failed connection, which is the
 /// wrong failure for the wrong reason: the connection itself is fine, and the user
 /// loses the ability to pin for a session rather than losing the session.
+
 options(
   targets: { "store.mbt": [ "js" ] },
 )

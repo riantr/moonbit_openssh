@@ -15,12 +15,12 @@
 ///|
 /// 调用方负责在 final 时再处理 padding
 pub fn s256_update(
-  state : FixedArray[UInt],
+  state : FixedArray[UInt32],
   buffer : FixedArray[Byte],
-  buffer_len : Int, // 当前 buffer 已用字节数
+  buffer_len : Int32, // 当前 buffer 已用字节数
   bit_count : UInt64,
   message : FixedArray[Byte],
-) -> (FixedArray[Byte], Int, UInt64) {
+) -> (FixedArray[Byte], Int32, UInt64) {
   let mut buf_len = buffer_len
   let mut bc = bit_count
   let mut msg_offset = 0
@@ -50,7 +50,7 @@ pub fn s256_update(
     msg_offset = msg_offset + free
     msg_remaining = msg_remaining - free
     // 处理 buffer (s256_transform)
-    let block : FixedArray[UInt] = FixedArray::make(16, 0U)
+    let block : FixedArray[UInt32] = FixedArray::make(16, 0U)
     for i = 0; i < 16; i = i + 1 {
       block[i] = be8_to_32(buffer, i * 4)
     }
@@ -60,7 +60,7 @@ pub fn s256_update(
 
   // 整块处理
   while msg_remaining >= s256_block_len {
-    let block : FixedArray[UInt] = FixedArray::make(16, 0U)
+    let block : FixedArray[UInt32] = FixedArray::make(16, 0U)
     for i = 0; i < 16; i = i + 1 {
       block[i] = be8_to_32(message, msg_offset + i * 4)
     }
@@ -89,9 +89,9 @@ pub fn s256_update(
 ///|
 /// 输出:已 s256_pad 完整 + s256_transform 后的最终 state
 pub fn s256_pad(
-  state : FixedArray[UInt],
+  state : FixedArray[UInt32],
   buffer : FixedArray[Byte],
-  buffer_len : Int,
+  buffer_len : Int32,
   bit_count : UInt64,
 ) -> Unit {
   // Pad with 0x80 byte at current position
@@ -104,7 +104,7 @@ pub fn s256_pad(
       buffer[pos] = b'\x00'
       pos = pos + 1
     }
-    let block : FixedArray[UInt] = FixedArray::make(16, 0U)
+    let block : FixedArray[UInt32] = FixedArray::make(16, 0U)
     for i = 0; i < 16; i = i + 1 {
       block[i] = be8_to_32(buffer, i * 4)
     }
@@ -129,7 +129,7 @@ pub fn s256_pad(
   buffer[62] = ((bit_count >> 8) & 0xFFUL).to_byte()
   buffer[63] = (bit_count & 0xFFUL).to_byte()
 
-  let block : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let block : FixedArray[UInt32] = FixedArray::make(16, 0U)
   for i = 0; i < 16; i = i + 1 {
     block[i] = be8_to_32(buffer, i * 4)
   }

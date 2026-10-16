@@ -142,12 +142,12 @@ pub(all) struct LiveReport {
   mac_stoc : String
   hostkey_blob : FixedArray[Byte]
   hostkey_type : String
-  hostkey_bits : Int
+  hostkey_bits : Int32
   exchange_hash : FixedArray[Byte]
   shared_secret_head : String
   /// Bytes the client sent and received, for the byte transcript.
-  sent_bytes : Int
-  recv_bytes : Int
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -158,7 +158,7 @@ pub(all) struct LiveReport {
 /// 对 aes128-ctr + hmac-sha2-256 是 max(16, 16, 16, 32) = 32。六个密钥
 /// 统一按这个长度派生,短的那个取前缀——这一点在 kex.c:1155 对 A..F 一视同仁,
 /// 不是只对加密密钥取 key_len。
-pub fn we_need_for(cipher : String, mac : String) -> Int {
+pub fn we_need_for(cipher : String, mac : String) -> Int32 {
   // The parameter table lives in src/bpacket; this must not be a second and
   // looser copy of it. Loop #60 found four cipher and five MAC names here, of
   // which only aes128-ctr + hmac-sha2-256 has a packet-layer path. The caller
@@ -167,8 +167,7 @@ pub fn we_need_for(cipher : String, mac : String) -> Int {
   // reported nothing. Latent -- no live proposal offered it -- but it failed
   // open rather than closed.
   let (key_len, block_size, iv_len, mac_key_len) = @bpacket.transport_params(
-    cipher,
-    mac,
+    cipher, mac,
   )
   let m = key_len
   let m = if block_size > m { block_size } else { m }
@@ -183,7 +182,7 @@ pub fn we_need_for(cipher : String, mac : String) -> Int {
 ///|
 /// Number of bytes of the shared secret rendered in the report, to keep the
 /// output stable without dumping 512 hex characters every run.
-const SHARED_HEAD_LEN : Int = 16
+const SHARED_HEAD_LEN : Int32 = 16
 
 // ---------------------------------------------------------------------------
 // Small wire helpers
@@ -194,7 +193,7 @@ const SHARED_HEAD_LEN : Int = 16
 // reporting helper for the driver output, not part of the protocol.
 
 ///|
-fn hex_head(v : @bigint.BigNat, n : Int) -> String {
+fn hex_head(v : @bigint.BigNat, n : Int32) -> String {
   let h = @bigint.BigNat::to_hex(v)
   if h.length() <= n {
     h
@@ -211,7 +210,7 @@ fn hex_head(v : @bigint.BigNat, n : Int) -> String {
 ///
 /// `pub` 是因为 `src/wtlive` 需要同一个定义;各写一份的话,两边可能对
 /// 「前缀取几字节」产生分歧,而那只会体现为两个传输路径的诊断字段不一致。
-pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
+pub fn hex_bytes_head(b : FixedArray[Byte], n : Int32) -> String {
   let m = if b.length() < n { b.length() } else { n }
   let sb = StringBuilder()
   let hex_chars : String = "0123456789abcdef"
@@ -240,6 +239,7 @@ pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
 /// which would invalidate the Loop #31/#32 byte-count assertions. The contexts
 /// below handle either outcome, so this is a transcript-stability choice, not a
 /// correctness one.
+
 ///|
 /// Host key algorithms this client offers, in preference order.
 ///
@@ -267,15 +267,15 @@ pub fn hex_bytes_head(b : FixedArray[Byte], n : Int) -> String {
 /// signature blob's inner name equals the negotiated name. The test is that the
 /// two names resolve to the *same digest*, not that any two strings are equal
 /// (`ssh-rsa.c:526-535`).
-const LIVE_HOSTKEY_ALGS : String =
-  "ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384"
+const LIVE_HOSTKEY_ALGS : String = "ssh-ed25519,rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384"
 
 ///|
 /// Loop #53: 主机证书算法。**只有这台主机配了 `@cert-authority` 时才报出来**
 /// ——规则和理由见 `KnownHostsPolicy::has_ca_anchor`。
-const LIVE_HOSTKEY_ALGS_CERTS : String =
-  "ssh-ed25519-cert-v01@openssh.com," + LIVE_HOSTKEY_ALGS
+const LIVE_HOSTKEY_ALGS_CERTS : String = "ssh-ed25519-cert-v01@openssh.com," +
+  LIVE_HOSTKEY_ALGS
 
+///|
 pub fn live_proposal() -> @kexflow.Proposal {
   live_proposal_with_certs(false)
 }
@@ -322,8 +322,8 @@ pub fn fixed_cookie() -> FixedArray[Byte] {
 ///|
 /// Counters so the report can state how much actually crossed the wire.
 priv struct WireCounters {
-  mut sent : Int
-  mut recv : Int
+  mut sent : Int32
+  mut recv : Int32
 }
 
 ///|
@@ -422,7 +422,7 @@ fn[T : @transport.Transport] recv_packet(
 fn[T : @transport.Transport] read_ident_line(
   conn : T,
   counters : WireCounters,
-  max_bytes : Int,
+  max_bytes : Int32,
 ) -> String? {
   let mut acc : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   let mut total = 0
@@ -481,7 +481,7 @@ priv struct SessionState {
   send : @bpacket.SendCtx
   recv : @bpacket.RecvCtx
   counters : WireCounters
-  we_need : Int
+  we_need : Int32
   /// 首次 KEX 的 H。publickey 认证要拿它当签名的输入(RFC 4252 §7),
   /// 所以必须是**完整**字节——之前只留了一个 16 字节的十六进制摘要给诊断,
   /// 那是打印给人看的,不是拿来签名的。
@@ -507,7 +507,7 @@ priv struct SessionState {
 ///
 /// `pub` 是因为 `src/wtlive` 的握手做完全一样的事;两边各写一份的话,任何
 /// 一处「前缀取多取少」都会只在一条路径上生效,而那正是最难发现的方向。
-pub fn head_bytes(b : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+pub fn head_bytes(b : FixedArray[Byte], n : Int32) -> FixedArray[Byte] {
   let m = if b.length() < n { b.length() } else { n }
   let out : FixedArray[Byte] = FixedArray::make(m, b'\x00')
   for i = 0; i < m; i = i + 1 {
@@ -731,12 +731,7 @@ fn[T : @transport.Transport] handshake_to_session(
   // 报 TypeMismatch），这里只把它的结论翻译成本包自己的错误类型。签名本身验不过
   // 报 SignatureInvalid——两者在协议上的后果相同，但诊断时完全不同。
   let (ktype, kbits) = @hostkey.HostKey::describe(key)
-  match @hostkey.HostKey::verify_with_alg(
-    key,
-    h,
-    sig_blob,
-    presented.sig_alg,
-  ) {
+  match @hostkey.HostKey::verify_with_alg(key, h, sig_blob, presented.sig_alg) {
     @hostkey.Accepted => ()
     _ => return (Failed(SignatureInvalid(h)), None)
   }
@@ -761,13 +756,16 @@ fn[T : @transport.Transport] handshake_to_session(
   // 时这种形状几乎必然只改一处。
   match kh.decide(ks) {
     None => ()
-    Some(@knownhosts.PinFailure::Mismatch(h)) => return (Failed(HostkeyMismatch(h)), None)
-    Some(@knownhosts.PinFailure::Unknown(h)) => return (Failed(HostkeyUnknown(h)), None)
+    Some(@knownhosts.PinFailure::Mismatch(h)) =>
+      return (Failed(HostkeyMismatch(h)), None)
+    Some(@knownhosts.PinFailure::Unknown(h)) =>
+      return (Failed(HostkeyUnknown(h)), None)
     Some(@knownhosts.PinFailure::CertAuthority(h, reason)) =>
       return (Failed(HostkeyCertAuthority(h, reason)), None)
     Some(@knownhosts.PinFailure::CertUntrusted(h)) =>
       return (Failed(HostkeyCertUntrusted(h)), None)
-    Some(@knownhosts.PinFailure::InvalidEntry) => return (Failed(HostkeyInvalid), None)
+    Some(@knownhosts.PinFailure::InvalidEntry) =>
+      return (Failed(HostkeyInvalid), None)
   }
   // ---- 8. NEWKEYS ----
   if !send_packet(
@@ -810,7 +808,9 @@ fn[T : @transport.Transport] handshake_to_session(
     return (
       Failed(
         NoAgreement(
-          "cipher " + neg.cipher_ctos + " is not the MacEncrypt path this code runs",
+          "cipher " +
+          neg.cipher_ctos +
+          " is not the MacEncrypt path this code runs",
         ),
       ),
       None,
@@ -926,12 +926,12 @@ pub(all) struct SessionReport {
   handshake : LiveReport
   service_name : String
   accepted_service : String
-  we_need : Int
+  we_need : Int32
   key_tag : String
   session_id_head : String
   /// Total bytes sent / received across handshake *and* encrypted phase.
-  sent_bytes : Int
-  recv_bytes : Int
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -1131,10 +1131,14 @@ fn[T : @transport.Transport] live_auth_with_state(
   let handshake = match res {
     Established(rep) => rep
     Failed(e) =>
-      return (Failed(AuthError::Transport(SessionError::HandshakeFailed(e))), None)
+      return (
+        Failed(AuthError::Transport(SessionError::HandshakeFailed(e))),
+        None,
+      )
   }
   let st = match state {
-    None => return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
+    None =>
+      return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
     Some(v) => v
   }
   let (accepted_opt, err) = request_userauth_service(conn, st)
@@ -1143,7 +1147,8 @@ fn[T : @transport.Transport] live_auth_with_state(
     None => ()
   }
   let accepted = match accepted_opt {
-    None => return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
+    None =>
+      return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
     Some(a) => a
   }
   let curve = @ecdsa.Curve::p256()
@@ -1195,13 +1200,16 @@ fn[T : @transport.Transport] live_auth_with_state(
     Some(v) => v
   }
   if msg_type == @sshwire.SSH_MSG_USERAUTH_FAILURE {
-    return (Failed(
-      AuthError::AuthRejected(
-        userauth_failure_reason(body),
-        @ecdsa.bytes_to_hex(to_sign),
-        @ecdsa.bytes_to_hex(sig_blob),
+    return (
+      Failed(
+        AuthError::AuthRejected(
+          userauth_failure_reason(body),
+          @ecdsa.bytes_to_hex(to_sign),
+          @ecdsa.bytes_to_hex(sig_blob),
+        ),
       ),
-    ), None)
+      None,
+    )
   }
   (
     Authenticated({
@@ -1248,10 +1256,10 @@ pub(all) enum ExecError {
   /// 对端发来的包在通道状态下解释不了,或 channel 号不认识
   Malformed(String)
   /// 通道没能打开
-  OpenFailed(Int, String)
+  OpenFailed(Int32, String)
   /// 对端拒绝了 exec
   ExecRejected
-  ///|
+  ///
   /// 对端拒绝了 subsystem 请求——通常就是「没有这个子系统」。
   ///
   /// 单列而非复用 `ExecRejected`:subsystem 的 `want_reply` 是 TRUE,所以这个
@@ -1267,7 +1275,7 @@ pub(all) enum ExecError {
   Closed
   /// 收包次数超过上限还没结束
   TooManyPackets
-  ///|
+  ///
   /// 还有待发的 stdin,但对端的发送窗口是 0。
   ///
   /// 在**收包循环之外**的一次性投递里这是死结:要等 WINDOW_ADJUST 才能继续,
@@ -1291,22 +1299,22 @@ pub(all) struct EnvVar {
 pub(all) struct ExecResult {
   stdout : FixedArray[Byte]
   stderr : FixedArray[Byte]
-  exit_status : Int
+  exit_status : Int32
   /// 对端给的通道号
-  remote_id : Int
+  remote_id : Int32
   /// 我们一共补了几次窗口
-  adjusts_sent : Int
-  ///| 作为 stdin 发出的字节数
-  stdin_sent : Int
-  ///| 发出的 CHANNEL_DATA 包数——窗口夹取的直接证据
-  stdin_packets : Int
-  ///| CHANNEL_EOF 有没有发出去(等价于 `ssh -n` 的那个 -n)
+  adjusts_sent : Int32
+  /// 作为 stdin 发出的字节数
+  stdin_sent : Int32
+  /// 发出的 CHANNEL_DATA 包数——窗口夹取的直接证据
+  stdin_packets : Int32
+  /// CHANNEL_EOF 有没有发出去(等价于 `ssh -n` 的那个 -n)
   eof_sent : Bool
-  ///| 发出的 env 请求条数
-  env_sent : Int
+  /// 发出的 env 请求条数
+  env_sent : Int32
   /// 认证 + 通道总共发出的字节数
-  sent_bytes : Int
-  recv_bytes : Int
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -1392,6 +1400,7 @@ pub fn[T : @transport.Transport] live_exec_io(
   }
 }
 
+///|
 fn empty_stdin() -> FixedArray[Byte] {
   FixedArray::make(0, b'\x00')
 }
@@ -1410,7 +1419,7 @@ fn empty_stdin() -> FixedArray[Byte] {
 /// 字节数或 sha256 变掉——一个全 0x41 的缓冲做不到这一点。
 ///
 /// 放在 `src/sshclient` 是因为原生 CLI 和浏览器 Worker 都要用同一份。
-pub fn ssh_stdin_pattern(n : Int) -> FixedArray[Byte] {
+pub fn ssh_stdin_pattern(n : Int32) -> FixedArray[Byte] {
   let src = sh_ascii("loop37-stdin-block-")
   let out = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
@@ -1442,10 +1451,11 @@ fn[T : @transport.Transport] exec_drive(
   let mut st = st0
   let open = @channel.ChanState::new(@channel.LOCAL_CHANNEL).open_action()
   match send_action(conn, st, open) {
-    None => return (
-      @channel.ChanState::new(@channel.LOCAL_CHANNEL),
-      Some(ExecError::SendFailed),
-    )
+    None =>
+      return (
+        @channel.ChanState::new(@channel.LOCAL_CHANNEL),
+        Some(ExecError::SendFailed),
+      )
     Some(s) => st = s
   }
   // 第一步只有一个包:CHANNEL_OPEN_CONFIRMATION 或 CHANNEL_OPEN_FAILURE。
@@ -1526,12 +1536,11 @@ fn[T : @transport.Transport] exec_drive(
       chan = c1
       match a {
         None => ()
-        Some(x) => {
+        Some(x) =>
           match send_action(conn, st, x) {
             None => return (chan, Some(ExecError::SendFailed))
             Some(s) => st = s
           }
-        }
       }
       eof_pending = false
     }
@@ -1559,7 +1568,8 @@ fn[T : @transport.Transport] exec_drive(
   (chan, None)
 }
 
-///| 发一个 `ChanAction`,并把更新后的计数器带回来
+///|
+/// 发一个 `ChanAction`,并把更新后的计数器带回来
 fn[T : @transport.Transport] send_action(
   conn : T,
   st : SessionState,
@@ -1577,6 +1587,7 @@ fn[T : @transport.Transport] send_action(
   }
 }
 
+///|
 fn chan_error(e : @channel.ChanError) -> ExecError {
   match e {
     OpenFailed(r, d) => ExecError::OpenFailed(r, d)
@@ -1590,7 +1601,8 @@ fn chan_error(e : @channel.ChanError) -> ExecError {
 // Interactive session (Loop #36)
 // ---------------------------------------------------------------------------
 
-///| 交互式会话的结果
+///|
+/// 交互式会话的结果
 pub(all) enum ShellOutcome {
   Done(ShellResult)
   AuthFailed(AuthError)
@@ -1607,17 +1619,17 @@ pub(all) enum ShellOutcome {
 pub(all) struct ShellResult {
   stdout : FixedArray[Byte]
   stderr : FixedArray[Byte]
-  exit_status : Int
+  exit_status : Int32
   exit_signal : (String, Bool)?
   exit_signal_message : String
   pty_granted : Bool
-  ///| 请求的窗口尺寸;`window-change` 是不是成功发出去了
-  cols : Int
-  rows : Int
+  /// 请求的窗口尺寸;`window-change` 是不是成功发出去了
+  cols : Int32
+  rows : Int32
   resize_sent : Bool
-  adjusts_sent : Int
-  sent_bytes : Int
-  recv_bytes : Int
+  adjusts_sent : Int32
+  sent_bytes : Int32
+  recv_bytes : Int32
 }
 
 ///|
@@ -1646,9 +1658,9 @@ pub fn[T : @transport.Transport] live_shell(
   d : @bigint.BigNat,
   command : String,
   term : String,
-  cols : Int,
-  rows : Int,
-  resize_to : (Int, Int)?,
+  cols : Int32,
+  rows : Int32,
+  resize_to : (Int32, Int32)?,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> ShellOutcome {
   let (auth, state_opt) = live_auth_with_state(conn, x, user, d, kh)
@@ -1661,13 +1673,7 @@ pub fn[T : @transport.Transport] live_shell(
     Some(v) => v
   }
   let (chan0, failure, pty_granted, resize_sent) = shell_drive(
-    conn,
-    st,
-    command,
-    term,
-    cols,
-    rows,
-    resize_to,
+    conn, st, command, term, cols, rows, resize_to,
   )
   match failure {
     Some(e) => ShellOutcome::ChannelFailed(e)
@@ -1702,7 +1708,7 @@ fn[T : @transport.Transport] shell_wait_open(
   conn : T,
   st : SessionState,
   chan : @channel.ChanState,
-  cap : Int,
+  cap : Int32,
 ) -> (SessionState, @channel.ChanState, ExecError?) {
   let mut s = st
   let mut c = chan
@@ -1743,7 +1749,7 @@ fn[T : @transport.Transport] shell_confirm(
   conn : T,
   st : SessionState,
   chan : @channel.ChanState,
-  cap : Int,
+  cap : Int32,
 ) -> (SessionState, @channel.ChanState, ExecError?, Bool) {
   let mut s = st
   let mut c = chan
@@ -1779,14 +1785,15 @@ fn[T : @transport.Transport] shell_confirm(
   (s, c, Some(ExecError::TooManyPackets), false)
 }
 
-///| 收包直到字节流里出现 `needle`,或者包数超限
+///|
+/// 收包直到字节流里出现 `needle`,或者包数超限
 fn[T : @transport.Transport] shell_read_until(
   conn : T,
   st : SessionState,
   chan : @channel.ChanState,
   seen : FixedArray[Byte],
   needle : FixedArray[Byte],
-  cap : Int,
+  cap : Int32,
 ) -> (SessionState, @channel.ChanState, FixedArray[Byte], ExecError?) {
   let mut s = st
   let mut c = chan
@@ -1829,11 +1836,9 @@ fn[T : @transport.Transport] shell_read_until(
   (s, c, buf, Some(ExecError::TooManyPackets))
 }
 
-///| 一个块序列里最后 `n` 个字节
-fn tail_of(
-  chunks : Array[FixedArray[Byte]],
-  n : Int,
-) -> FixedArray[Byte] {
+///|
+/// 一个块序列里最后 `n` 个字节
+fn tail_of(chunks : Array[FixedArray[Byte]], n : Int32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   let mut need = n
   let mut i = chunks.length() - 1
@@ -1856,19 +1861,18 @@ fn tail_of(
   out
 }
 
+///|
 fn[T : @transport.Transport] shell_drive(
   conn : T,
   st0 : SessionState,
   command : String,
   term : String,
-  cols : Int,
-  rows : Int,
-  resize_to : (Int, Int)?,
+  cols : Int32,
+  rows : Int32,
+  resize_to : (Int32, Int32)?,
 ) -> (@channel.ChanState, ExecError?, Bool, Bool) {
   let mut st = st0
-  let mut chan = @channel.ChanState::new_interactive(
-    @channel.LOCAL_CHANNEL,
-  )
+  let mut chan = @channel.ChanState::new_interactive(@channel.LOCAL_CHANNEL)
   let open = chan.open_action()
   match send_action(conn, st, open) {
     None => return (chan, Some(ExecError::SendFailed), false, false)
@@ -1893,15 +1897,10 @@ fn[T : @transport.Transport] shell_drive(
     }
   }
   // 2) pty-req。被拒不算致命。
-  let pty = match chan.pty_req_action(
-    term,
-    cols,
-    rows,
-    0,
-    0,
-    @channel.tty_modes_bytes(38400),
-  ) {
-    None => return (chan, Some(ExecError::Malformed("pty_before_open")), false, false)
+  let pty = match
+    chan.pty_req_action(term, cols, rows, 0, 0, @channel.tty_modes_bytes(38400)) {
+    None =>
+      return (chan, Some(ExecError::Malformed("pty_before_open")), false, false)
     Some(a) => a
   }
   match send_action(conn, st, pty) {
@@ -1919,7 +1918,13 @@ fn[T : @transport.Transport] shell_drive(
   }
   // 3) shell
   let shell = match chan.shell_action() {
-    None => return (chan, Some(ExecError::Malformed("shell_before_open")), false, false)
+    None =>
+      return (
+        chan,
+        Some(ExecError::Malformed("shell_before_open")),
+        false,
+        false,
+      )
     Some(a) => a
   }
   match send_action(conn, st, shell) {
@@ -2011,7 +2016,12 @@ fn[T : @transport.Transport] shell_drive(
         for i = 0; i < actions.length(); i = i + 1 {
           match send_action(conn, st, actions[i]) {
             None =>
-              return (chan, Some(ExecError::SendFailed), pty_granted, resize_sent)
+              return (
+                chan,
+                Some(ExecError::SendFailed),
+                pty_granted,
+                resize_sent,
+              )
             Some(x) => st = x
           }
         }
@@ -2044,7 +2054,7 @@ fn[T : @transport.Transport] send_stdin_all(
     c = c1
     match action {
       None => return (c, s, Some(ExecError::StdinStalled))
-      Some(a) => {
+      Some(a) =>
         match send_action(conn, s, a) {
           None => return (c, s, Some(ExecError::SendFailed))
           Some(x) => {
@@ -2052,7 +2062,6 @@ fn[T : @transport.Transport] send_stdin_all(
             pending = rest
           }
         }
-      }
     }
   }
   (c, s, None)
@@ -2071,15 +2080,20 @@ pub fn sh_ascii(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn sh_empty_bytes() -> FixedArray[Byte] {
   FixedArray::make(0, b'\x00')
 }
 
-///| 子串查找(朴素)。用于「命令回显出现了没有」,不追求快。
+///|
+/// 子串查找(朴素)。用于「命令回显出现了没有」,不追求快。
 ///
 /// `pub` 的理由同上:CLI 要用它做同一个判断,两边各写一份就等于有两处可能
 /// 对「回显」理解不一致的地方。
-pub fn sh_contains_bytes(hay : FixedArray[Byte], needle : FixedArray[Byte]) -> Bool {
+pub fn sh_contains_bytes(
+  hay : FixedArray[Byte],
+  needle : FixedArray[Byte],
+) -> Bool {
   if needle.length() == 0 || needle.length() > hay.length() {
     return false
   }

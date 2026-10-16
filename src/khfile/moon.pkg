@@ -55,8 +55,5 @@ import {
 /// here. `moonbitlang/async/fs` has no wasm backend to link against.
 
 options(
-  targets: {
-    "store.mbt": [ "native" ],
-    "store_test.mbt": [ "native" ],
-  },
+  targets: { "store.mbt": [ "native" ], "store_test.mbt": [ "native" ] },
 )

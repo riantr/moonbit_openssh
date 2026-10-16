@@ -223,8 +223,8 @@ pub fn sc_mul(x : Sc, y : Sc) -> Sc {
 
 ///|
 /// 对应 C: sc25519_window3
-pub fn sc_window3(s : Sc) -> FixedArray[Int] {
-  let r : FixedArray[Int] = FixedArray::make(85, 0)
+pub fn sc_window3(s : Sc) -> FixedArray[Int32] {
+  let r : FixedArray[Int32] = FixedArray::make(85, 0)
   // 11 full iterations (3 bytes each) + 1 partial (4 bytes)
   for i = 0; i < 10; i = i + 1 {
     r[8 * i + 0] = s[3 * i + 0].to_int() & 7
@@ -247,7 +247,7 @@ pub fn sc_window3(s : Sc) -> FixedArray[Int] {
   r[8 * i + 3] = (s[3 * i + 1] >> 1).to_int() & 7
   r[8 * i + 4] = (s[3 * i + 1] >> 4).to_int() & 7
   // sign conversion: turn into signed representation
-  let mut carry : Int = 0
+  let mut carry : Int32 = 0
   for j = 0; j < 84; j = j + 1 {
     r[j] = r[j] + carry
     let rj1 = r[j + 1] + (r[j] >> 3)

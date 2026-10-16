@@ -26,7 +26,7 @@
 
 ///|
 ///       rotl32(0, n) == 0
-pub fn rotl32(x : UInt, n : Int) -> UInt {
+pub fn rotl32(x : UInt32, n : Int32) -> UInt32 {
   // 规范 n 在 0..32 范围
   let n_norm = n % 32
   if n_norm == 0 {
@@ -69,11 +69,11 @@ pub fn rotl32(x : UInt, n : Int) -> UInt {
 ///|
 ///      说是 word_sum 不变)
 pub fn quarterround(
-  a : UInt,
-  b : UInt,
-  c : UInt,
-  d : UInt,
-) -> (UInt, UInt, UInt, UInt) {
+  a : UInt32,
+  b : UInt32,
+  c : UInt32,
+  d : UInt32,
+) -> (UInt32, UInt32, UInt32, UInt32) {
   let a1 = a + b // a += b
   let d1 = rotl32(d ^ a1, 16) // d = rotl(d ^ a, 16)
   let c1 = c + d1 // c += d
@@ -89,7 +89,7 @@ pub fn quarterround(
 
 ///|
 /// 对应 C 宏: `U8TO32_LITTLE(p)`
-pub fn u8_to_32_le(bytes : FixedArray[Byte], offset : Int) -> UInt {
+pub fn u8_to_32_le(bytes : FixedArray[Byte], offset : Int32) -> UInt32 {
   // 字节序:byte[offset] 是低字节
   let b0 = bytes[offset].to_uint()
   let b1 = bytes[offset + 1].to_uint()
@@ -104,8 +104,8 @@ pub fn u8_to_32_le(bytes : FixedArray[Byte], offset : Int) -> UInt {
 /// 对应 C 宏: `U32TO8_LITTLE(p, v)`
 pub fn u32_to_8_le(
   bytes : FixedArray[Byte],
-  offset : Int,
-  value : UInt,
+  offset : Int32,
+  value : UInt32,
 ) -> Unit {
   bytes[offset] = ((value >> 0) & 0xFFU).to_byte()
   bytes[offset + 1] = ((value >> 8) & 0xFFU).to_byte()

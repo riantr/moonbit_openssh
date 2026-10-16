@@ -1,5 +1,6 @@
 ///| cmd/ed25519_kat -- Loop #55: MoonBit Ed25519, exported for byte comparison.
 ///
+
 ///|
 ///
 /// `moon test src/ed25519` can only answer "did the implementation agree with
@@ -7,6 +8,7 @@
 /// #53 was written against: a fixture and a verifier that share a mistake agree
 /// with each other and the whole thing is green.
 ///
+
 ///|
 ///
 /// The vectors are RFC 8032 section 7.1 tests 1-3, which are **published
@@ -16,11 +18,13 @@
 /// (`verify_c/ed25519_harness.c`) and Python's `cryptography`
 /// (`verify_c/ed25519_python_ref.py`, libsodium/OpenSSL-backed).
 ///
+
 ///|
 ///
 /// The line format is deliberately the Python reference's, so the gate compares
 /// text instead of re-implementing a parser per side. Lowercase hex.
 ///
+
 ///|
 ///
 /// The negative cases are here for the same reason the C harness has them: a
@@ -31,18 +35,15 @@ fn main {
   println("===== RFC 8032 SS 7.1 Test Vectors =====")
   let cases : Array[(String, String, String)] = [
     (
-      "Test 1",
-      "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+      "Test 1", "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
       "",
     ),
     (
-      "Test 2",
-      "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      "Test 2", "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
       "72",
     ),
     (
-      "Test 3",
-      "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+      "Test 3", "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
       "af82",
     ),
   ]
@@ -91,11 +92,15 @@ fn main {
   // S-range bit check passes, the high-bits check passes, and the *only* thing
   // that can reject it is the range check. That is the vector that tests the
   // thing.
-  let seed = hx("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+  let seed = hx(
+    "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  )
   let msg = FixedArray::make(0, b'\x00')
   let (pk, sk) = @ed25519.keypair_from_seed(seed)
   let sig = @ed25519.sign(msg, sk)
-  let l_bytes = hx("1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed")
+  let l_bytes = hx(
+    "1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed",
+  )
   let malleable = FixedArray::make(64, b'\x00')
   for k = 0; k < 32; k = k + 1 {
     malleable[k] = sig[k]
@@ -112,26 +117,29 @@ fn main {
   // The carry out of 32 bytes is the bit above 2^256. If it were set, `s + L`
   // would have wrapped and stopped being malleable, so the vector would quietly
   // become a correct signature again -- a test that stops testing itself.
-  let s_sum = (if carry != 0 { "OVERFLOW" } else { "ok" })
+  let s_sum = if carry != 0 { "OVERFLOW" } else { "ok" }
   let accepted = @ed25519.verify(malleable, msg, pk)
-  println("s+L top byte: " + @ecdsa.bytes_to_hex(
-    FixedArray::make(1, malleable[63]),
-  ))
+  println(
+    "s+L top byte: " + @ecdsa.bytes_to_hex(FixedArray::make(1, malleable[63])),
+  )
   println("s+L carry: " + s_sum)
   println("s+L reject: " + (if accepted { "WRONG_PASS" } else { "PASS" }))
   // The control: the unmodified signature must still verify, or "rejected"
   // above could just mean `verify` is broken for everything.
   println(
-    "s orig accept: " + (if @ed25519.verify(sig, msg, pk) { "PASS" } else {
-      "WRONG_FAIL"
-    }),
+    "s orig accept: " +
+    (if @ed25519.verify(sig, msg, pk) { "PASS" } else { "WRONG_FAIL" }),
   )
   println("ALL PASS")
 }
 
 ///|
 fn bool_txt(b : Bool) -> String {
-  if b { "True" } else { "False" }
+  if b {
+    "True"
+  } else {
+    "False"
+  }
 }
 
 ///|
@@ -159,8 +167,8 @@ fn hx(s : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn d(c : UInt16) -> Int {
-  let x : Int = c.to_int()
+fn d(c : UInt16) -> Int32 {
+  let x : Int32 = c.to_int()
   if x >= 48 && x <= 57 {
     x - 48
   } else if x >= 97 && x <= 102 {

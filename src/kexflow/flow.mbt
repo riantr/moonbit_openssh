@@ -2,6 +2,7 @@
 ///
 /// 瀵瑰簲 OpenSSH kexgen.c :99-127(kex_gen_client)/:131-233
 /// (input_kex_gen_reply)涓?kex.c choose_conf 鏃跺簭銆?/// 绾秷鎭眰:甯у皝瑁?鍔犲瘑鍒囨崲褰?bpacket 涓庤皟鐢ㄦ柟(architect 搂3)銆?
+
 ///|
 /// SSH2_MSG_KEXINIT(ssh2.h)
 pub const KX_MSG_KEXINIT : Byte = b'\x14'
@@ -77,7 +78,7 @@ pub(all) struct FlowConfig {
   /// Loop #13 接入:用于 host_key_check
   hostname : String
   /// Loop #14 接入:调用方的连接端口 0 = SSH default 22
-  host_port : Int
+  host_port : Int32
   /// Loop #13 接入:known_hosts 条目;空数组 = 跳过检查
   knownhosts_entries : Array[@knownhosts.KnownHostEntry]
 }
@@ -90,10 +91,19 @@ pub fn FlowConfig::make(
   client_seed : FixedArray[Byte],
   strict_kex : Bool,
   hostname : String,
-  host_port : Int,
+  host_port : Int32,
   knownhosts_entries : Array[@knownhosts.KnownHostEntry],
 ) -> FlowConfig {
-  { version_client, version_server, cookie, client_seed, strict_kex, hostname, host_port, knownhosts_entries, }
+  {
+    version_client,
+    version_server,
+    cookie,
+    client_seed,
+    strict_kex,
+    hostname,
+    host_port,
+    knownhosts_entries,
+  }
 }
 
 ///|
@@ -152,7 +162,7 @@ fn kf_cat(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
 fn kf_wstr(b : FixedArray[Byte]) -> FixedArray[Byte] {
   let n = b.length()
   let len_arr : FixedArray[Byte] = FixedArray::make(4, b'\x00')
-  let u : UInt = n.reinterpret_as_uint()
+  let u : UInt32 = n.reinterpret_as_uint()
   len_arr[0] = ((u >> 24) & 0xFFU).to_byte()
   len_arr[1] = ((u >> 16) & 0xFFU).to_byte()
   len_arr[2] = ((u >> 8) & 0xFFU).to_byte()
@@ -270,7 +280,11 @@ pub fn flow_on_reply(
   // 入参 cfg.knownhosts_entries 可空（空数组 = 跳过检查）; bytesters_hostname 必须非空
   if cfg.knownhosts_entries.length() > 0 {
     let host_status = @knownhosts.check_host_key_strict(
-      cfg.knownhosts_entries, cfg.hostname, cfg.host_port, rep.hostkey_blob, cfg.strict_kex,
+      cfg.knownhosts_entries,
+      cfg.hostname,
+      cfg.host_port,
+      rep.hostkey_blob,
+      cfg.strict_kex,
     )
     match host_status {
       @knownhosts.Ok => ()
@@ -279,7 +293,8 @@ pub fn flow_on_reply(
         if cfg.strict_kex {
           return Failed(HostKeyUnknown(cfg.hostname))
         }
-      @knownhosts.CertAuthority => return Failed(HostKeyCertAuthority(cfg.hostname))
+      @knownhosts.CertAuthority =>
+        return Failed(HostKeyCertAuthority(cfg.hostname))
       @knownhosts.InvalidEntry => return Failed(ProtocolError)
     }
   }
@@ -325,8 +340,8 @@ pub fn flow_on_reply(
 ///|
 fn kf_slice(
   src : FixedArray[Byte],
-  start : Int,
-  end_ : Int,
+  start : Int32,
+  end_ : Int32,
 ) -> FixedArray[Byte] {
   let n = end_ - start
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')

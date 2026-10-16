@@ -10,11 +10,13 @@
 
 ///|
 /// 跳过前导空白（OpenSSH hostfile.c:822-823 行为）
-fn skip_leading_ws(s : String) -> Int {
+fn skip_leading_ws(s : String) -> Int32 {
   let mut i = 0
   while i < s.length() {
     let c = s[i].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     i = i + 1
   }
   i
@@ -22,11 +24,13 @@ fn skip_leading_ws(s : String) -> Int {
 
 ///|
 /// 跳到下一个空白字符（终止 hostname 字段）
-fn skip_to_ws(s : String, start : Int) -> Int {
+fn skip_to_ws(s : String, start : Int32) -> Int32 {
   let mut i = start
   while i < s.length() {
     let c = s[i].to_int()
-    if c == 0x20 || c == 0x09 { break }
+    if c == 0x20 || c == 0x09 {
+      break
+    }
     i = i + 1
   }
   i
@@ -34,13 +38,17 @@ fn skip_to_ws(s : String, start : Int) -> Int {
 
 ///|
 /// 检测 @cert-authority / @revoked 标记（hostfile.c:180-213 check_markers）
-fn check_marker(s : String, start : Int) -> (Marker, Int)? {
-  if start >= s.length() || s[start] != '@' { return None }
+fn check_marker(s : String, start : Int32) -> (Marker, Int32)? {
+  if start >= s.length() || s[start] != '@' {
+    return None
+  }
   // 标记必须以空白终止
   let mut end = start + 1
   while end < s.length() {
     let c = s[end].to_int()
-    if c == 0x20 || c == 0x09 { break }
+    if c == 0x20 || c == 0x09 {
+      break
+    }
     end = end + 1
   }
   if end >= s.length() || end == start + 1 {
@@ -52,11 +60,15 @@ fn check_marker(s : String, start : Int) -> (Marker, Int)? {
   let mut after = end
   while after < s.length() {
     let c = s[after].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     after = after + 1
   }
   // 只允许一个标记（hostfile.c:188-189）
-  if after > end && s[end + 1] == '@' { return None }
+  if after > end && s[end + 1] == '@' {
+    return None
+  }
   if marker_str == "@cert-authority" {
     Some((CertAuthority, after))
   } else if marker_str == "@revoked" {
@@ -69,7 +81,7 @@ fn check_marker(s : String, start : Int) -> (Marker, Int)? {
 ///|
 /// 解析单行 known_hosts 条目
 /// 返回 None 表示空行/纯注释/格式错误
-pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
+pub fn parse_line(line : String, linenum : Int32) -> KnownHostEntry? {
   let raw = line
   let mut pos = skip_leading_ws(line)
   // 空行或 # 注释行
@@ -95,7 +107,9 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   let mut p = host_end
   while p < line.length() {
     let c = line[p].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     p = p + 1
   }
   // keytype
@@ -108,7 +122,9 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   p = kt_end
   while p < line.length() {
     let c = line[p].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     p = p + 1
   }
   // base64 blob
@@ -118,7 +134,9 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   } else {
     line[p:line.length()].to_owned()
   }
-  if blob_str.length() == 0 { return None }
+  if blob_str.length() == 0 {
+    return None
+  }
   // base64 decode
   let key_blob = match parse_base64_blob(blob_str) {
     Some(b) => b
@@ -126,7 +144,9 @@ pub fn parse_line(line : String, linenum : Int) -> KnownHostEntry? {
   }
   // 拆分 hostname 模式（trim 后存为 Array；保留原始 host_raw）
   let patterns = split_host_patterns(host_raw)
-  if patterns.length() == 0 { return None }
+  if patterns.length() == 0 {
+    return None
+  }
   // Loop #14: 平行构造 host_specs (host_only, host_port?)
   let specs : Array[HostSpec] = []
   for i = 0; i < patterns.length(); i = i + 1 {
@@ -190,7 +210,10 @@ fn split_host_pattern_spec(p : String) -> HostSpec {
     let mut close = -1
     let mut j = 1
     while j < s.length() {
-      if s[j].to_int() == ']'.to_int() { close = j; break }
+      if s[j].to_int() == ']'.to_int() {
+        close = j
+        break
+      }
       j = j + 1
     }
     if close > 0 {
@@ -201,30 +224,34 @@ fn split_host_pattern_spec(p : String) -> HostSpec {
         // 解析端口字符串 s[close+2..]
         let port_str = s[close + 2:s.length()].to_owned()
         match parse_int_str(port_str) {
-          Some(n) => { host_only: host_inner, host_port: Some(n) }
-          None => { host_only: host_inner, host_port: None }  // 端口解析失败
+          Some(n) => { host_only: host_inner, host_port: Some(n), }
+          None => { host_only: host_inner, host_port: None, } // 端口解析失败
         }
       } else {
-        { host_only: host_inner, host_port: None }
+        { host_only: host_inner, host_port: None, }
       }
     } else {
       // 没找到 ']' -- 整段当作 host_only（不匹配但保守）
-      { host_only: s, host_port: None }
+      { host_only: s, host_port: None, }
     }
   } else {
-    { host_only: s, host_port: None }
+    { host_only: s, host_port: None, }
   }
 }
 
 ///|
 /// Loop #14: 解析十进制整数字符串,失败返回 None
-fn parse_int_str(s : String) -> Int? {
-  if s.length() == 0 { return None }
+fn parse_int_str(s : String) -> Int32? {
+  if s.length() == 0 {
+    return None
+  }
   let mut n = 0
   let mut i = 0
   while i < s.length() {
     let c = s[i].to_int()
-    if c < '0'.to_int() || c > '9'.to_int() { return None }
+    if c < '0'.to_int() || c > '9'.to_int() {
+      return None
+    }
     n = n * 10 + (c - '0'.to_int())
     i = i + 1
   }
@@ -238,15 +265,21 @@ fn trim_whitespace(s : String) -> String {
   let mut end = s.length()
   while start < end {
     let c = s[start].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     start = start + 1
   }
   while end > start {
     let c = s[end - 1].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     end = end - 1
   }
-  if start >= end { return "" }
+  if start >= end {
+    return ""
+  }
   s[start:end].to_owned()
 }
 

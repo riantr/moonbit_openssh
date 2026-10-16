@@ -28,18 +28,18 @@
 ///   re-raise as `WtError` with a code that means something.
 #borrow(bytes)
 extern "js" fn ffi_wt_send(
-  handle : Int,
+  handle : Int32,
   bytes : FixedArray[Byte],
 ) -> @js_async.Promise[Unit] = "((h, b) => globalThis.__moonbit_wt.send(h, new Uint8Array(b)))"
 
 ///|
-extern "js" fn ffi_wt_open(url : String) -> @js_async.Promise[Int] = "((u) => globalThis.__moonbit_wt.open(u).then((h) => h))"
+extern "js" fn ffi_wt_open(url : String) -> @js_async.Promise[Int32] = "((u) => globalThis.__moonbit_wt.open(u).then((h) => h))"
 
 ///|
 extern "js" fn ffi_wt_read_exact(
-  handle : Int,
-  n : Int,
+  handle : Int32,
+  n : Int32,
 ) -> @js_async.Promise[FixedArray[Byte]] = "((h, n) => globalThis.__moonbit_wt.read_exact(h, n).then((u8) => u8))"
 
 ///|
-extern "js" fn ffi_wt_close(handle : Int) -> @js_async.Promise[Unit] = "((h) => globalThis.__moonbit_wt.close(h))"
+extern "js" fn ffi_wt_close(handle : Int32) -> @js_async.Promise[Unit] = "((h) => globalThis.__moonbit_wt.close(h))"

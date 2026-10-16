@@ -1,4 +1,5 @@
 ///| SSH config Host pattern matching (Loop #24 G3)
+
 ///|
 /// 给定 hostname + Array[SshConfigSection],返回首个 patterns 包含 hostname 的 section
 /// OpenSSH 行为: "first match wins" — 找到第一个匹配就返回
@@ -8,7 +9,7 @@
 pub fn match_host_section(
   hostname : String,
   sections : Array[SshConfigSection],
-) -> Option[SshConfigSection] {
+) -> SshConfigSection? {
   for section in sections {
     for pattern in section.patterns {
       if fnmatch(pattern, hostname) {
@@ -41,7 +42,7 @@ pub fn match_host_option(
   hostname : String,
   sections : Array[SshConfigSection],
   keyword : String,
-) -> Option[String] {
+) -> String? {
   let opts = resolve_host(hostname, sections)
   let k = lower(keyword)
   let mut i = 0
@@ -60,7 +61,13 @@ fn lower(s : String) -> String {
   let mut i = 0
   while i < s.length() {
     let c = s[i].to_int()
-    b.write_char(if c >= 65 && c <= 90 { (c + 32).unsafe_to_char() } else { s[i].unsafe_to_char() })
+    b.write_char(
+      if c >= 65 && c <= 90 {
+        (c + 32).unsafe_to_char()
+      } else {
+        s[i].unsafe_to_char()
+      },
+    )
     i = i + 1
   }
   b.to_string()

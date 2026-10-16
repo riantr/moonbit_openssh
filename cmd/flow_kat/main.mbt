@@ -1,5 +1,6 @@
 ///| cmd/flow_kat -- Loop #62: run `flow_on_reply` over the real handshake vectors.
 ///
+
 ///|
 ///
 /// Loop #61 proved, by inspection and by a unit test, that `flow_on_reply`'s
@@ -7,6 +8,7 @@
 /// comes from the transport table. It did **not** prove the function can complete
 /// a handshake, and its own AGENTS.md entry says so. This is that proof.
 ///
+
 ///|
 ///
 /// The vectors come from `host/gen_flow62_vectors.py`, whose server half shares
@@ -15,6 +17,7 @@
 /// kexgen.c:67-82 independently of `src/kexc25519/exchange_hash.mbt`. So H and
 /// the signature are each computed twice, by code that shares nothing.
 ///
+
 ///|
 ///
 /// **The verdict is the contract, not the bytes.** All three of Loop #61's
@@ -26,14 +29,15 @@
 /// native only: reading the vector file needs `moonbitlang/async/fs`, which is
 /// why this `main` is `async`.
 struct Tally {
-  mut pass : Int
-  mut fail : Int
+  mut pass : Int32
+  mut fail : Int32
 }
 
+///|
 async fn main {
   let path = "verify_c/kexflow/flow_vectors.txt"
   let text = read_all(path)
-  let tally = { pass: 0, fail: 0 }
+  let tally = { pass: 0, fail: 0, }
   let mut seen = 0
   let mut cur = blank_case()
   for raw in split_lines(text) {
@@ -94,6 +98,7 @@ async fn main {
   println("FLOW_FAIL \{tally.fail}")
 }
 
+///|
 priv struct Case {
   mut id : String
   mut want : String
@@ -106,12 +111,14 @@ priv struct Case {
   mut probe_h : Bool
 }
 
-///| Reading a file needs the async fs, hence the `async fn` on `main` too.
+///|
+/// Reading a file needs the async fs, hence the `async fn` on `main` too.
 async fn read_all(path : String) -> String {
-  let data = try { @fs.read_file(path) } catch { _ => abort("cannot read " + path) }
+  let data = @fs.read_file(path) catch { _ => abort("cannot read " + path) }
   data.text()
 }
 
+///|
 fn blank_case() -> Case {
   {
     id: "",
@@ -127,59 +134,6 @@ fn blank_case() -> Case {
 }
 
 ///|
-/// The body of the first SSH string in `wire`, i.e. K_S out of the REPLY.
-///
-/// `wire` includes the leading message-type byte (0x1f), so the string header
-/// starts at offset 1 -- reading it from offset 0 picked the type byte as a
-/// length prefix and indexed far past the end. That is why this helper exists
-/// instead of "just parsing it here": the first version crashed, and a crash in
-/// the diagnostic path hides the diagnosis.
-fn first_string_body(wire : String) -> FixedArray[Byte] {
-  let all = hex(wire)
-  if all.length() < 6 {
-    return FixedArray::make(0, b'\x00')
-  }
-  let n = ((all[1].to_uint() << 24) | (all[2].to_uint() << 16) |
-  (all[3].to_uint() << 8) | all[4].to_uint()).reinterpret_as_int()
-  if n < 0 || n > all.length() - 5 {
-    return FixedArray::make(0, b'\x00')
-  }
-  let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
-  for i = 0; i < n; i = i + 1 {
-    out[i] = all[5 + i]
-  }
-  out
-}
-
-///| A short hex prefix, for the probe line. Diagnostics need evidence.
-fn hex_of(b : FixedArray[Byte], n : Int) -> String {
-  let sb = StringBuilder()
-  let m = if n < b.length() { n } else { b.length() }
-  for i = 0; i < m; i = i + 1 {
-    sb.write_string(to_hex2(b[i].to_int()))
-  }
-  sb.to_string()
-}
-
-fn to_hex2(v : Int) -> String {
-  let mut out = ""
-  out = out + hex_digit(v / 16)
-  out + hex_digit(v % 16)
-}
-
-fn hex_digit(v : Int) -> String {
-  if v < 10 {
-    return code_to_digit(48 + v)
-  }
-  code_to_digit(97 + v - 10)
-}
-
-fn code_to_digit(code : Int) -> String {
-  let s = "\{code}"
-  s
-}
-
-///|
 /// K_S out of a REPLY, via the same `parse_reply` the code under test uses.
 ///
 /// The REPLY wire is `0x1f ‖ string(K_S) ‖ string(Q_S) ‖ string(sig)`, so the
@@ -189,7 +143,11 @@ fn code_to_digit(code : Int) -> String {
 fn reply_ks(wire : String) -> FixedArray[Byte] {
   let all = hex(wire)
   let body : FixedArray[Byte] = FixedArray::make(
-    if all.length() > 1 { all.length() - 1 } else { 0 },
+    if all.length() > 1 {
+      all.length() - 1
+    } else {
+      0
+    },
     b'\x00',
   )
   for i = 0; i < body.length(); i = i + 1 {
@@ -220,11 +178,16 @@ fn to_hex_full(b : FixedArray[Byte]) -> String {
   sb.to_string()
 }
 
-///| Q_S, the second string in a REPLY.
+///|
+/// Q_S, the second string in a REPLY.
 fn reply_qs(wire : String) -> FixedArray[Byte] {
   let all = hex(wire)
   let body : FixedArray[Byte] = FixedArray::make(
-    if all.length() > 1 { all.length() - 1 } else { 0 },
+    if all.length() > 1 {
+      all.length() - 1
+    } else {
+      0
+    },
     b'\x00',
   )
   for i = 0; i < body.length(); i = i + 1 {
@@ -236,6 +199,7 @@ fn reply_qs(wire : String) -> FixedArray[Byte] {
   }
 }
 
+///|
 fn key_error_name(e : @hostkey.KeyError) -> String {
   match e {
     InvalidFormat => "InvalidFormat"
@@ -280,14 +244,8 @@ fn run_case(c : Case, tally : Tally) -> Unit {
   )
   let started = @kexflow.flow_start(cfg, my)
   let got = match
-    @kexflow.flow_on_reply(
-      started,
-      cfg,
-      my,
-      hex(c.peer_ic),
-      hex(c.reply),
-    ) {
-    @kexflow.Established(e) => {
+    @kexflow.flow_on_reply(started, cfg, my, hex(c.peer_ic), hex(c.reply)) {
+    @kexflow.Established(e) =>
       // `Established` alone would be too weak: the interesting question is
       // whether the derived session id is the exchange hash. Loop #61's whole
       // bug class was a plausible-looking success.
@@ -296,7 +254,6 @@ fn run_case(c : Case, tally : Tally) -> Unit {
       } else {
         "Established(short-session-id)"
       }
-    }
     @kexflow.Failed(e) => variant_name(e)
   }
   // Probe the K_S blob separately. `flow_on_reply` collapses "the blob did not
@@ -351,7 +308,8 @@ fn run_case(c : Case, tally : Tally) -> Unit {
   }
 }
 
-///| The variant name, spelled out. A gate needs the name, not a Moonbit repr.
+///|
+/// The variant name, spelled out. A gate needs the name, not a Moonbit repr.
 fn variant_name(e : @kexflow.FlowError) -> String {
   match e {
     ProtocolError => "ProtocolError"
@@ -367,6 +325,7 @@ fn variant_name(e : @kexflow.FlowError) -> String {
   }
 }
 
+///|
 fn neg_name(e : @kexflow.NegotiationError) -> String {
   match e {
     NoKexAlg => "kex"
@@ -377,6 +336,7 @@ fn neg_name(e : @kexflow.NegotiationError) -> String {
   }
 }
 
+///|
 fn split_lines(s : String) -> Array[String] {
   let out : Array[String] = []
   let mut start = 0
@@ -389,6 +349,7 @@ fn split_lines(s : String) -> Array[String] {
   out
 }
 
+///|
 fn trim(s : String) -> String {
   let mut a = 0
   let mut b = s.length()
@@ -406,10 +367,11 @@ fn trim(s : String) -> String {
 /// and passing it as an argument makes the index a standalone expression, which
 /// needs `.to_int()` first. Inside a `for` body the conversion is implicit (see
 /// `bp_hex` in src/bpacket), so this only bites outside one.
-fn is_space(code : Int) -> Bool {
+fn is_space(code : Int32) -> Bool {
   code == 32 || code == 13 || code == 9 || code == 10
 }
 
+///|
 fn has_prefix(s : String, p : String) -> Bool {
   if s.length() < p.length() {
     return false
@@ -422,6 +384,7 @@ fn has_prefix(s : String, p : String) -> Bool {
   true
 }
 
+///|
 fn after(s : String, p : String) -> String {
   let mut i = p.length()
   while i < s.length() && is_space(s[i].to_int()) {
@@ -430,6 +393,7 @@ fn after(s : String, p : String) -> String {
   s[i:s.length()].to_owned()
 }
 
+///|
 fn ascii(s : String) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
   for i = 0; i < s.length(); i = i + 1 {
@@ -438,6 +402,7 @@ fn ascii(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn hex(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -448,6 +413,7 @@ fn hex(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn first16(s : String) -> String {
   if s.length() >= 32 {
     s[0:32].to_owned()
@@ -460,7 +426,7 @@ fn first16(s : String) -> String {
 /// Indexed as `UInt16`, matching `bp_hex_digit` in `src/bpacket` (the tree's
 /// authority). Comparing `Char` against `'0'` also works, but only because the
 /// literal is typed; the numeric form is what the rest of the project uses.
-fn hexval(c : UInt16) -> Int {
+fn hexval(c : UInt16) -> Int32 {
   let code = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48

@@ -30,14 +30,14 @@ pub fn poly1305_auth(
   let (r0, r1, r2, r3, r4, s1, s2, s3, s4) = clamp_key(key)
 
   // 2. 累加器初始化为 0
-  let mut h0 : UInt = 0U
-  let mut h1 : UInt = 0U
-  let mut h2 : UInt = 0U
-  let mut h3 : UInt = 0U
-  let mut h4 : UInt = 0U
+  let mut h0 : UInt32 = 0U
+  let mut h1 : UInt32 = 0U
+  let mut h2 : UInt32 = 0U
+  let mut h3 : UInt32 = 0U
+  let mut h4 : UInt32 = 0U
 
   // 3. 处理完整 16 字节 block
-  let mut offset : Int = 0
+  let mut offset : Int32 = 0
   while message.length() - offset >= 16 {
     let block : FixedArray[Byte] = FixedArray::make(16, b'\x00')
     for i = 0; i < 16; i = i + 1 {
@@ -61,7 +61,7 @@ pub fn poly1305_auth(
   }
 
   // 4. 处理末尾部分 block(若有)
-  let remaining : Int = message.length() - offset
+  let remaining : Int32 = message.length() - offset
   if remaining > 0 {
     let last_block : FixedArray[Byte] = FixedArray::make(remaining, b'\x00')
     for i = 0; i < remaining; i = i + 1 {

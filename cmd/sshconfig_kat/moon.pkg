@@ -38,6 +38,11 @@
 import {
   "moonbitlang/async",
   "moonbitlang/async/fs",
+  /// Loop #67: `main.mbt` reads `@env.args()`. Core packages are not
+  /// implicitly available any more, and the toolchain says so with
+  /// `core_package_not_imported` rather than an error -- so this was a
+  /// deprecation that no build would have failed on.
+  "moonbitlang/core/env",
   "openssh/openssh_moonbit/src/sshconfig",
 }
 

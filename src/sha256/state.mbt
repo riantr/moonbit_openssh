@@ -4,17 +4,17 @@
 
 ///|
 /// 单个 block 长度,字节 (= 16 u32 words)
-pub let block_len : Int = 64
+pub let block_len : Int32 = 64
 
 ///|
 /// 哈希输出长度,字节 (= 8 u32 words)
-pub let hash_len : Int = 32
+pub let hash_len : Int32 = 32
 
 ///| 64 轮 compression 的 K 常量(取自前 64 个素数立方根的小数部分前 32 bit)
 
 ///|
 /// 对应 OpenBSD sha2.c 第 187-204 行
-pub let k256 : FixedArray[UInt] = [
+pub let k256 : FixedArray[UInt32] = [
   0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U,
   0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU,
   0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU,
@@ -31,7 +31,7 @@ pub let k256 : FixedArray[UInt] = [
 
 ///|
 /// 对应 OpenBSD sha2.c 第 207-216 行
-pub let init_H : FixedArray[UInt] = [
+pub let init_H : FixedArray[UInt32] = [
   0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU, 0x510e527fU, 0x9b05688cU, 0x1f83d9abU,
   0x5be0cd19U,
 ]

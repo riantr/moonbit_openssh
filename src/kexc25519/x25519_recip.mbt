@@ -19,18 +19,18 @@
 
 ///|
 /// 输出也是 32-limb field element
-pub fn recip(out : FixedArray[UInt], z : FixedArray[UInt]) -> Unit {
+pub fn recip(out : FixedArray[UInt32], z : FixedArray[UInt32]) -> Unit {
   // 局部变量(32-limb)
-  let z2 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z9 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z11 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z2_5_0 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z2_10_0 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z2_20_0 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z2_50_0 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let z2_100_0 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let t0 : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let t1 : FixedArray[UInt] = FixedArray::make(32, 0U)
+  let z2 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z9 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z11 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z2_5_0 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z2_10_0 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z2_20_0 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z2_50_0 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let z2_100_0 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let t0 : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let t1 : FixedArray[UInt32] = FixedArray::make(32, 0U)
 
   // z^2
   fe_square(z2, z)
@@ -65,7 +65,7 @@ pub fn recip(out : FixedArray[UInt], z : FixedArray[UInt]) -> Unit {
   // z^(2^12 - 2^2)
   fe_square(t1, t0)
   // z^(2^20 - 2^10): 4 轮 square 循环
-  let mut i : Int = 2
+  let mut i : Int32 = 2
   while i < 10 {
     fe_square(t0, t1)
     fe_square(t1, t0)

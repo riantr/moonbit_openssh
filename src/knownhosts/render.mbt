@@ -1,15 +1,27 @@
 ///| 把一个出示的 host key blob 渲染成一条 known_hosts 行。
+
 ///|
+
 ///| Loop #48 收尾。固定检查回答的是「这把钥匙是我预期的吗」,但第一次连接
+
 ///| **没有人预期任何东西**——TOFU 的 S 就是 trust on first use:接受,然后记住。
+
 ///| 没有写回,「记住」就没有发生,下一次连接仍然是一次全新的、无凭据的接受,
+
 ///| 而防重放也就无从谈起。
+
 ///|
+
 ///| 这里只做**渲染**:把 `(host, key_type, blob)` 变成 OpenSSH 写的那行
+
 ///| `host keytype base64(blob)`。写盘不在这里,也不在 `src/` 的任何地方——
+
 ///| 这个 moon 版本的 core 没有文件 IO,而 `src/wt` 是 js-only、浏览器里根本没有
+
 ///| 文件系统(见 AGENTS.md Loop #48)。所以本包只负责「长什么样」,由驱动决定
-///| 「写到哪去」,两条传输层驱动因此拿到的是同一串字节而不是各自的实现。
+
+///|
+/// 「写到哪去」,两条传输层驱动因此拿到的是同一串字节而不是各自的实现。
 /// base64 编码。与本包 `b64_decode` 配对,所以「读进来再写出去」得到的是
 /// OpenSSH 自己写的那串——标准 base64 带 `=` 补位,`b64_decode` 收得下。
 ///
@@ -60,7 +72,13 @@ pub fn KnownHostEntry::render(self : KnownHostEntry) -> String {
     Marker::CertAuthority => "@cert-authority "
     Marker::Revoked => "@revoked "
   }
-  marker + self.host_raw + " " + self.key_type + " " + base64_encode(self.key_blob) + "\n"
+  marker +
+  self.host_raw +
+  " " +
+  self.key_type +
+  " " +
+  base64_encode(self.key_blob) +
+  "\n"
 }
 
 ///|

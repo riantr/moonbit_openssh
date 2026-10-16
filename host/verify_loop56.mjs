@@ -160,6 +160,28 @@ function main() {
     return finish();
   }
   ok("gen_knownhosts_test.py", "ran");
+
+  // Format the generator's output before comparing it, so this check measures
+  // what it exists to measure -- did the generator's *content* change -- and
+  // leaves formatting to `moon fmt --check`, which is a separate gate.
+  //
+  // Loop #67 added that gate and formatted the tree. This one then failed with
+  // "the generator produced something different (14302 -> 14026 bytes)" on a
+  // file whose 276-byte difference was entirely line wrapping. Worse, it
+  // *wrote* the unformatted generator output back over the formatted file, so
+  // the very next step of the same CI run turned `moon fmt --check` red. One
+  // byte-for-byte check had turned a green row into two red ones.
+  //
+  // Formatting in place is safe: the gate already writes here, and the result
+  // is the same bytes the committed file has, so a clean tree stays clean.
+  const fmt = runCmd(["cmd", "/c", "moon", "fmt", ...GENERATED.map((f) => path.relative(root, f))],
+                     { cwd: root });
+  if (fmt.status !== 0) {
+    bad("moon fmt on the generated files",
+        fmt.text.trim().split("\n").slice(-6).join("\n      "));
+    return finish();
+  }
+
   GENERATED.forEach((f, i) => {
     const now = readFileSync(f);
     if (Buffer.compare(now, before[i]) === 0) {
@@ -168,7 +190,8 @@ function main() {
       copyFileSync(f, join(SNAP, path.basename(f) + ".drifted"));
       bad(
         `no drift: ${path.relative(root, f)}`,
-        `the generator produced something different (${before[i].length} -> ${now.length} bytes). ` +
+        `the generator produced something different (${before[i].length} -> ${now.length} bytes) ` +
+          `after formatting, so this is a content change and not a wrapping one. ` +
           `The regenerated copy is in .loop-logs/${path.basename(f)}.drifted; re-run the generator and commit.`,
       );
     }

@@ -20,7 +20,7 @@ pub(all) struct KnownHostsPolicy {
   /// 主机名或 `[host]:port`,和 known_hosts 里写的形式一致
   host_str : String
   /// 0 = SSH 默认端口 22
-  port : Int
+  port : Int32
   /// strict_kex:主机名压根没被固定过也算失败(TOFU 的拒绝侧)
   strict : Bool
   /// Unix 秒。**证书路径必须有一个真实时钟**，所以它由调用方注入而不是在这里取。
@@ -35,7 +35,7 @@ pub(all) struct KnownHostsPolicy {
 pub fn KnownHostsPolicy::new(
   entries : Array[KnownHostEntry],
   host_str : String,
-  port : Int,
+  port : Int32,
   strict : Bool,
 ) -> KnownHostsPolicy {
   { entries, host_str, port, strict, now: 0UL, }
@@ -46,7 +46,7 @@ pub fn KnownHostsPolicy::new(
 pub fn KnownHostsPolicy::at(
   entries : Array[KnownHostEntry],
   host_str : String,
-  port : Int,
+  port : Int32,
   strict : Bool,
   now : UInt64,
 ) -> KnownHostsPolicy {
@@ -55,15 +55,22 @@ pub fn KnownHostsPolicy::at(
 
 ///| 这台主机是否被任何 `@cert-authority` 条目覆盖
 ///
+
 ///| 客户端据此决定要不要在 KEXINIT 里**报出**主机证书算法。规则是「有信任锚
+
 ///| 才报」,不是 OpenSSH 的「无条件报、之后再拒」。
 ///
+
 ///| 理由有两条,一条是安全的:我们**永远**只认被 pin 的 CA(见 `CertUntrusted`),
+
 ///| 所以在没有 CA 条目时报出证书算法只增加攻击面,对合法连接没有任何好处。
+
 ///| 另一条是本仓库特有的:KEXINIT 的算法名列表是要和 OpenSSH/paramiko 抓包
 /// 逐字节对比的,无条件加名字会让那几道门禁的基线全部漂掉。
 ///
-///| 这是一个**有意的偏差**,不是遗漏;注释写在这里就是为了下次有人「补全」它时
+
+///|
+/// 这是一个**有意的偏差**,不是遗漏;注释写在这里就是为了下次有人「补全」它时
 /// 能先看见。
 pub fn KnownHostsPolicy::has_ca_anchor(self : KnownHostsPolicy) -> Bool {
   let (host_only, port_from_str) = split_host_str(self.host_str)
@@ -99,7 +106,7 @@ pub fn KnownHostsPolicy::skip() -> KnownHostsPolicy {
 pub fn KnownHostsPolicy::from_text(
   content : String,
   host_str : String,
-  port : Int,
+  port : Int32,
   strict : Bool,
 ) -> KnownHostsPolicy {
   { entries: parse_file(content), host_str, port, strict, now: 0UL, }
@@ -110,7 +117,7 @@ pub fn KnownHostsPolicy::from_text(
 pub fn KnownHostsPolicy::from_text_at(
   content : String,
   host_str : String,
-  port : Int,
+  port : Int32,
   strict : Bool,
   now : UInt64,
 ) -> KnownHostsPolicy {
@@ -175,13 +182,20 @@ pub fn KnownHostsPolicy::verify(
 ///|
 /// 证书路径的判定（Loop #53）
 ///
+
 ///| 两条优先级规则在这里落地：
 ///
+
 ///| 1. **直接条目压过 CA 条目。** 这台主机既有 `@cert-authority` 又有一把裸钥匙的
+
 ///|    直接 pin，而对端递了张证书过来 —— 报 `Mismatch`，不是 `CertAuthority`。
+
 ///|    Loop #51 立这条规则是为了别把「钥匙真换了」洗成「我不支持证书」；证书只是
+
 ///|    换了一种出示方式，不该成为绕过它的后门。
-///| 2. **证书必须找到自己那把 CA 才可能被认**，见 `CertUntrusted` 的说明。
+
+///|
+/// 2. **证书必须找到自己那把 CA 才可能被认**，见 `CertUntrusted` 的说明。
 pub fn KnownHostsPolicy::verify_cert(
   self : KnownHostsPolicy,
   cert_blob : FixedArray[Byte],
@@ -199,13 +213,14 @@ pub fn KnownHostsPolicy::verify_cert(
   if find_last_direct_match_v2(self.entries, host_only, port_caller) is Some(_) {
     return Mismatch
   }
-  match check_host_key_cert(
-    self.entries,
-    self.host_str,
-    self.port,
-    cert_blob,
-    self.now,
-  ) {
+  match
+    check_host_key_cert(
+      self.entries,
+      self.host_str,
+      self.port,
+      cert_blob,
+      self.now,
+    ) {
     Trusted => Accept
     CaRejected(reason) => CertRejected(reason)
     NoCaEntry => CertUntrusted(self.host_str)
@@ -251,6 +266,7 @@ pub(all) enum PinFailure {
 /// 而不是一次带值的成功——`Ok(())` 里那个 `()` 没有信息量,只会诱使人再加一个
 /// `is_ok()`。拒绝要带原因,放行不需要带任何东西。
 ///
+
 ///|
 ///
 /// **empty entries 在这里是 `Unknown`,不是放行。** 这一条是 Loop #50 真正的
@@ -265,15 +281,10 @@ pub(all) enum PinFailure {
 pub fn KnownHostsPolicy::decide(
   self : KnownHostsPolicy,
   presented_blob : FixedArray[Byte],
-) -> Option[PinFailure] {
+) -> PinFailure? {
   match self.verify(presented_blob) {
     Accept => None
-    Unknown =>
-      if self.strict {
-        Some(Unknown(self.host_str))
-      } else {
-        None
-      }
+    Unknown => if self.strict { Some(Unknown(self.host_str)) } else { None }
     Mismatch => Some(Mismatch(self.host_str))
     // Loop #53 起这条不再是「我们不验证证书」——我们验证了，而且验不过。
     // 字符串里是具体理由（expired / principal-mismatch / ca-signature-invalid

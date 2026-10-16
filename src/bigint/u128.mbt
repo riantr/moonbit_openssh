@@ -10,13 +10,15 @@
 /// Reference: HAC §2.5 (MUL64), and the classic "double-and-add with
 /// word-level carry propagation" formulation used by OpenSSL bn_mul_mont.
 
-///| Struct representing a 128-bit unsigned integer as (hi, lo).
+///|
+/// Struct representing a 128-bit unsigned integer as (hi, lo).
 pub struct U128 {
   hi : UInt64
   lo : UInt64
 }
 
-///| 64x64 -> 128 multiply, implemented as four 32x32 partial products.
+///|
+/// 64x64 -> 128 multiply, implemented as four 32x32 partial products.
 ///
 /// Partial products (a = a1*2^32 + a0, b = b1*2^32 + b0):
 ///   p0 = a0*b0    occupies bits [0, 64)
@@ -46,22 +48,24 @@ pub fn mul_u64x64(a : UInt64, b : UInt64) -> U128 {
   // word 3: carry2 + p3_hi  (< 2^32, safe)
   let s3 = (s2 >> 32) + (p3 >> 32)
   let w3 = s3 & 0xFFFFFFFFUL
-  { hi: (w3 << 32) | w2, lo: (w1 << 32) | w0 }
+  { hi: (w3 << 32) | w2, lo: (w1 << 32) | w0, }
 }
 
-///| UInt64 + U128 -> U128 with carry-out.
+///|
+/// UInt64 + U128 -> U128 with carry-out.
 pub fn add_u128(a : U128, b : U128) -> (U128, UInt64) {
   let lo = a.lo + b.lo
   let c1 = if lo < a.lo { 1UL } else { 0UL }
   let hi = a.hi + b.hi + c1
   let c2 = if hi < a.hi { 1UL } else { 0UL }
-  ({ hi, lo }, c2)
+  ({ hi, lo, }, c2)
 }
 
-///| U128 + UInt64 -> U128 with carry-out.
+///|
+/// U128 + UInt64 -> U128 with carry-out.
 pub fn add_u128_u64(a : U128, b : UInt64) -> (U128, UInt64) {
   let lo = a.lo + b
   let c1 = if lo < b { 1UL } else { 0UL }
   let hi = a.hi + c1
-  ({ hi, lo }, 0UL)
+  ({ hi, lo, }, 0UL)
 }

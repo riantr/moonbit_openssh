@@ -21,15 +21,15 @@
 fn rfc8439_state(
   key : FixedArray[Byte],
   nonce12 : FixedArray[Byte],
-  counter : UInt,
-) -> FixedArray[UInt] {
+  counter : UInt32,
+) -> FixedArray[UInt32] {
   if key.length() != 32 {
     abort("rfc8439_state: key must be 32 bytes")
   }
   if nonce12.length() != 12 {
     abort("rfc8439_state: nonce must be 12 bytes")
   }
-  let s : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let s : FixedArray[UInt32] = FixedArray::make(16, 0U)
   s[0] = sigma0
   s[1] = sigma1
   s[2] = sigma2
@@ -54,14 +54,14 @@ fn rfc8439_state(
 ///|
 /// counter 从 start_counter 开始自增(32-bit,溢出回绕由调用者保证不发生)
 fn rfc8439_xor(
-  state : FixedArray[UInt],
+  state : FixedArray[UInt32],
   input : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   let output : FixedArray[Byte] = FixedArray::make(input.length(), b'\x00')
-  let mut pos : Int = 0
-  let mut ctr : UInt = state[12]
+  let mut pos : Int32 = 0
+  let mut ctr : UInt32 = state[12]
   while pos < input.length() {
-    let round : FixedArray[UInt] = FixedArray::make(16, 0U)
+    let round : FixedArray[UInt32] = FixedArray::make(16, 0U)
     for i = 0; i < 16; i = i + 1 {
       round[i] = state[i]
     }
@@ -82,7 +82,7 @@ fn rfc8439_xor(
 
 ///|
 /// pad16:返回补零到 16 倍数需要的字节数(len % 16 == 0 时为 0)
-fn pad16_len(n : Int) -> Int {
+fn pad16_len(n : Int32) -> Int32 {
   let r = n % 16
   if r == 0 {
     0
@@ -93,7 +93,7 @@ fn pad16_len(n : Int) -> Int {
 
 ///|
 /// 把 UInt64 以 little-endian 写入 byte 数组
-fn put_u64_le(bytes : FixedArray[Byte], offset : Int, v : UInt64) -> Unit {
+fn put_u64_le(bytes : FixedArray[Byte], offset : Int32, v : UInt64) -> Unit {
   for i = 0; i < 8; i = i + 1 {
     bytes[offset + i] = ((v >> (i * 8)) & 0xFFUL).to_byte()
   }

@@ -37,7 +37,7 @@
 
 ///|
 /// 直接 b - 1:UInt 减法自然 wrap,b=0 时 wrap 到 0xFFFFFFFF
-fn bminus1(b : UInt) -> UInt {
+fn bminus1(b : UInt32) -> UInt32 {
   b - 1U
 }
 
@@ -46,15 +46,15 @@ fn bminus1(b : UInt) -> UInt {
 ///|
 /// p, q, r, s 长度必须都是 64(group element + z)
 pub fn fe_select(
-  p : FixedArray[UInt],
-  q : FixedArray[UInt],
-  r : FixedArray[UInt],
-  s : FixedArray[UInt],
-  b : UInt,
+  p : FixedArray[UInt32],
+  q : FixedArray[UInt32],
+  r : FixedArray[UInt32],
+  s : FixedArray[UInt32],
+  b : UInt32,
 ) -> Unit {
-  let bm : UInt = bminus1(b)
+  let bm : UInt32 = bminus1(b)
   for j = 0; j < 64; j = j + 1 {
-    let t : UInt = bm & (r[j] ^ s[j])
+    let t : UInt32 = bm & (r[j] ^ s[j])
     p[j] = s[j] ^ t
     q[j] = r[j] ^ t
   }

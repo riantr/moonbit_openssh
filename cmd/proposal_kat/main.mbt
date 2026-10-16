@@ -1,10 +1,12 @@
 ///| cmd/proposal_kat -- Loop #60: every algorithm name this client advertises.
 ///
+
 ///|
 ///
 /// Prints each proposal in the tree together with `@bpacket.check_runnable`'s
 /// verdict, so `host/verify_loop60.mjs` can hold the invariant from the outside.
 ///
+
 ///|
 ///
 /// **Why a separate program.** The invariant is one line -- a client proposal
@@ -15,6 +17,7 @@
 /// over-promise was invisible to every test that already existed. A rule with
 /// no emitter has no observable state.
 ///
+
 ///|
 ///
 /// **Scope is deliberately asymmetric, and the labels below are the point.**
@@ -29,27 +32,26 @@
 /// The server list in `host/verify_loop23.mjs:74-77` is a host-side fixture and
 /// is not reachable from here; `verify_loop60.mjs` covers that one by reading
 /// the file directly.
-
 fn main {
   // --- the runnable set, straight from src/bpacket ---
   println("RUNNABLE_CIPHER " + join_list(@bpacket.runnable_cipher_names()))
   println("RUNNABLE_MAC " + join_list(@bpacket.runnable_mac_names()))
   // transport_params, so the gate checks the numbers and not just the names.
   let (ck, cb, civ, cm) = @bpacket.transport_params(
-    "aes128-ctr",
-    "hmac-sha2-256",
+    "aes128-ctr", "hmac-sha2-256",
   )
   println("PARAMS aes128-ctr hmac-sha2-256 \{ck} \{cb} \{civ} \{cm}")
   let (ak, ab, aiv, am) = @bpacket.transport_params(
-    "chacha20-poly1305@openssh.com",
-    "",
+    "chacha20-poly1305@openssh.com", "",
   )
   println("PARAMS chacha20-poly1305@openssh.com - \{ak} \{ab} \{aiv} \{am}")
 
   // The wire-level auth tag length, which is NOT the MAC key length above.
   // OpenSSH's cipher table has a column for it (`auth_len`); without this line
   // the gate had nothing to compare that column against.
-  println("AUTHLEN aes128-ctr " + @bpacket.authlen_for("aes128-ctr").to_string())
+  println(
+    "AUTHLEN aes128-ctr " + @bpacket.authlen_for("aes128-ctr").to_string(),
+  )
   println(
     "AUTHLEN chacha20-poly1305@openssh.com " +
     @bpacket.authlen_for("chacha20-poly1305@openssh.com").to_string(),
@@ -86,8 +88,7 @@ fn main {
   // Deliberately carries two names with no packet-layer path. If the gate ever
   // stops classifying this as server scope, the rule has widened.
   emit_server(
-    "fixture.peer_broad",
-    "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com",
+    "fixture.peer_broad", "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com",
     "hmac-sha2-512-etm@openssh.com,hmac-sha2-256",
   )
 }
@@ -107,6 +108,7 @@ fn emit_server(label : String, enc : String, mac : String) -> Unit {
   println("  verdict=not-checked(scope=server)")
 }
 
+///|
 fn emit(label : String, scope : String, p : @kexflow.Proposal) -> Unit {
   println("PROPOSAL \{label} scope=\{scope}")
   emit_list("  kex", p.kex_algs, "kex")
@@ -197,6 +199,7 @@ fn emit_list(prefix : String, list : String, kind : String) -> Unit {
   }
 }
 
+///|
 fn split_alg_list(list : String) -> Array[String] {
   let out : Array[String] = []
   let mut start = 0
@@ -211,6 +214,7 @@ fn split_alg_list(list : String) -> Array[String] {
   out
 }
 
+///|
 fn join_list(xs : Array[String]) -> String {
   let sb = StringBuilder()
   for i = 0; i < xs.length(); i = i + 1 {

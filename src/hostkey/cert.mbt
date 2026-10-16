@@ -1,39 +1,69 @@
 ///| OpenSSH 证书解析（PROTOCOL.certkeys，对应 sshkey.c 中
+
 ///| sshkey_from_blob_internal 的 allow_cert=1 分支）
 ///
+
 ///| 字段顺序（逐字节核对过 `.loop53/host-good-cert.pub`，并与 `ssh-keygen -L` 互证）：
 ///
+
 ///| ```
+
 ///|   string   cert type name          "ssh-ed25519-cert-v01@openssh.com"
+
 ///|   string   nonce
+
 ///|   string   inner key               **裸公钥材料，不含类型名**
+
 ///|   uint64   serial
+
 ///|   uint32   type                    1 = user, 2 = host
+
 ///|   string   key id
+
 ///|   string   valid principals        内容是若干条长度前缀子串的拼接
+
 ///|   uint64   valid after
+
 ///|   uint64   valid before
+
 ///|   string   critical options
+
 ///|   string   extensions
+
 ///|   string   reserved
+
 ///|   string   signature key           CA 的完整公钥 blob
+
 ///|   string   signature               覆盖上面**全部**字段（含类型名与 signature key）
+
 ///| ```
 ///
+
 ///| 三处容易写错、且写错之后**不会报错只会安静地不匹配**的地方：
 ///
+
 ///| 1. **内层 key 不带类型名。** 证书类型名已经蕴含了内层算法，再套一层
+
 ///|    `string "ssh-ed25519"` 会让整个游标错位。
+
 ///| 2. **principals 不是逗号分隔的 ASCII 列表。** 它是一个 string，其内容是若干条
+
 ///|    长度前缀子串首尾相接（`00 00 00 10 host.example.com`）。当普通字符串比较会
+
 ///|    永远比不上。
+
 ///| 3. **signed_data 是「去掉末尾 `string signature` 字段之前的全部内容」**，也就是
+
 ///|    它**包含** signature key 字段。直觉上很容易写成「nonce..reserved」——那样
+
 ///|    会短 55 字节，验签必然失败，而这个错误在自造向量下完全看不出来（短一字节
+
 ///|    也只是验签失败，不会报任何结构性错误）。它是拿 Node/OpenSSL 把每一种连续
+
 ///|    切片都试过一遍才定下来的，见 `host/cert_signed_data_oracle.mjs`。
 
-///| 证书类型后缀；剥掉它就得到内层钥匙的算法名
+///|
+/// 证书类型后缀；剥掉它就得到内层钥匙的算法名
 pub const CERT_SUFFIX : String = "-cert-v01@openssh.com"
 
 ///|
@@ -50,10 +80,10 @@ pub const CERT_SUFFIX : String = "-cert-v01@openssh.com"
 /// 写反的后果不是「多支持一种证书」，而是**把发给 alice 的用户证书当成主机身份
 /// 证明**：用户证书的 principal 是登录名，主机证书的 principal 是主机名，两者
 /// 的信任含义完全不同。
-pub const SSH_CERT_TYPE_USER : Int = 1
+pub const SSH_CERT_TYPE_USER : Int32 = 1
 
 ///|
-pub const SSH_CERT_TYPE_HOST : Int = 2
+pub const SSH_CERT_TYPE_HOST : Int32 = 2
 
 ///|
 /// 证书解析失败
@@ -91,7 +121,7 @@ pub(all) struct HostCert {
   inner_key_blob : FixedArray[Byte]
   serial : UInt64
   /// SSH_CERT_TYPE_HOST 或 SSH_CERT_TYPE_USER
-  cert_type : Int
+  cert_type : Int32
   key_id : String
   /// 已拆成独立字符串的 principal 列表
   principals : Array[String]
@@ -119,7 +149,7 @@ pub fn is_cert_type_name(name : String) -> Bool {
 /// 证书类型名 → 内层算法名
 pub fn plain_type_of_cert(name : String) -> String {
   if name.has_suffix(CERT_SUFFIX) {
-    name[: name.length() - CERT_SUFFIX.length()].to_owned()
+    name[:name.length() - CERT_SUFFIX.length()].to_owned()
   } else {
     name
   }
@@ -140,7 +170,7 @@ pub fn parse_principals(blob : FixedArray[Byte]) -> Array[String]? {
     }
     let sb = StringBuilder()
     for i = 0; i < raw.length(); i = i + 1 {
-      sb.write_char(Int::unsafe_to_char(raw[i].to_int()))
+      sb.write_char(Int32::unsafe_to_char(raw[i].to_int()))
     }
     out.push(sb.to_string())
   }
@@ -215,7 +245,7 @@ pub fn HostCert::from_blob(blob : FixedArray[Byte]) -> CertParseResult {
     key_type_name != "ecdsa-sha2-nistp384" {
     return CertParseResult::Rejected(UnsupportedKeyType(key_type_name))
   }
-CertParseResult::Parsed({
+  CertParseResult::Parsed({
     cert_type_name: name,
     key_type_name,
     nonce,
@@ -242,12 +272,17 @@ fn build_key_blob(
   type_name : String,
   material : FixedArray[Byte],
 ) -> FixedArray[Byte] {
-  let name_bytes : FixedArray[Byte] = FixedArray::make(type_name.length(), b'\x00')
+  let name_bytes : FixedArray[Byte] = FixedArray::make(
+    type_name.length(),
+    b'\x00',
+  )
   for i = 0; i < type_name.length(); i = i + 1 {
     name_bytes[i] = (type_name[i].to_int() & 0xFF).to_byte()
   }
-  let out : FixedArray[Byte] = FixedArray::make(4 + name_bytes.length() +
-  4 + material.length(), b'\x00')
+  let out : FixedArray[Byte] = FixedArray::make(
+    4 + name_bytes.length() + 4 + material.length(),
+    b'\x00',
+  )
   let n = name_bytes.length()
   out[0] = ((n >> 24) & 0xFF).to_byte()
   out[1] = ((n >> 16) & 0xFF).to_byte()

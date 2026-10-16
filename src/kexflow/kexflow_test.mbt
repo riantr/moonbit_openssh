@@ -18,8 +18,8 @@ fn kex_hex(hex : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn kex_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn kex_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -275,7 +275,9 @@ test "t10_reserved" {
 
 // ---- T11: Loop #60 invariant ----
 //
-///| A client proposal may only name algorithms the packet transport can run.
+
+///|
+/// A client proposal may only name algorithms the packet transport can run.
 ///
 /// The list used to lead with `hmac-sha2-256-etm@openssh.com`, which
 /// `src/bpacket` has no branch for. Under this proposal's AEAD cipher the MAC
@@ -300,9 +302,13 @@ test "t11_default_client_only_names_runnable_algs" {
     Some(m) => assert_eq(m, "hmac-sha2-256")
     None => abort("t11: aes128-ctr needs a MAC and default_client offers none")
   }
-  assert_eq(@bpacket.selected_mac("chacha20-poly1305@openssh.com", p.mac_ctos), None)
+  assert_eq(
+    @bpacket.selected_mac("chacha20-poly1305@openssh.com", p.mac_ctos),
+    None,
+  )
 }
 
+///|
 fn kex_bytes_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   if a.length() != b.length() {
     return false

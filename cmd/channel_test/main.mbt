@@ -1,32 +1,55 @@
 ///| cmd/channel_test -- Loop #35 RFC 4254 通道层 byte-exact
+
 ///|
+
 ///| 只依赖 `src/channel` 和 `src/sshwire`,两者都不碰 `@tcp`,所以四个后端
+
 ///| 都能跑。和 Loop #34 拆 `src/userauth` 是同一个理由:只能在一个后端上跑的
+
 ///| KAT,覆盖率只有这个仓库要求的四分之一。
+
 ///|
+
 ///| 分四层对着 `host/channel_oracle.py` 的独立实现核对:
+
 ///|
+
 ///|   1. 常量 —— window / max_packet 必须等于 channels.h:231-232
+
 ///|   2. 组包器 —— 每种消息逐字节重建后与向量比对
+
 ///|   3. 解析器 —— 解回字段;截断 / 尾部残余必须判 None
+
 ///|   4. 状态机 + 窗口 —— 整段 transcript 喂进 `chan_step`,比对每一次回包、
+
 ///|      stdout / stderr / exit-status / 窗口调整次数
+
 ///|
+
 ///| 第 4 层是关键。`src/channel/exec.mbt` 出过两个本地检查全都发现不了的错:
+
 ///| WINDOW_ADJUST 取的是 `take_adjust` **之后**的窗口,而那时 consumed 已经归零,
+
 ///| 于是每次都发 0 字节;以及把收包里的 recipient 和**对端**的通道号比。
+
 ///| 两者在「自己和对方都恰好是 0 号通道」时都不显形,所以向量里专门放了
+
 ///| `exec_nonzero_ids`(local=3 / remote=7)和 `exec_bulk_window` 两个用例。
+
 ///|
+
 ///| 风格上全部写成纯函数 + 失败数组:MoonBit 不允许把嵌套 `match` 直接当
+
 ///| 分支体(报了也看不出真正原因的 parse error),而且 `Array` 是引用,不需要
-///| `mut` 就能 push。
+
+///|
+/// `mut` 就能 push。
 
 // ---------------------------------------------------------------------------
 // hex / byte helpers
 // ---------------------------------------------------------------------------
 
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -37,6 +60,7 @@ fn hex_nibble(c : UInt16) -> Int {
   abort("hex_to_bytes: bad digit")
 }
 
+///|
 fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -48,6 +72,7 @@ fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn ascii(s : String) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
   for i = 0; i < s.length(); i = i + 1 {
@@ -56,6 +81,7 @@ fn ascii(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn byte_to_hex(b : Byte) -> String {
   let hex_chars : String = "0123456789abcdef"
   let hi = b.to_int() / 16
@@ -64,7 +90,8 @@ fn byte_to_hex(b : Byte) -> String {
   hex_chars.unsafe_substring(start=lo, end=lo + 1)
 }
 
-///| 截到 48 字节,够定位问题又不至于刷屏
+///|
+/// 截到 48 字节,够定位问题又不至于刷屏
 fn short_hex(b : FixedArray[Byte]) -> String {
   let n = if b.length() > 48 { 48 } else { b.length() }
   let head = FixedArray::make(n, b'\x00')
@@ -78,6 +105,7 @@ fn short_hex(b : FixedArray[Byte]) -> String {
   sb.to_string()
 }
 
+///|
 fn bytes_equal(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   if a.length() != b.length() {
     return false
@@ -90,7 +118,8 @@ fn bytes_equal(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   true
 }
 
-fn ints_equal(a : Array[Int], b : Array[Int]) -> Bool {
+///|
+fn ints_equal(a : Array[Int32], b : Array[Int32]) -> Bool {
   if a.length() != b.length() {
     return false
   }
@@ -102,6 +131,7 @@ fn ints_equal(a : Array[Int], b : Array[Int]) -> Bool {
   true
 }
 
+///|
 fn pf(ok : Bool) -> String {
   if ok {
     "PASS"
@@ -110,11 +140,13 @@ fn pf(ok : Bool) -> String {
   }
 }
 
-fn fill_bytes(byte : Int, n : Int) -> FixedArray[Byte] {
+///|
+fn fill_bytes(byte : Int32, n : Int32) -> FixedArray[Byte] {
   FixedArray::make(n, (byte & 0xFF).to_byte())
 }
 
-///| 空数组(FixedArray::from_array([]) 推不出类型)
+///|
+/// 空数组(FixedArray::from_array([]) 推不出类型)
 fn empty_bytes() -> FixedArray[Byte] {
   FixedArray::make(0, b'\x00')
 }
@@ -124,13 +156,20 @@ fn empty_bytes() -> FixedArray[Byte] {
 // ---------------------------------------------------------------------------
 
 ///|
+
 ///| 把向量里的一个包还原成真正的字节。
+
 ///|
+
 ///| `payload_hex` 非空时直接解码;否则按 `msg_type` 重新组一份 DATA /
+
 ///| EXTENDED_DATA —— 头部的 channel 号用的是 `ours`,也就是**我们**的通道号。
+
 ///| 这里顺便也在测那件事:如果组包器把 recipient 当成 remote,重建出来的东西
-///| 就对不上。
-fn packet_payload(p : Packet, ours : Int) -> FixedArray[Byte] {
+
+///|
+/// 就对不上。
+fn packet_payload(p : Packet, ours : Int32) -> FixedArray[Byte] {
   if p.payload_hex != "" {
     return hex_to_bytes(p.payload_hex)
   }
@@ -148,7 +187,7 @@ fn packet_payload(p : Packet, ours : Int) -> FixedArray[Byte] {
 /// 与 `packet_payload` 的唯一区别是 channel 号:收包方向的 recipient 是我们
 /// 自己的号,发包方向的是对端给的号。这个区别就是 Loop #35 抓到过的一个 bug
 /// ——首通道两边都是 0,所以它当时完全看不出来。
-fn reply_payload(p : Packet, remote : Int) -> FixedArray[Byte] {
+fn reply_payload(p : Packet, remote : Int32) -> FixedArray[Byte] {
   if p.payload_hex != "" {
     return hex_to_bytes(p.payload_hex)
   }
@@ -160,6 +199,7 @@ fn reply_payload(p : Packet, remote : Int) -> FixedArray[Byte] {
   }
 }
 
+///|
 fn stream_bytes(s : Stream) -> FixedArray[Byte] {
   if s.hex != "" {
     hex_to_bytes(s.hex)
@@ -168,7 +208,8 @@ fn stream_bytes(s : Stream) -> FixedArray[Byte] {
   }
 }
 
-///| ChanError 没有 Debug,自己写标签
+///|
+/// ChanError 没有 Debug,自己写标签
 fn describe(e : @channel.ChanError) -> String {
   match e {
     OpenFailed(r, d) => "OpenFailed(" + r.to_string() + ", " + d + ")"
@@ -178,7 +219,8 @@ fn describe(e : @channel.ChanError) -> String {
   }
 }
 
-fn action_bytes(a : @channel.ChanAction) -> (Int, FixedArray[Byte]) {
+///|
+fn action_bytes(a : @channel.ChanAction) -> (Int32, FixedArray[Byte]) {
   match a {
     Send(t, p) => (t.to_int(), p)
   }
@@ -188,6 +230,7 @@ fn action_bytes(a : @channel.ChanAction) -> (Int, FixedArray[Byte]) {
 // per-case checks (pure)
 // ---------------------------------------------------------------------------
 
+///|
 fn chk_open(c : PayloadCase) -> Bool {
   bytes_equal(
     @channel.channel_open_payload(c.sender, c.window, c.max_packet),
@@ -195,6 +238,7 @@ fn chk_open(c : PayloadCase) -> Bool {
   )
 }
 
+///|
 fn chk_exec(c : PayloadCase) -> Bool {
   bytes_equal(
     @channel.channel_exec_payload(c.sender, c.exec_command),
@@ -202,6 +246,7 @@ fn chk_exec(c : PayloadCase) -> Bool {
   )
 }
 
+///|
 fn chk_data(c : PayloadCase) -> Bool {
   bytes_equal(
     @channel.channel_data_payload(c.sender, ascii(c.data_text)),
@@ -209,6 +254,7 @@ fn chk_data(c : PayloadCase) -> Bool {
   )
 }
 
+///|
 fn chk_ext(c : PayloadCase) -> Bool {
   bytes_equal(
     @channel.channel_extended_data_payload(
@@ -220,6 +266,7 @@ fn chk_ext(c : PayloadCase) -> Bool {
   )
 }
 
+///|
 fn chk_adjust(c : PayloadCase) -> Bool {
   bytes_equal(
     @channel.channel_window_adjust_payload(c.sender, c.adjust_bytes),
@@ -227,15 +274,15 @@ fn chk_adjust(c : PayloadCase) -> Bool {
   )
 }
 
+///|
 fn chk_bare(c : PayloadCase) -> Bool {
-  bytes_equal(
-    @channel.channel_bare_payload(c.sender),
-    hex_to_bytes(c.bare_hex),
-  )
+  bytes_equal(@channel.channel_bare_payload(c.sender), hex_to_bytes(c.bare_hex))
 }
 
 ///| exit-status 的**发送**方向是服务端,但字段布局在 RFC 4254 6.1 是共用的,
-///| 所以用 `channel_request_payload` 重建:u32 || string("exit-status") || FALSE || u32
+
+///|
+/// 所以用 `channel_request_payload` 重建:u32 || string("exit-status") || FALSE || u32
 fn chk_exit(c : PayloadCase) -> Bool {
   bytes_equal(
     @channel.channel_request_payload(
@@ -249,8 +296,11 @@ fn chk_exit(c : PayloadCase) -> Bool {
 }
 
 ///|
+
 ///| CHANNEL_OPEN_FAILURE 只有收方向,没有组包器。
-///| 这里既用 sshwire 原语重建字节(证明字段顺序),又解析回来核对值。
+
+///|
+/// 这里既用 sshwire 原语重建字节(证明字段顺序),又解析回来核对值。
 fn chk_open_failure(c : PayloadCase) -> Bool {
   let rebuilt = @channel.ch_cat_all([
     @sshwire.write_u32(c.sender.reinterpret_as_uint()),
@@ -268,6 +318,7 @@ fn chk_open_failure(c : PayloadCase) -> Bool {
   }
 }
 
+///|
 fn chk_parse_data(c : PayloadCase) -> Bool {
   match @channel.parse_data(hex_to_bytes(c.data_hex)) {
     None => false
@@ -275,15 +326,18 @@ fn chk_parse_data(c : PayloadCase) -> Bool {
   }
 }
 
+///|
 fn chk_parse_ext(c : PayloadCase) -> Bool {
   match @channel.parse_extended_data(hex_to_bytes(c.extdata_hex)) {
     None => false
     Some((who, code, d)) =>
-      who == c.sender && code == c.extdata_code &&
+      who == c.sender &&
+      code == c.extdata_code &&
       bytes_equal(d, ascii(c.extdata_text))
   }
 }
 
+///|
 fn chk_parse_request(c : PayloadCase) -> Bool {
   let raw = hex_to_bytes(c.exit_status_hex)
   match @channel.parse_request_header(raw) {
@@ -299,7 +353,8 @@ fn chk_parse_request(c : PayloadCase) -> Bool {
   }
 }
 
-///| 解析器负例:截断一个字节、加一个字节的尾部残余,都必须判 None
+///|
+/// 解析器负例:截断一个字节、加一个字节的尾部残余,都必须判 None
 fn chk_parsers_reject(c : PayloadCase) -> Bool {
   let good = hex_to_bytes(c.data_hex)
   let short = FixedArray::make(good.length() - 1, b'\x00')
@@ -331,66 +386,67 @@ fn chk_parsers_reject(c : PayloadCase) -> Bool {
 fn chk_shell_payloads(c : ShellPayloadCase) -> Bool {
   let modes = hex_to_bytes(c.modes_hex)
   if !bytes_equal(
-    @channel.channel_pty_req_payload(
-      c.recipient,
-      c.term,
-      c.cols,
-      c.rows,
-      c.width_px,
-      c.height_px,
-      modes,
-    ),
-    hex_to_bytes(c.pty_req_hex),
-  ) {
+      @channel.channel_pty_req_payload(
+        c.recipient,
+        c.term,
+        c.cols,
+        c.rows,
+        c.width_px,
+        c.height_px,
+        modes,
+      ),
+      hex_to_bytes(c.pty_req_hex),
+    ) {
+    return false
+  }
+  if !bytes_equal(@channel.tty_modes_bytes(38400), modes) {
     return false
   }
   if !bytes_equal(
-    @channel.tty_modes_bytes(38400),
-    modes,
-  ) {
+      @channel.channel_shell_payload(c.recipient),
+      hex_to_bytes(c.shell_hex),
+    ) {
     return false
   }
   if !bytes_equal(
-    @channel.channel_shell_payload(c.recipient),
-    hex_to_bytes(c.shell_hex),
-  ) {
+      @channel.channel_window_change_payload(
+        c.recipient,
+        c.resize_cols,
+        c.resize_rows,
+        0,
+        0,
+      ),
+      hex_to_bytes(c.window_change_hex),
+    ) {
     return false
   }
   if !bytes_equal(
-    @channel.channel_window_change_payload(
-      c.recipient,
-      c.resize_cols,
-      c.resize_rows,
-      0,
-      0,
-    ),
-    hex_to_bytes(c.window_change_hex),
-  ) {
-    return false
-  }
-  if !bytes_equal(
-    @channel.channel_data_payload(c.recipient, ascii("x\r\n")),
-    hex_to_bytes(c.stdin_hex),
-  ) {
+      @channel.channel_data_payload(c.recipient, ascii("x\r\n")),
+      hex_to_bytes(c.stdin_hex),
+    ) {
     return false
   }
   let raw = hex_to_bytes(c.exit_signal_hex)
   if !bytes_equal(
-    @channel.channel_request_payload(
-      c.recipient,
-      "exit-signal",
-      false,
-      @channel.ch_cat_all([
-        @sshwire.write_ssh_string(ascii(c.exit_signal_name)),
-        FixedArray::from_array([
-          if c.exit_signal_core { b'\x01' } else { b'\x00' },
+      @channel.channel_request_payload(
+        c.recipient,
+        "exit-signal",
+        false,
+        @channel.ch_cat_all([
+          @sshwire.write_ssh_string(ascii(c.exit_signal_name)),
+          FixedArray::from_array([
+            if c.exit_signal_core {
+              b'\x01'
+            } else {
+              b'\x00'
+            },
+          ]),
+          @sshwire.write_ssh_string(empty_bytes()),
+          @sshwire.write_ssh_string(ascii(c.exit_signal_message)),
         ]),
-        @sshwire.write_ssh_string(empty_bytes()),
-        @sshwire.write_ssh_string(ascii(c.exit_signal_message)),
-      ]),
-    ),
-    raw,
-  ) {
+      ),
+      raw,
+    ) {
     return false
   }
   // exit-signal 的解析:头部 + 四个字段必须原样回来。
@@ -406,12 +462,14 @@ fn chk_shell_payloads(c : ShellPayloadCase) -> Bool {
   match parsed {
     None => false
     Some((name, core, msg)) =>
-      name == c.exit_signal_name && core == c.exit_signal_core &&
+      name == c.exit_signal_name &&
+      core == c.exit_signal_core &&
       msg == c.exit_signal_message
   }
 }
 
-///| exit-signal 负例:字段被截断 / 尾部有残余都必须判 None
+///|
+/// exit-signal 负例:字段被截断 / 尾部有残余都必须判 None
 fn chk_exit_signal_rejects(c : ShellPayloadCase) -> Bool {
   let raw = hex_to_bytes(c.exit_signal_hex)
   let short = FixedArray::make(raw.length() - 1, b'\x00')
@@ -430,7 +488,8 @@ fn chk_exit_signal_rejects(c : ShellPayloadCase) -> Bool {
   @channel.parse_exit_signal(
     @channel.ch_cat(raw, FixedArray::from_array([b'\x01'])),
     off,
-  ) is None
+  )
+  is None
 }
 
 ///|
@@ -471,8 +530,7 @@ fn replay_shell_timed(
     // 处理完第 i 个包之后 seen = i + 1
     let seen = i + 1
     let mut k = send_idx
-    while k < c.client_sends.length() &&
-          c.client_sends[k].after <= seen {
+    while k < c.client_sends.length() && c.client_sends[k].after <= seen {
       replies.push(
         Send(
           c.client_sends[k].msg_type.to_byte(),
@@ -486,7 +544,8 @@ fn replay_shell_timed(
   (replies, st.shell_report(), err)
 }
 
-///| 交互式会话的检查:时序、字节、最终报告三项都要对上
+///|
+/// 交互式会话的检查:时序、字节、最终报告三项都要对上
 fn check_shell(c : ShellCase, fails : Array[String]) -> @channel.ShellReport {
   let (replies, report, err) = replay_shell_timed(c)
   if err != "" {
@@ -495,7 +554,10 @@ fn check_shell(c : ShellCase, fails : Array[String]) -> @channel.ShellReport {
   }
   if replies.length() != c.replies.length() {
     fails.push(
-      c.name + ": " + replies.length().to_string() + " client packets, vector says " +
+      c.name +
+      ": " +
+      replies.length().to_string() +
+      " client packets, vector says " +
       c.replies.length().to_string(),
     )
   } else {
@@ -504,9 +566,17 @@ fn check_shell(c : ShellCase, fails : Array[String]) -> @channel.ShellReport {
       let want = c.replies[i]
       if t != want.msg_type || !bytes_equal(p, hex_to_bytes(want.payload_hex)) {
         fails.push(
-          c.name + ": client packet " + i.to_string() + " is type " +
-          t.to_string() + " " + short_hex(p) + ", expected type " +
-          want.msg_type.to_string() + " " + want.payload_hex,
+          c.name +
+          ": client packet " +
+          i.to_string() +
+          " is type " +
+          t.to_string() +
+          " " +
+          short_hex(p) +
+          ", expected type " +
+          want.msg_type.to_string() +
+          " " +
+          want.payload_hex,
         )
       }
     }
@@ -514,13 +584,19 @@ fn check_shell(c : ShellCase, fails : Array[String]) -> @channel.ShellReport {
   let so = stream_bytes(c.stdout)
   if !bytes_equal(report.stdout, so) {
     fails.push(
-      c.name + ": stdout " + report.stdout.length().to_string() +
-      " bytes, expected " + so.length().to_string(),
+      c.name +
+      ": stdout " +
+      report.stdout.length().to_string() +
+      " bytes, expected " +
+      so.length().to_string(),
     )
   }
   if report.exit_status != c.exit_status {
     fails.push(
-      c.name + ": exit " + report.exit_status.to_string() + ", expected " +
+      c.name +
+      ": exit " +
+      report.exit_status.to_string() +
+      ", expected " +
       c.exit_status.to_string(),
     )
   }
@@ -535,19 +611,26 @@ fn check_shell(c : ShellCase, fails : Array[String]) -> @channel.ShellReport {
   }
   if report.adjusts_sent != c.adjusts_sent {
     fails.push(
-      c.name + ": " + report.adjusts_sent.to_string() + " adjusts, expected " +
+      c.name +
+      ": " +
+      report.adjusts_sent.to_string() +
+      " adjusts, expected " +
       c.adjusts_sent.to_string(),
     )
   }
   if report.success_count != c.success_count {
     fails.push(
-      c.name + ": " + report.success_count.to_string() + " successes, expected " +
+      c.name +
+      ": " +
+      report.success_count.to_string() +
+      " successes, expected " +
       c.success_count.to_string(),
     )
   }
   report
 }
 
+///|
 fn all_shell_payloads(
   f : (ShellPayloadCase) -> Bool,
   label : String,
@@ -583,21 +666,24 @@ fn all_shell_payloads(
 fn chk_env_payloads(c : EnvPayloadCase) -> Bool {
   let raw = hex_to_bytes(c.env_hex)
   if !bytes_equal(
-    @channel.channel_env_payload(c.recipient, c.var_name, c.var_value),
-    raw,
-  ) {
+      @channel.channel_env_payload(c.recipient, c.var_name, c.var_value),
+      raw,
+    ) {
     return false
   }
   if bytes_equal(raw, hex_to_bytes(c.env_want_reply_hex)) {
     return false
   }
   if !bytes_equal(
-    @channel.channel_env_payload(c.recipient, "LANG", ""),
-    hex_to_bytes(c.empty_value_env_hex),
-  ) {
+      @channel.channel_env_payload(c.recipient, "LANG", ""),
+      hex_to_bytes(c.empty_value_env_hex),
+    ) {
     return false
   }
-  if !bytes_equal(@channel.channel_bare_payload(c.recipient), hex_to_bytes(c.eof_hex)) {
+  if !bytes_equal(
+      @channel.channel_bare_payload(c.recipient),
+      hex_to_bytes(c.eof_hex),
+    ) {
     return false
   }
   // 结构:recipient || "env" || want_reply=FALSE || name || value,正好到底。
@@ -624,13 +710,10 @@ fn chk_env_payloads(c : EnvPayloadCase) -> Bool {
   }
 }
 
-///| 开着通道、拿到 remote_id 之后的状态,专供动作类断言用
-fn io_ready_state(recipient : Int) -> @channel.ChanState {
-  {
-    ..@channel.ChanState::new(0),
-    remote_id: recipient,
-    open_done: true,
-  }
+///|
+/// 开着通道、拿到 remote_id 之后的状态,专供动作类断言用
+fn io_ready_state(recipient : Int32) -> @channel.ChanState {
+  { ..@channel.ChanState::new(0), remote_id: recipient, open_done: true, }
 }
 
 ///|
@@ -675,14 +758,14 @@ fn chk_eof_action(c : EnvPayloadCase) -> Bool {
 /// 的实现能通过全部用例——因为重放只看 `Some` 分支里 `rest` 的变化。
 fn replay_stdin_plan(
   c : StdinCase,
-) -> (Array[Int], Int, Int, Int, Bool) {
+) -> (Array[Int32], Int32, Int32, Int32, Bool) {
   let mut st = {
     ..@channel.ChanState::new(0),
     remote_window: c.window,
     remote_max_packet: c.max_packet,
   }
   let mut rest = fill_bytes(c.byte, c.size)
-  let sizes : Array[Int] = []
+  let sizes : Array[Int32] = []
   let mut sent = 0
   let mut stalls = 0
   let mut used_adjusts = 0
@@ -730,7 +813,8 @@ fn replay_stdin_plan(
   (sizes, sent, stalls, used_adjusts, preserved)
 }
 
-///| 夹取计划:包长序列、累计字节、停顿次数、缓冲契约都要对上
+///|
+/// 夹取计划:包长序列、累计字节、停顿次数、缓冲契约都要对上
 fn chk_stdin_plan(c : StdinCase) -> Bool {
   let (sizes, sent, stalls, used, preserved) = replay_stdin_plan(c)
   if !preserved {
@@ -758,7 +842,9 @@ fn chk_stdin_plan(c : StdinCase) -> Bool {
 /// 状态机吐出的动作 → 到期的驱动发送 → 按窗口夹取的 stdin → 排空后才发的 EOF。
 ///
 /// 返回 `replies` 给调用方逐字节比,状态留给报告字段。
-fn replay_io(c : IoCase) -> (Array[@channel.ChanAction], @channel.ChanState, String, Bool) {
+fn replay_io(
+  c : IoCase,
+) -> (Array[@channel.ChanAction], @channel.ChanState, String, Bool) {
   let replies : Array[@channel.ChanAction] = []
   let mut st = @channel.ChanState::new(c.local_channel)
   let mut err = ""
@@ -842,7 +928,10 @@ fn check_io(c : IoCase, fails : Array[String]) -> Unit {
   }
   if replies.length() != c.replies.length() {
     fails.push(
-      c.name + ": " + replies.length().to_string() + " client packets, vector says " +
+      c.name +
+      ": " +
+      replies.length().to_string() +
+      " client packets, vector says " +
       c.replies.length().to_string(),
     )
   } else {
@@ -853,9 +942,17 @@ fn check_io(c : IoCase, fails : Array[String]) -> Unit {
       let expect = reply_payload(want, c.remote_channel)
       if t != want.msg_type || !bytes_equal(p, expect) {
         fails.push(
-          c.name + ": client packet " + i.to_string() + " is type " +
-          t.to_string() + " " + short_hex(p) + ", expected type " +
-          want.msg_type.to_string() + " " + want.payload_hex,
+          c.name +
+          ": client packet " +
+          i.to_string() +
+          " is type " +
+          t.to_string() +
+          " " +
+          short_hex(p) +
+          ", expected type " +
+          want.msg_type.to_string() +
+          " " +
+          want.payload_hex,
         )
         return
       }
@@ -863,28 +960,49 @@ fn check_io(c : IoCase, fails : Array[String]) -> Unit {
   }
   let report = st.report()
   if report.stdin_sent != c.stdin_sent ||
-      report.stdin_packets != c.stdin_packets ||
-      report.eof_sent != c.eof_sent {
+    report.stdin_packets != c.stdin_packets ||
+    report.eof_sent != c.eof_sent {
     fails.push(
-      c.name + ": stdin " + report.stdin_sent.to_string() + "B in " +
-      report.stdin_packets.to_string() + " packets, eof=" +
-      report.eof_sent.to_string() + "; vector says " + c.stdin_sent.to_string() +
-      "B in " + c.stdin_packets.to_string() + ", eof=" + c.eof_sent.to_string(),
+      c.name +
+      ": stdin " +
+      report.stdin_sent.to_string() +
+      "B in " +
+      report.stdin_packets.to_string() +
+      " packets, eof=" +
+      report.eof_sent.to_string() +
+      "; vector says " +
+      c.stdin_sent.to_string() +
+      "B in " +
+      c.stdin_packets.to_string() +
+      ", eof=" +
+      c.eof_sent.to_string(),
     )
   }
   let remaining = c.stdin_size - c.stdin_sent
   if remaining != c.stdin_remaining {
-    fails.push(c.name + ": " + remaining.to_string() + " bytes left, vector says " + c.stdin_remaining.to_string())
+    fails.push(
+      c.name +
+      ": " +
+      remaining.to_string() +
+      " bytes left, vector says " +
+      c.stdin_remaining.to_string(),
+    )
   }
   if st.success_count != c.success_count {
     fails.push(
-      c.name + ": " + st.success_count.to_string() + " successes, expected " +
+      c.name +
+      ": " +
+      st.success_count.to_string() +
+      " successes, expected " +
       c.success_count.to_string(),
     )
   }
   if report.adjusts_sent != c.adjusts_sent {
     fails.push(
-      c.name + ": " + report.adjusts_sent.to_string() + " adjusts, expected " +
+      c.name +
+      ": " +
+      report.adjusts_sent.to_string() +
+      " adjusts, expected " +
       c.adjusts_sent.to_string(),
     )
   }
@@ -896,21 +1014,34 @@ fn check_io(c : IoCase, fails : Array[String]) -> Unit {
   }
   if report.exit_status != c.exit_status {
     fails.push(
-      c.name + ": exit " + report.exit_status.to_string() + ", expected " +
+      c.name +
+      ": exit " +
+      report.exit_status.to_string() +
+      ", expected " +
       c.exit_status.to_string(),
     )
   }
   if st.window.cur != c.final_cur {
-    fails.push(c.name + ": local window " + st.window.cur.to_string() + ", expected " + c.final_cur.to_string())
+    fails.push(
+      c.name +
+      ": local window " +
+      st.window.cur.to_string() +
+      ", expected " +
+      c.final_cur.to_string(),
+    )
   }
   if st.remote_window != c.final_remote_window {
     fails.push(
-      c.name + ": remote window " + st.remote_window.to_string() + ", expected " +
+      c.name +
+      ": remote window " +
+      st.remote_window.to_string() +
+      ", expected " +
       c.final_remote_window.to_string(),
     )
   }
 }
 
+///|
 fn all_env_payloads(
   f : (EnvPayloadCase) -> Bool,
   label : String,
@@ -925,6 +1056,7 @@ fn all_env_payloads(
   true
 }
 
+///|
 fn all_stdin_cases(
   f : (StdinCase) -> Bool,
   label : String,
@@ -944,18 +1076,26 @@ fn all_stdin_cases(
 // ---------------------------------------------------------------------------
 
 ///|
+
 ///| 按 `sizes` 回放窗口记账,返回 `(每次调整的字节数, 结束时的窗口)`。
+
 ///|
+
 ///| 注意量必须在 `take_adjust` **之前**读:那一步已经把 consumed 清零,
+
 ///| 从新状态上读会得到 0,而 0 字节的 WINDOW_ADJUST 照样「能跑完」,
+
 ///| 只是窗口永远补不回来 —— 这正是它当初没被本地检查发现的原因。
+
 ///| 递归而不是 fold:MoonBit 的 `Array::fold` 在这个闭包形态下推不出累加器
-///| 类型,而递归版本没有任何歧义。
+
+///|
+/// 类型,而递归版本没有任何歧义。
 fn replay_window_go(
-  sizes : Array[Int],
-  idx : Int,
+  sizes : Array[Int32],
+  idx : Int32,
   acc : @channel.LocalWindow,
-  amounts : Array[Int],
+  amounts : Array[Int32],
 ) -> @channel.LocalWindow {
   if idx >= sizes.length() {
     return acc
@@ -970,19 +1110,14 @@ fn replay_window_go(
   }
 }
 
-fn replay_window(
-  sizes : Array[Int],
-) -> (Array[Int], @channel.LocalWindow) {
-  let amounts : Array[Int] = []
-  let win = replay_window_go(
-    sizes,
-    0,
-    @channel.LocalWindow::new(),
-    amounts,
-  )
+///|
+fn replay_window(sizes : Array[Int32]) -> (Array[Int32], @channel.LocalWindow) {
+  let amounts : Array[Int32] = []
+  let win = replay_window_go(sizes, 0, @channel.LocalWindow::new(), amounts)
   (amounts, win)
 }
 
+///|
 fn chk_window(wc : WindowCase) -> Bool {
   let (amounts, win) = replay_window(wc.sizes)
   ints_equal(amounts, wc.adjust_amounts) &&
@@ -994,9 +1129,10 @@ fn chk_window(wc : WindowCase) -> Bool {
 // session replay
 // ---------------------------------------------------------------------------
 
+///|
 fn run_session_go(
   c : SessionCase,
-  idx : Int,
+  idx : Int32,
   st : @channel.ChanState,
   replies : Array[@channel.ChanAction],
   errors : Array[String],
@@ -1009,7 +1145,8 @@ fn run_session_go(
   let (st1, actions, e) = @channel.chan_step(st, p.msg_type.to_byte(), payload)
   match e {
     None => ()
-    Some(chan_err) => errors.push("packet " + idx.to_string() + ": " + describe(chan_err))
+    Some(chan_err) =>
+      errors.push("packet " + idx.to_string() + ": " + describe(chan_err))
   }
   for j = 0; j < actions.length(); j = j + 1 {
     replies.push(actions[j])
@@ -1017,23 +1154,37 @@ fn run_session_go(
   run_session_go(c, idx + 1, st1, replies, errors)
 }
 
-fn run_session(c : SessionCase) -> (Array[@channel.ChanAction], @channel.ExecReport, String) {
+///|
+fn run_session(
+  c : SessionCase,
+) -> (Array[@channel.ChanAction], @channel.ExecReport, String) {
   let replies : Array[@channel.ChanAction] = []
   let errors : Array[String] = []
-  let st = run_session_go(c, 0, @channel.ChanState::new(c.local_channel), replies, errors)
+  let st = run_session_go(
+    c,
+    0,
+    @channel.ChanState::new(c.local_channel),
+    replies,
+    errors,
+  )
   let first = if errors.length() == 0 { "" } else { errors[0] }
   (replies, st.report(), first)
 }
 
 ///|
+
 ///| 跑一遍 transcript 并把每处不符写进 `fails`。
+
 ///|
+
 ///| 单独返回错误字符串而不是就地判定,是因为 1.5 MiB 的 bulk 用例不该为了
-///| 打印一条诊断跑三遍。
+
+///|
+/// 打印一条诊断跑三遍。
 fn check_session(
   c : SessionCase,
   fails : Array[String],
-) -> (@channel.ExecReport, Int) {
+) -> (@channel.ExecReport, Int32) {
   let mut payload_bad = false
   for i = 0; i < c.packets.length(); i = i + 1 {
     let p = c.packets[i]
@@ -1055,7 +1206,10 @@ fn check_session(
   }
   if replies.length() != c.replies.length() {
     fails.push(
-      c.name + ": " + replies.length().to_string() + " replies, vector says " +
+      c.name +
+      ": " +
+      replies.length().to_string() +
+      " replies, vector says " +
       c.replies.length().to_string(),
     )
   } else {
@@ -1066,9 +1220,17 @@ fn check_session(
         bytes_equal(p, hex_to_bytes(want.payload_hex))
       if !ok {
         fails.push(
-          c.name + ": reply " + i.to_string() + " is type " + t.to_string() +
-          " " + short_hex(p) + ", expected type " + want.msg_type.to_string() +
-          " " + want.payload_hex,
+          c.name +
+          ": reply " +
+          i.to_string() +
+          " is type " +
+          t.to_string() +
+          " " +
+          short_hex(p) +
+          ", expected type " +
+          want.msg_type.to_string() +
+          " " +
+          want.payload_hex,
         )
       }
     }
@@ -1077,25 +1239,37 @@ fn check_session(
   let se = stream_bytes(c.stderr)
   if !bytes_equal(report.stdout, so) {
     fails.push(
-      c.name + ": stdout " + report.stdout.length().to_string() +
-      " bytes, expected " + so.length().to_string(),
+      c.name +
+      ": stdout " +
+      report.stdout.length().to_string() +
+      " bytes, expected " +
+      so.length().to_string(),
     )
   }
   if !bytes_equal(report.stderr, se) {
     fails.push(
-      c.name + ": stderr " + report.stderr.length().to_string() +
-      " bytes, expected " + se.length().to_string(),
+      c.name +
+      ": stderr " +
+      report.stderr.length().to_string() +
+      " bytes, expected " +
+      se.length().to_string(),
     )
   }
   if report.exit_status != c.exit_status {
     fails.push(
-      c.name + ": exit " + report.exit_status.to_string() + ", expected " +
+      c.name +
+      ": exit " +
+      report.exit_status.to_string() +
+      ", expected " +
       c.exit_status.to_string(),
     )
   }
   if report.adjusts_sent != c.adjusts_sent {
     fails.push(
-      c.name + ": " + report.adjusts_sent.to_string() + " adjusts, expected " +
+      c.name +
+      ": " +
+      report.adjusts_sent.to_string() +
+      " adjusts, expected " +
       c.adjusts_sent.to_string(),
     )
   }
@@ -1105,7 +1279,8 @@ fn check_session(
   (report, c.adjusts_sent)
 }
 
-///| 把一组用例跑一遍,任一不符就往 `fails` 追加一条
+///|
+/// 把一组用例跑一遍,任一不符就往 `fails` 追加一条
 fn all_payloads(
   f : (PayloadCase) -> Bool,
   label : String,
@@ -1120,6 +1295,7 @@ fn all_payloads(
   true
 }
 
+///|
 fn main {
   let fails : Array[String] = []
 
@@ -1137,10 +1313,16 @@ fn main {
   println("chan_open_payload: " + pf(all_payloads(chk_open, "open", fails)))
   println("chan_exec_payload: " + pf(all_payloads(chk_exec, "exec", fails)))
   println("chan_data_payload: " + pf(all_payloads(chk_data, "data", fails)))
-  println("chan_extdata_payload: " + pf(all_payloads(chk_ext, "extdata", fails)))
-  println("chan_adjust_payload: " + pf(all_payloads(chk_adjust, "adjust", fails)))
+  println(
+    "chan_extdata_payload: " + pf(all_payloads(chk_ext, "extdata", fails)),
+  )
+  println(
+    "chan_adjust_payload: " + pf(all_payloads(chk_adjust, "adjust", fails)),
+  )
   println("chan_bare_payload: " + pf(all_payloads(chk_bare, "bare", fails)))
-  println("chan_exit_status_payload: " + pf(all_payloads(chk_exit, "exit", fails)))
+  println(
+    "chan_exit_status_payload: " + pf(all_payloads(chk_exit, "exit", fails)),
+  )
   println(
     "chan_open_failure_payload: " +
     pf(all_payloads(chk_open_failure, "open_failure", fails)),
@@ -1172,7 +1354,7 @@ fn main {
   // ---- 4. 整段 transcript ----
   let sess_fails : Array[String] = []
   let reports : Array[@channel.ExecReport] = []
-  let adjusts : Array[Int] = []
+  let adjusts : Array[Int32] = []
   for i = 0; i < kat_session_cases.length(); i = i + 1 {
     let (report, n) = check_session(kat_session_cases[i], sess_fails)
     reports.push(report)
@@ -1187,7 +1369,9 @@ fn main {
   //
   // 计数单独打出来,而不是合成一个布尔:验证脚本要能分别断言这两件事,
   // 一个笼统的 PASS 会让两个同义检查看起来像两份覆盖。
-  let ids_split = kat_session_cases.filter(c => c.local_channel != c.remote_channel).length()
+  let ids_split = kat_session_cases
+    .filter(c => c.local_channel != c.remote_channel)
+    .length()
   let multi_adjust = kat_session_cases.filter(c => c.adjusts_sent > 1).length()
   let no_status = kat_session_cases.filter(c => c.exit_status == 255).length()
   println("chan_session_cases: " + kat_session_cases.length().to_string())
@@ -1234,10 +1418,7 @@ fn main {
   println("chan_shell_cases: " + kat_shell_cases.length().to_string())
   println(
     "chan_shell_coverage: " +
-    pf(
-      has_no_pty && has_resize && has_signal &&
-      kat_shell_cases.length() >= 6,
-    ),
+    pf(has_no_pty && has_resize && has_signal && kat_shell_cases.length() >= 6),
   )
 
   // ---- 7. env 请求 + stdin 流控(channels.c:3085-3100)----
@@ -1256,10 +1437,14 @@ fn main {
   // 防退化:一个「有夹取」的用例和一个「夹到 0 也正常停」的用例都必须有。
   // 只有前者的实现会把窗口用光后当成错误,只有后者的实现会以为永远发得完。
   let clamp_stalls = kat_stdin_cases.filter(c => c.stalls > 0).length()
-  let clamp_resumes = kat_stdin_cases.filter(c => c.consumed_adjusts > 0).length()
-  let clamp_by_window = kat_stdin_cases.filter(c =>
-    c.window < c.max_packet && c.size > c.window && c.consumed_adjusts > 0
-  ).length()
+  let clamp_resumes = kat_stdin_cases
+    .filter(c => c.consumed_adjusts > 0)
+    .length()
+  let clamp_by_window = kat_stdin_cases
+    .filter(c => {
+      c.window < c.max_packet && c.size > c.window && c.consumed_adjusts > 0
+    })
+    .length()
   println("chan_stdin_cases: " + kat_stdin_cases.length().to_string())
   println("chan_stdin_stall_cases: " + clamp_stalls.to_string())
   println("chan_stdin_resume_cases: " + clamp_resumes.to_string())
@@ -1286,8 +1471,6 @@ fn main {
   println("chan_io_cases: " + kat_io_cases.length().to_string())
   println(
     "chan_io_coverage: " +
-    pf(
-      has_env && one_success && has_stdin && has_stalled && has_ids_split,
-    ),
+    pf(has_env && one_success && has_stdin && has_stalled && has_ids_split),
   )
 }

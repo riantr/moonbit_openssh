@@ -1,5 +1,6 @@
 ///| Loop #60: the authoritative list of algorithms this transport can RUN.
 ///
+
 ///|
 ///
 /// `Mode` has exactly three constructors (packet_ctx.mbt:34-38), so there are
@@ -34,7 +35,8 @@ pub(all) enum TransportFamily {
   MacEncryptAes128CtrHmacSha256
 }
 
-///| The two cipher names this transport has a `Mode` constructor for.
+///|
+/// The two cipher names this transport has a `Mode` constructor for.
 pub fn runnable_cipher_names() -> Array[String] {
   ["chacha20-poly1305@openssh.com", "aes128-ctr"]
 }
@@ -66,7 +68,8 @@ pub fn transport_family(cipher : String) -> TransportFamily? {
   }
 }
 
-///| Does this cipher consume a separate MAC? (cipher.c:93 the second column)
+///|
+/// Does this cipher consume a separate MAC? (cipher.c:93 the second column)
 pub fn cipher_needs_mac(cipher : String) -> Bool {
   match transport_family(cipher) {
     Some(AeadChachaPoly1305) => false
@@ -75,12 +78,14 @@ pub fn cipher_needs_mac(cipher : String) -> Bool {
   }
 }
 
-///| Whether a negotiated cipher name has a `Mode` branch here.
+///|
+/// Whether a negotiated cipher name has a `Mode` branch here.
 pub fn is_runnable_cipher(cipher : String) -> Bool {
   transport_family(cipher) is Some(_)
 }
 
-///| Whether this transport can compute this MAC under `MacEncrypt`.
+///|
+/// Whether this transport can compute this MAC under `MacEncrypt`.
 pub fn is_runnable_mac(mac : String) -> Bool {
   for n in runnable_mac_names() {
     if n == mac {
@@ -124,7 +129,7 @@ pub fn is_runnable_mac(mac : String) -> Bool {
 pub fn transport_params(
   cipher : String,
   mac : String,
-) -> (Int, Int, Int, Int) {
+) -> (Int32, Int32, Int32, Int32) {
   match transport_family(cipher) {
     Some(AeadChachaPoly1305) => (64, 8, 0, 0)
     Some(MacEncryptAes128CtrHmacSha256) =>
@@ -149,7 +154,7 @@ pub fn transport_params(
 ///
 /// Loop #60's gate caught exactly that -- the first version returned 32 for
 /// aes128-ctr and the C table said 0.
-pub fn authlen_for(cipher : String) -> Int {
+pub fn authlen_for(cipher : String) -> Int32 {
   match transport_family(cipher) {
     Some(AeadChachaPoly1305) => 16
     Some(MacEncryptAes128CtrHmacSha256) => 0
@@ -210,16 +215,14 @@ pub fn first_unrunnable_mac(mac_list : String) -> String? {
 /// An empty cipher list answers `None` -- offering nothing is not a false
 /// promise, it is an immediate `NoCipherAlg` at negotiation time, which is a
 /// different failure with an existing error path.
-pub fn check_runnable(
-  cipher_list : String,
-  mac_list : String,
-) -> String? {
+pub fn check_runnable(cipher_list : String, mac_list : String) -> String? {
   match first_unrunnable_cipher(cipher_list) {
     Some(bad) => Some("cipher:" + bad)
-    None => match first_unrunnable_mac(mac_list) {
-      Some(bad) => Some("mac:" + bad)
-      None => None
-    }
+    None =>
+      match first_unrunnable_mac(mac_list) {
+        Some(bad) => Some("mac:" + bad)
+        None => None
+      }
   }
 }
 

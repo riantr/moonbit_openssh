@@ -1,41 +1,67 @@
 ///| cmd/sftp_test -- Loop #39 SFTP v3, byte-exact against a real server
+
 ///|
+
 ///| Four layers, and the fourth is the one that matters:
 ///
+
 ///|  1. the frames we emit must equal `host/sftp_oracle.py`'s, which was
+
 ///|     cross-checked against the requests paramiko actually framed in the
+
 ///|     same session as the capture;
 ///  2. the replies we parse must be real OpenSSH 8.0p1 `internal-sftp`
+
 ///|     bytes, so a mis-numbered message type or a wrongly placed field
+
 ///|     shows up as a wrong result rather than as a plausible one;
+
 ///|  3. CHANNEL_DATA boundaries are chosen by the vector, not by the server,
+
 ///|     because they are unrelated to SFTP packet boundaries and the whole
+
 ///|     reason `SftpInbuf` exists;
 ///  4. results are rendered to one line each and compared as strings, so the
+
 ///|     Python oracle and this file have to agree about what a directory
+
 ///|     listing *is* -- not merely about how many bytes arrived.
 ///
+
 ///| Depends on `src/sftp` only, which reaches neither `src/tcp` nor `src/wt`,
+
 ///| so the whole KAT runs on all four backends in both modes.
 ///
+
 ///| Three reply shapes this file is built around, all of them from the
+
 ///| capture rather than from the draft:
 ///
+
 ///|  - the reply numbers are 101 STATUS / 102 HANDLE / 103 DATA / 104 NAME /
+
 ///|    105 ATTRS.  Sorted by *name* the same five numbers read
+
 ///|    101 DATA / 102 HANDLE / 103 NAME / 104 ATTRS / 105 STATUS, which is
+
 ///|    what an implementer writes down from memory -- and a parser built on
+
 ///|    that ordering accepts every reply it is fed.
+
 ///|  - VERSION carries extension pairs after the version number (six on this
+
 ///|    server), so end-of-packet after the version is simply wrong.
+
 ///|  - STATUS carries a language tag after the message, so `expect_end`
-///|    before reading it fails on every STATUS a real server sends.
+
+///|
+///    before reading it fails on every STATUS a real server sends.
 
 // ---------------------------------------------------------------------------
 // hex helpers
 // ---------------------------------------------------------------------------
 
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -46,6 +72,7 @@ fn hex_nibble(c : UInt16) -> Int {
   abort("bad hex digit")
 }
 
+///|
 fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   let n = s.length() / 2
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
@@ -57,8 +84,10 @@ fn hex_to_bytes(s : String) -> FixedArray[Byte] {
   out
 }
 
+///|
 const HEXCHARS : String = "0123456789abcdef"
 
+///|
 fn to_hex(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
@@ -73,18 +102,21 @@ fn to_hex(b : FixedArray[Byte]) -> String {
   sb.to_string()
 }
 
-///| 把字符串按字节取出来,用于 realpath / 消息文本的十六进制渲染
+///|
+/// 把字符串按字节取出来,用于 realpath / 消息文本的十六进制渲染
 fn bytes_of(s : String) -> FixedArray[Byte] {
   @sftp.sftp_ascii(s)
 }
 
-fn opt_int(v : Int?) -> String {
+///|
+fn opt_int(v : Int32?) -> String {
   match v {
     None => "-"
     Some(x) => x.to_string()
   }
 }
 
+///|
 fn opt_u64(v : UInt64?) -> String {
   match v {
     None => "-"
@@ -96,19 +128,26 @@ fn opt_u64(v : UInt64?) -> String {
 // rendering one result, the way `host/sftp_oracle.py` renders it
 // ---------------------------------------------------------------------------
 
+///|
 fn render_attrs(a : @sftp.SftpAttrs) -> String {
   let is_dir = match a.permissions {
     Some(p) => (p & 0xF000) == 0x4000
     None => false
   }
   let dir = if is_dir { "1" } else { "0" }
-  "size=" + opt_u64(a.size) +
-  ",uid=" + opt_int(a.uid) +
-  ",gid=" + opt_int(a.gid) +
-  ",perm=" + opt_int(a.permissions) +
-  ",isdir=" + dir
+  "size=" +
+  opt_u64(a.size) +
+  ",uid=" +
+  opt_int(a.uid) +
+  ",gid=" +
+  opt_int(a.gid) +
+  ",perm=" +
+  opt_int(a.permissions) +
+  ",isdir=" +
+  dir
 }
 
+///|
 fn render_result(r : @sftp.SftpOpResult) -> String {
   match r {
     RealpathOk(p) => "realpath=" + to_hex(bytes_of(p))
@@ -133,9 +172,8 @@ fn render_result(r : @sftp.SftpOpResult) -> String {
     Contents(b) => "contents=" + to_hex(b)
     Wrote(n) => "wrote=" + n.to_string()
     Changed => "changed"
-    Failed(code, msg) => {
+    Failed(code, msg) =>
       "failed=code=" + code.to_string() + ":msg=" + to_hex(bytes_of(msg))
-    }
   }
 }
 
@@ -145,11 +183,17 @@ fn render_result(r : @sftp.SftpOpResult) -> String {
 
 ///| 驱动一次会话:pump → 取请求 → 喂下一个 chunk,直到完成、失败或字节用尽。
 ///
+
 ///| `pump` 在 `take_out` **之后**、下一轮 `feed` 之前都调,是因为应答可能已经
+
 ///| 躺在重组缓冲里,而通道已经没有东西可读了。少这一次 pump,客户端就会去等一个
+
 ///| 它自己已经收到的包。
+
 ///| Vector 的属性字段。`-1` 表示**不提这个字段**,和「提到但值是 0」是两种
-///| 不同的请求:`chmod 000` 是合法且偶尔想要的,所以不能把它们合并。
+
+///|
+/// 不同的请求:`chmod 000` 是合法且偶尔想要的,所以不能把它们合并。
 fn attrs_of(o : Op) -> @sftp.SftpAttrs {
   let a = @sftp.SftpAttrs::none()
   if o.perms != -1 {
@@ -164,9 +208,10 @@ fn attrs_of(o : Op) -> @sftp.SftpAttrs {
   a
 }
 
+///|
 fn run_case(
   c : Case,
-) -> (Array[String], Array[String], Bool, Bool, Int, Int, String) {
+) -> (Array[String], Array[String], Bool, Bool, Int32, Int32, String) {
   let ops : Array[@sftp.SftpOp] = []
   for i = 0; i < c.ops.length(); i = i + 1 {
     let o = c.ops[i]
@@ -213,8 +258,15 @@ fn run_case(
   for i = 0; i < rs.length(); i = i + 1 {
     results.push(render_result(rs[i]))
   }
-  (sent, results, done, failed, sess.version_of(), sess.extensions_of(),
-   sess.failure_reason())
+  (
+    sent,
+    results,
+    done,
+    failed,
+    sess.version_of(),
+    sess.extensions_of(),
+    sess.failure_reason(),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -236,22 +288,25 @@ pub(all) struct InbufCase {
   name : String
   feeds : Array[String]
   expect_packets : Array[String]
-  expect_pending : Int
+  expect_pending : Int32
   expect_failed : Bool
 }
 
-///| 造一个帧:`uint32 len || body`
+///|
+/// 造一个帧:`uint32 len || body`
 fn framed_hex(body : String) -> String {
   let n = body.length() / 2
   let len = to_hex(hex_to_bytes(u32_hex(n)))
   len + body
 }
 
-fn u32_hex(n : Int) -> String {
+///|
+fn u32_hex(n : Int32) -> String {
   to_hex(fixed4(n))
 }
 
-fn fixed4(n : Int) -> FixedArray[Byte] {
+///|
+fn fixed4(n : Int32) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(4, b'\x00')
   out[0] = ((n >> 24) & 0xFF).to_byte()
   out[1] = ((n >> 16) & 0xFF).to_byte()
@@ -260,6 +315,7 @@ fn fixed4(n : Int) -> FixedArray[Byte] {
   out
 }
 
+///|
 fn inbuf_cases() -> Array[InbufCase] {
   // Two small, valid packets.  INIT-like and STATUS-like bodies; the buffer
   // does not parse, it only frames, so the contents do not matter here.
@@ -284,20 +340,14 @@ fn inbuf_cases() -> Array[InbufCase] {
     },
     {
       name: "lenprefix_3_1",
-      feeds: [
-        f1[:6].to_owned(),
-        f1[6:].to_owned(),
-      ],
+      feeds: [f1[:6].to_owned(), f1[6:].to_owned()],
       expect_packets: [p1],
       expect_pending: 0,
       expect_failed: false,
     },
     {
       name: "lenprefix_2_2",
-      feeds: [
-        f1[:4].to_owned(),
-        f1[4:].to_owned(),
-      ],
+      feeds: [f1[:4].to_owned(), f1[4:].to_owned()],
       expect_packets: [p1],
       expect_pending: 0,
       expect_failed: false,
@@ -337,7 +387,8 @@ fn inbuf_cases() -> Array[InbufCase] {
   ]
 }
 
-fn run_inbuf(c : InbufCase) -> (Array[String], Int, Bool) {
+///|
+fn run_inbuf(c : InbufCase) -> (Array[String], Int32, Bool) {
   let buf = @sftp.SftpInbuf::new()
   let all : Array[String] = []
   for i = 0; i < c.feeds.length(); i = i + 1 {
@@ -358,6 +409,7 @@ fn run_inbuf(c : InbufCase) -> (Array[String], Int, Bool) {
 // main
 // ---------------------------------------------------------------------------
 
+///|
 fn check_arrays(
   label : String,
   name : String,
@@ -367,30 +419,47 @@ fn check_arrays(
 ) -> Unit {
   if got.length() != want.length() {
     fails.push(
-      name + ": " + label + " count " + got.length().to_string() +
-      " != expected " + want.length().to_string(),
+      name +
+      ": " +
+      label +
+      " count " +
+      got.length().to_string() +
+      " != expected " +
+      want.length().to_string(),
     )
     return
   }
   for i = 0; i < want.length(); i = i + 1 {
     if got[i] != want[i] {
       fails.push(
-        name + ": " + label + "[" + i.to_string() + "]\n      got  " +
-        got[i] + "\n      want " + want[i],
+        name +
+        ": " +
+        label +
+        "[" +
+        i.to_string() +
+        "]\n      got  " +
+        got[i] +
+        "\n      want " +
+        want[i],
       )
       return
     }
   }
 }
 
+///|
 fn main {
   println(
-    "SFTP KAT: " + cases.length().to_string() +
+    "SFTP KAT: " +
+    cases.length().to_string() +
     " cases from a real OpenSSH internal-sftp capture",
   )
   println(
-    "  capture: version " + CAPTURE_VERSION.to_string() + ", " +
-    CAPTURE_EXTENSIONS.to_string() + " extension pairs after the version",
+    "  capture: version " +
+    CAPTURE_VERSION.to_string() +
+    ", " +
+    CAPTURE_EXTENSIONS.to_string() +
+    " extension pairs after the version",
   )
   let fails : Array[String] = []
   for i = 0; i < cases.length(); i = i + 1 {
@@ -400,21 +469,36 @@ fn main {
     check_arrays("requests", c.name, sent, c.requests, case_fails)
     check_arrays("results", c.name, results, c.results, case_fails)
     if done != c.expect_done {
-      case_fails.push(c.name + ": done=" + done.to_string() +
-        " expected " + c.expect_done.to_string())
+      case_fails.push(
+        c.name +
+        ": done=" +
+        done.to_string() +
+        " expected " +
+        c.expect_done.to_string(),
+      )
     }
     if failed != c.expect_failed {
-      case_fails.push(c.name + ": failed=" + failed.to_string() +
-        " expected " + c.expect_failed.to_string() +
-        (if why == "" { "" } else { " (" + why + ")" }))
+      case_fails.push(
+        c.name +
+        ": failed=" +
+        failed.to_string() +
+        " expected " +
+        c.expect_failed.to_string() +
+        (if why == "" { "" } else { " (" + why + ")" }),
+      )
     }
     if c.expect_done {
       if ver != CAPTURE_VERSION {
         case_fails.push(c.name + ": version " + ver.to_string())
       }
       if exts != CAPTURE_EXTENSIONS {
-        case_fails.push(c.name + ": " + exts.to_string() +
-          " extension pairs, expected " + CAPTURE_EXTENSIONS.to_string())
+        case_fails.push(
+          c.name +
+          ": " +
+          exts.to_string() +
+          " extension pairs, expected " +
+          CAPTURE_EXTENSIONS.to_string(),
+        )
       }
     }
     if case_fails.length() == 0 {
@@ -439,12 +523,22 @@ fn main {
     let bad : Array[String] = []
     check_arrays("packets", c.name, pkts, c.expect_packets, bad)
     if pending != c.expect_pending {
-      bad.push(c.name + ": pending " + pending.to_string() +
-        " expected " + c.expect_pending.to_string())
+      bad.push(
+        c.name +
+        ": pending " +
+        pending.to_string() +
+        " expected " +
+        c.expect_pending.to_string(),
+      )
     }
     if failed != c.expect_failed {
-      bad.push(c.name + ": failed=" + failed.to_string() +
-        " expected " + c.expect_failed.to_string())
+      bad.push(
+        c.name +
+        ": failed=" +
+        failed.to_string() +
+        " expected " +
+        c.expect_failed.to_string(),
+      )
     }
     if bad.length() == 0 {
       println("  PASS  " + c.name)
@@ -459,8 +553,13 @@ fn main {
 
   if fails.length() == 0 {
     println("")
-    println("ALL PASS (" + cases.length().to_string() + " session cases, " +
-      ibs.length().to_string() + " inbuf cases)")
+    println(
+      "ALL PASS (" +
+      cases.length().to_string() +
+      " session cases, " +
+      ibs.length().to_string() +
+      " inbuf cases)",
+    )
   } else {
     // `main` must return Unit, so the verdict is carried by the text -- the
     // same convention `cmd/channel_test` uses and `host/verify_loop39.mjs`

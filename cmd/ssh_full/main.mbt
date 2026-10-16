@@ -1,12 +1,10 @@
 ///| cmd/ssh_full — Loop #22 SSH client write 侧完整字节级协议闭环
+
 ///|
 /// 输出 8 行 byte-exact hash 跨 4 target × 2 mode
-
 fn main {
   let (sent, recv, stdout, exit_code, remote_channel) = @sshclient.ssh_client_full_unencrypted(
-    "moonbit",
-    "sshpass",
-    "ls",
+    "moonbit", "sshpass", "ls",
   )
 
   println("=== SSH-WASM-SSH Loop #22 (Full Write Path) ===")

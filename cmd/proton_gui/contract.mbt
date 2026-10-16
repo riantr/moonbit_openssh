@@ -61,8 +61,8 @@ pub(all) struct RunReply {
   failed : Bool
   /// `SftpSession::failure_reason`, empty when it did not fail
   reason : String
-  version : Int
-  extensions : Int
+  version : Int32
+  extensions : Int32
   /// the extension names VERSION listed, in the order it listed them
   ext_names : Array[String]
   /// the requests we emitted, as hex
@@ -84,8 +84,8 @@ pub(all) struct ListReply {
 ///|
 /// The whole-suite verdict, so the page can show a single line.
 pub(all) struct AllReply {
-  total : Int
-  passed : Int
+  total : Int32
+  passed : Int32
   failures : Array[String]
   notes : Array[String]
 } derive(ToJson, Debug, Eq)

@@ -14,7 +14,7 @@ pub fn ChaChaState::new128(key : FixedArray[Byte]) -> ChaChaState {
   if key.length() != key_128_len {
     abort("ChaChaState::new128: key must be 16 bytes")
   }
-  let state : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let state : FixedArray[UInt32] = FixedArray::make(16, 0U)
   // [0..4] = tau constants
   state[0] = tau0
   state[1] = tau1
@@ -40,7 +40,7 @@ pub fn ChaChaState::new256(key : FixedArray[Byte]) -> ChaChaState {
   if key.length() != key_256_len {
     abort("ChaChaState::new256: key must be 32 bytes")
   }
-  let state : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let state : FixedArray[UInt32] = FixedArray::make(16, 0U)
   // [0..4] = sigma constants
   state[0] = sigma0
   state[1] = sigma1
@@ -78,7 +78,7 @@ pub fn ChaChaState::set_iv(
     None => 0UL
   }
   // 复制 state 以保持不可变语义
-  let new_input : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let new_input : FixedArray[UInt32] = FixedArray::make(16, 0U)
   for i = 0; i < 16; i = i + 1 {
     new_input[i] = state.input[i]
   }
@@ -116,7 +116,7 @@ pub fn ChaChaState::process(
   let mut mut_counter_high = self.input[13]
   // 当前 state 的 [0..12] 是不变的(因为 set_iv 是 immutable 复制)
   // 但 [12..14] 会在循环中自增,所以我们拷贝一份 state 用于每个 block
-  let base_state : FixedArray[UInt] = FixedArray::make(16, 0U)
+  let base_state : FixedArray[UInt32] = FixedArray::make(16, 0U)
   for i = 0; i < 12; i = i + 1 {
     base_state[i] = self.input[i]
   }
@@ -125,7 +125,7 @@ pub fn ChaChaState::process(
   let mut remaining = input.length()
   while remaining > 0 {
     // 构造本轮的 state
-    let round_state : FixedArray[UInt] = FixedArray::make(16, 0U)
+    let round_state : FixedArray[UInt32] = FixedArray::make(16, 0U)
     for i = 0; i < 12; i = i + 1 {
       round_state[i] = base_state[i]
     }

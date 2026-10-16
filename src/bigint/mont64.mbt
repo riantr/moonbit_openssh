@@ -22,7 +22,8 @@
 /// Reference: HAC §14.3.2; Koç, Acar, Kaliski, "Analyzing and Comparing
 /// Montgomery Multiplication Algorithms" (Lowrance-Wagner survey, 1997).
 
-///| n' = -n^(-1) mod 2^64 for an odd 64-bit limb n0.
+///|
+/// n' = -n^(-1) mod 2^64 for an odd 64-bit limb n0.
 ///   Newton/Hensel doubling: x_{k+1} = x_k * (2 - n*x_k) mod 2^64.
 ///   6 iterations from x_0 = 1 give full 64-bit precision
 ///   (1 -> 2 -> 4 -> 8 -> 16 -> 32 -> 64 bits).
@@ -36,23 +37,35 @@ pub fn mont_n_prime(n0 : UInt64) -> UInt64 {
   0UL - x
 }
 
-///| 64-bit limb array helpers.
+///|
+/// 64-bit limb array helpers.
 pub fn limbs64_from_bytes_be(bytes : FixedArray[Byte]) -> FixedArray[UInt64] {
   let n64 = (bytes.length() + 7) / 8
-  let out : FixedArray[UInt64] = FixedArray::make(if n64 < 1 { 1 } else { n64 }, 0UL)
+  let out : FixedArray[UInt64] = FixedArray::make(
+    if n64 < 1 {
+      1
+    } else {
+      n64
+    },
+    0UL,
+  )
   let mut i = 0
   while i < bytes.length() {
     let bi = bytes.length() - 1 - i
     let byte_i = i / 8
-    let shift = (i % 8) * 8
+    let shift = i % 8 * 8
     out[byte_i] = out[byte_i] | (bytes[bi].to_uint64() << shift)
     i = i + 1
   }
   out
 }
 
-///| 64-bit limbs -> big-endian bytes (exact length = k * 8, no trimming).
-pub fn limbs64_to_bytes_be(l : FixedArray[UInt64], count : Int) -> FixedArray[Byte] {
+///|
+/// 64-bit limbs -> big-endian bytes (exact length = k * 8, no trimming).
+pub fn limbs64_to_bytes_be(
+  l : FixedArray[UInt64],
+  count : Int32,
+) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(count * 8, b'\x00')
   let mut i = 0
   while i < count {
@@ -71,34 +84,40 @@ pub fn limbs64_to_bytes_be(l : FixedArray[UInt64], count : Int) -> FixedArray[By
   out
 }
 
-///| Compare limb arrays a[0..alen) vs b[0..blen), both little-endian.
+///|
+/// Compare limb arrays a[0..alen) vs b[0..blen), both little-endian.
 ///   Returns -1 / 0 / +1.
 pub fn limbs64_cmp(
   a : FixedArray[UInt64],
-  alen : Int,
+  alen : Int32,
   b : FixedArray[UInt64],
-  blen : Int
-) -> Int {
+  blen : Int32,
+) -> Int32 {
   let m = if alen > blen { alen } else { blen }
   let mut i = m - 1
   while i >= 0 {
     let av = if i < alen { a[i] } else { 0UL }
     let bv = if i < blen { b[i] } else { 0UL }
     if av != bv {
-      if av < bv { return -1 } else { return 1 }
+      if av < bv {
+        return -1
+      } else {
+        return 1
+      }
     }
     i = i - 1
   }
   0
 }
 
-///| Subtract b from a in place. Requires a >= b.
+///|
+/// Subtract b from a in place. Requires a >= b.
 pub fn limbs64_sub(
   a : FixedArray[UInt64],
-  alen : Int,
+  alen : Int32,
   b : FixedArray[UInt64],
-  blen : Int
-) -> Int {
+  blen : Int32,
+) -> Int32 {
   let mut borrow : UInt64 = 0UL
   let mut i = 0
   while i < alen {
@@ -115,17 +134,19 @@ pub fn limbs64_sub(
   borrow.to_int()
 }
 
-///| Montgomery context: modulus + precomputed constants.
+///|
+/// Montgomery context: modulus + precomputed constants.
 pub struct MontCtx {
   n : FixedArray[UInt64]
-  k : Int              // number of 64-bit limbs
-  n_prime : UInt64     // -n^(-1) mod 2^64
-  r2 : FixedArray[UInt64]  // R^2 mod n, k limbs
+  k : Int32 // number of 64-bit limbs
+  n_prime : UInt64 // -n^(-1) mod 2^64
+  r2 : FixedArray[UInt64] // R^2 mod n, k limbs
 }
 
-///| Build a Montgomery context for an odd modulus given as k 64-bit limbs.
+///|
+/// Build a Montgomery context for an odd modulus given as k 64-bit limbs.
 ///   `n` must have exactly `k` limbs with n[k-1] != 0 and n odd.
-pub fn MontCtx::new(n : FixedArray[UInt64], k : Int) -> MontCtx {
+pub fn MontCtx::new(n : FixedArray[UInt64], k : Int32) -> MontCtx {
   let n0 = n[0]
   let n_prime = mont_n_prime(n0)
   // r2 = R^2 mod n, computed as: start c = R mod n, then square k times via
@@ -135,11 +156,12 @@ pub fn MontCtx::new(n : FixedArray[UInt64], k : Int) -> MontCtx {
   // Straightforward approach: c = 1; for i in 0..(2*64*k): c = (c*2) mod n.
   // That is O(k) doublings * 2*64*k iterations, fine since it runs once.
   let r2 = limbs64_compute_r2(n, k)
-  { n, k, n_prime, r2 }
+  { n, k, n_prime, r2, }
 }
 
-///| Compute R^2 mod n = 2^(128*k) mod n by repeated doubling.
-fn limbs64_compute_r2(n : FixedArray[UInt64], k : Int) -> FixedArray[UInt64] {
+///|
+/// Compute R^2 mod n = 2^(128*k) mod n by repeated doubling.
+fn limbs64_compute_r2(n : FixedArray[UInt64], k : Int32) -> FixedArray[UInt64] {
   let acc : FixedArray[UInt64] = FixedArray::make(k + 1, 0UL)
   acc[0] = 1UL
   let total_bits = 128 * k
@@ -170,7 +192,8 @@ fn limbs64_compute_r2(n : FixedArray[UInt64], k : Int) -> FixedArray[UInt64] {
   out
 }
 
-///| Core CIOS REDC: returns a * b * R^(-1) mod n.
+///|
+/// Core CIOS REDC: returns a * b * R^(-1) mod n.
 ///   `a` and `b` must already be reduced (< n) and padded to k limbs.
 ///
 ///   Performance note: the inner 64x64->128 multiply-accumulate is written out
@@ -182,7 +205,7 @@ fn limbs64_compute_r2(n : FixedArray[UInt64], k : Int) -> FixedArray[UInt64] {
 fn mont_cios(
   a : FixedArray[UInt64],
   b : FixedArray[UInt64],
-  ctx : MontCtx
+  ctx : MontCtx,
 ) -> FixedArray[UInt64] {
   let k = ctx.k
   let n = ctx.n
@@ -288,18 +311,24 @@ fn mont_cios(
   out
 }
 
-///| Raw Montgomery REDC primitive: returns a * b * R^(-1) mod n.
+///|
+/// Raw Montgomery REDC primitive: returns a * b * R^(-1) mod n.
 ///   Exposed for KAT cross-checks; normal code should use `MontCtx::mul`.
 pub fn MontCtx::redc(
   ctx : MontCtx,
   a : FixedArray[UInt64],
-  b : FixedArray[UInt64]
+  b : FixedArray[UInt64],
 ) -> FixedArray[UInt64] {
   mont_cios(a, b, ctx)
 }
 
-///| Montgomery multiplication: returns a * b mod n.
-pub fn MontCtx::mul(ctx : MontCtx, a : FixedArray[UInt64], b : FixedArray[UInt64]) -> FixedArray[UInt64] {
+///|
+/// Montgomery multiplication: returns a * b mod n.
+pub fn MontCtx::mul(
+  ctx : MontCtx,
+  a : FixedArray[UInt64],
+  b : FixedArray[UInt64],
+) -> FixedArray[UInt64] {
   let k = ctx.k
   // Convert to Montgomery domain: aR = REDC(a, R^2)
   let aR = mont_cios(a, ctx.r2, ctx)
@@ -312,30 +341,39 @@ pub fn MontCtx::mul(ctx : MontCtx, a : FixedArray[UInt64], b : FixedArray[UInt64
   mont_cios(abR, one, ctx)
 }
 
-///| Montgomery-domain value of aR for a (used to enter/exit the domain).
-pub fn MontCtx::to_mont(ctx : MontCtx, a : FixedArray[UInt64]) -> FixedArray[UInt64] {
+///|
+/// Montgomery-domain value of aR for a (used to enter/exit the domain).
+pub fn MontCtx::to_mont(
+  ctx : MontCtx,
+  a : FixedArray[UInt64],
+) -> FixedArray[UInt64] {
   mont_cios(a, ctx.r2, ctx)
 }
 
-///| Convert out of Montgomery domain.
-pub fn MontCtx::from_mont(ctx : MontCtx, aR : FixedArray[UInt64]) -> FixedArray[UInt64] {
+///|
+/// Convert out of Montgomery domain.
+pub fn MontCtx::from_mont(
+  ctx : MontCtx,
+  aR : FixedArray[UInt64],
+) -> FixedArray[UInt64] {
   let k = ctx.k
   let one : FixedArray[UInt64] = FixedArray::make(k, 0UL)
   one[0] = 1UL
   mont_cios(aR, one, ctx)
 }
 
-///| Montgomery exponentiation: returns a^e mod n via square-and-multiply.
+///|
+/// Montgomery exponentiation: returns a^e mod n via square-and-multiply.
 ///   Operates entirely in the Montgomery domain.
 pub fn MontCtx::pow(
   ctx : MontCtx,
   a : FixedArray[UInt64],
-  e : FixedArray[UInt64]
+  e : FixedArray[UInt64],
 ) -> FixedArray[UInt64] {
   let k = ctx.k
   let one : FixedArray[UInt64] = FixedArray::make(k, 0UL)
   one[0] = 1UL
-  let oneR = mont_cios(one, ctx.r2, ctx)  // 1 * R mod n
+  let oneR = mont_cios(one, ctx.r2, ctx) // 1 * R mod n
 
   let bits = limbs64_bit_length(e, k)
   let mut result = oneR
@@ -354,8 +392,9 @@ pub fn MontCtx::pow(
   MontCtx::from_mont(ctx, result)
 }
 
-///| Bit length of a little-endian 64-bit limb array.
-pub fn limbs64_bit_length(l : FixedArray[UInt64], len : Int) -> Int {
+///|
+/// Bit length of a little-endian 64-bit limb array.
+pub fn limbs64_bit_length(l : FixedArray[UInt64], len : Int32) -> Int32 {
   let mut i = len - 1
   while i >= 0 {
     let v = l[i]

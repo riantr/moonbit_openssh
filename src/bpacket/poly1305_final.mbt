@@ -13,20 +13,20 @@
 ///|
 /// 返回 16 字节 tag
 pub fn finalize(
-  h0 : UInt,
-  h1 : UInt,
-  h2 : UInt,
-  h3 : UInt,
-  h4 : UInt,
+  h0 : UInt32,
+  h1 : UInt32,
+  h2 : UInt32,
+  h3 : UInt32,
+  h4 : UInt32,
   s : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   // 第一轮:carry propagation(让每个 limb < 2^26)
-  let mut hh0 : UInt = h0
-  let mut hh1 : UInt = h1
-  let mut hh2 : UInt = h2
-  let mut hh3 : UInt = h3
-  let mut hh4 : UInt = h4
-  let mut b : UInt = hh0 >> 26
+  let mut hh0 : UInt32 = h0
+  let mut hh1 : UInt32 = h1
+  let mut hh2 : UInt32 = h2
+  let mut hh3 : UInt32 = h3
+  let mut hh4 : UInt32 = h4
+  let mut b : UInt32 = hh0 >> 26
   hh0 = hh0 & 0x3ffffffU
   hh1 = hh1 + b
   b = hh1 >> 26
@@ -47,20 +47,20 @@ pub fn finalize(
 
   // 现在 hh < 2^130 严格(mod p 的归一化完成)
   // 计算 g = hh + 2^130 - 5(注意 OpenBSD 写法是 h + 5 然后 carry 到 limb 4 减 1<<26)
-  let mut g0 : UInt = hh0 + 5U
-  let mut b2 : UInt = g0 >> 26
+  let mut g0 : UInt32 = hh0 + 5U
+  let mut b2 : UInt32 = g0 >> 26
   g0 = g0 & 0x3ffffffU
-  let mut g1 : UInt = hh1 + b2
+  let mut g1 : UInt32 = hh1 + b2
   b2 = g1 >> 26
   g1 = g1 & 0x3ffffffU
-  let mut g2 : UInt = hh2 + b2
+  let mut g2 : UInt32 = hh2 + b2
   b2 = g2 >> 26
   g2 = g2 & 0x3ffffffU
-  let mut g3 : UInt = hh3 + b2
+  let mut g3 : UInt32 = hh3 + b2
   b2 = g3 >> 26
   g3 = g3 & 0x3ffffffU
   // g4 = h4 + b - (1 << 26)
-  let g4 : UInt = hh4 + b2 - 0x4000000U
+  let g4 : UInt32 = hh4 + b2 - 0x4000000U
 
   // CONSTANT-TIME 选择:如果 h >= p,选 g(= h - p);否则选 h
   // b = (g4 >> 31) - 1
@@ -70,13 +70,13 @@ pub fn finalize(
   //   g4 <  0x4000000 时 >>31 = 1, b = 0
   // 我们要 h >= p 时选 g
   //   h >= p => h4 >= 0x4000000 => g4 >= 0 => b = -1 => 选 g  ✓
-  let sel : UInt = (g4 >> 31) - 1U
-  let nb : UInt = sel ^ 0xFFFFFFFFU // ~sel(UInt 取反 = XOR 0xFFFFFFFF)
-  let f0_limb : UInt = (hh0 & nb) | (g0 & sel)
-  let f1_limb : UInt = (hh1 & nb) | (g1 & sel)
-  let f2_limb : UInt = (hh2 & nb) | (g2 & sel)
-  let f3_limb : UInt = (hh3 & nb) | (g3 & sel)
-  let f4_limb : UInt = (hh4 & nb) | (g4 & sel)
+  let sel : UInt32 = (g4 >> 31) - 1U
+  let nb : UInt32 = sel ^ 0xFFFFFFFFU // ~sel(UInt 取反 = XOR 0xFFFFFFFF)
+  let f0_limb : UInt32 = (hh0 & nb) | (g0 & sel)
+  let f1_limb : UInt32 = (hh1 & nb) | (g1 & sel)
+  let f2_limb : UInt32 = (hh2 & nb) | (g2 & sel)
+  let f3_limb : UInt32 = (hh3 & nb) | (g3 & sel)
+  let f4_limb : UInt32 = (hh4 & nb) | (g4 & sel)
 
   // 重组:f[k] = (f[k] | (f[k+1] << 26))  (调整 shift)
   // 实际 OpenBSD:
@@ -114,7 +114,7 @@ pub fn finalize(
 
 ///|
 /// 把 UInt 按 little-endian 写入 FixedArray[Byte] 的指定偏移
-fn put_u32_le(bytes : FixedArray[Byte], offset : Int, value : UInt) -> Unit {
+fn put_u32_le(bytes : FixedArray[Byte], offset : Int32, value : UInt32) -> Unit {
   bytes[offset] = ((value >> 0) & 0xFFU).to_byte()
   bytes[offset + 1] = ((value >> 8) & 0xFFU).to_byte()
   bytes[offset + 2] = ((value >> 16) & 0xFFU).to_byte()

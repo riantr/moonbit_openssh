@@ -1,11 +1,12 @@
 ///| RSA host key verify + sign (Loop #27 G3; Loop #38 generalised the digest)
 
-///| SHA-256 DigestInfo prefix. RFC 8017 §9.2 note 1 / RFC 6234:
+///|
+/// SHA-256 DigestInfo prefix. RFC 8017 §9.2 note 1 / RFC 6234:
 ///   SEQUENCE { SEQUENCE { OID id-sha256 (2.16.840.1.101.3.4.2.1), NULL }
 ///              OCTET STRING (32 bytes) }
 let sha256_digest_info_prefix : FixedArray[Byte] = FixedArray::from_array([
-  0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
-  0x00, 0x04, 0x20,
+  0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+  0x01, 0x05, 0x00, 0x04, 0x20,
 ])
 
 ///|
@@ -19,18 +20,20 @@ let sha256_digest_info_prefix : FixedArray[Byte] = FixedArray::from_array([
 /// than something to rely on: the parser takes the prefix as an argument
 /// instead of assuming a length.
 let sha512_digest_info_prefix : FixedArray[Byte] = FixedArray::from_array([
-  0x30, 0x51, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
-  0x00, 0x04, 0x40,
+  0x30, 0x51, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+  0x03, 0x05, 0x00, 0x04, 0x40,
 ])
 
-///| 摘要选择(RFC 8017 允许的、SSH 主机密钥实际用到的两个)
-pub const RSA_DIGEST_SHA256 : Int = 1
+///|
+/// 摘要选择(RFC 8017 允许的、SSH 主机密钥实际用到的两个)
+pub const RSA_DIGEST_SHA256 : Int32 = 1
 
 ///|
-pub const RSA_DIGEST_SHA512 : Int = 2
+pub const RSA_DIGEST_SHA512 : Int32 = 2
 
-///| DigestInfo 前缀;未知摘要返回 None
-pub fn rsa_digest_info_prefix(digest : Int) -> FixedArray[Byte]? {
+///|
+/// DigestInfo 前缀;未知摘要返回 None
+pub fn rsa_digest_info_prefix(digest : Int32) -> FixedArray[Byte]? {
   if digest == RSA_DIGEST_SHA512 {
     Some(sha512_digest_info_prefix)
   } else if digest == RSA_DIGEST_SHA256 {
@@ -40,8 +43,9 @@ pub fn rsa_digest_info_prefix(digest : Int) -> FixedArray[Byte]? {
   }
 }
 
-///| 对消息取指定摘要
-pub fn rsa_digest(msg : FixedArray[Byte], digest : Int) -> FixedArray[Byte]? {
+///|
+/// 对消息取指定摘要
+pub fn rsa_digest(msg : FixedArray[Byte], digest : Int32) -> FixedArray[Byte]? {
   if digest == RSA_DIGEST_SHA512 {
     Some(@sha512.sha512(msg))
   } else if digest == RSA_DIGEST_SHA256 {
@@ -57,7 +61,7 @@ pub fn rsa_digest(msg : FixedArray[Byte], digest : Int) -> FixedArray[Byte]? {
 /// 这一条以前没查,所以一条填充短于 8 字节的签名也会被放行。OpenSSL 的
 /// `RSA_verify` 会拒绝这种编码,所以我们过去比 C 更宽松——这种方向的偏差
 /// 只有在对拍一个刻意构造的畸形签名时才会露出来。
-pub const RSA_PKCS1_MIN_FF : Int = 8
+pub const RSA_PKCS1_MIN_FF : Int32 = 8
 
 ///|
 /// Parse PKCS#1 v1.5 padded RSA signature bytes, given the DigestInfo prefix.
@@ -72,9 +76,15 @@ pub fn rsa_parse_pkcs1_prefix(
   prefix : FixedArray[Byte],
   hash : FixedArray[Byte],
 ) -> Bool {
-  if em.length() < 3 { return false }
-  if em[0] != b'\x00' { return false }
-  if em[1] != b'\x01' { return false }
+  if em.length() < 3 {
+    return false
+  }
+  if em[0] != b'\x00' {
+    return false
+  }
+  if em[1] != b'\x01' {
+    return false
+  }
   // Find 0x00 separator after 0xFF padding
   let mut i = 2
   let mut found_zero = false
@@ -90,12 +100,18 @@ pub fn rsa_parse_pkcs1_prefix(
       i = i + 1
       break
     }
-    if em[i] != b'\xFF' { return false }
+    if em[i] != b'\xFF' {
+      return false
+    }
     i = i + 1
   }
-  if !found_zero { return false }
+  if !found_zero {
+    return false
+  }
   let t_len = prefix.length() + hash.length()
-  if i > em.length() - t_len { return false }
+  if i > em.length() - t_len {
+    return false
+  }
   // Check DigestInfo prefix at position i
   let mut k = 0
   while k < prefix.length() {
@@ -115,7 +131,8 @@ pub fn rsa_parse_pkcs1_prefix(
   true
 }
 
-///| SHA-256 的 `rsa_parse_pkcs1`(保留给既有调用方)
+///|
+/// SHA-256 的 `rsa_parse_pkcs1`(保留给既有调用方)
 pub fn rsa_parse_pkcs1(em : FixedArray[Byte], hash : FixedArray[Byte]) -> Bool {
   rsa_parse_pkcs1_prefix(em, sha256_digest_info_prefix, hash)
 }
@@ -126,7 +143,12 @@ pub fn rsa_parse_pkcs1(em : FixedArray[Byte], hash : FixedArray[Byte]) -> Bool {
 ///   Uses the Montgomery fast path (see `bigint/mont64.mbt`) for odd moduli,
 ///   which is every real RSA modulus. `verify.mbt` was last measured at
 ///   ~0.3 ms per 2048-bit verify, down from ~7.7 ms on the schoolbook path.
-pub fn rsa_verify_pkcs1_sha256(n : @bigint.BigNat, e : @bigint.BigNat, sig : FixedArray[Byte], msg : FixedArray[Byte]) -> Bool {
+pub fn rsa_verify_pkcs1_sha256(
+  n : @bigint.BigNat,
+  e : @bigint.BigNat,
+  sig : FixedArray[Byte],
+  msg : FixedArray[Byte],
+) -> Bool {
   rsa_verify_pkcs1(n, e, sig, msg, RSA_DIGEST_SHA256)
 }
 
@@ -142,7 +164,7 @@ pub fn rsa_verify_pkcs1(
   e : @bigint.BigNat,
   sig : FixedArray[Byte],
   msg : FixedArray[Byte],
-  digest : Int,
+  digest : Int32,
 ) -> Bool {
   let sig_big = @bigint.BigNat::from_bytes_be(sig)
   let m = @bigint.BigNat::mod_pow_auto(sig_big, e, n)
@@ -164,11 +186,12 @@ pub fn rsa_verify_pkcs1(
   }
 }
 
-///| 摘要 + 前缀一起取,任一未知则 None
+///|
+/// 摘要 + 前缀一起取,任一未知则 None
 fn rsa_parse_prefixed(
   em : FixedArray[Byte],
   msg : FixedArray[Byte],
-  digest : Int,
+  digest : Int32,
 ) -> Bool? {
   match rsa_digest_info_prefix(digest) {
     None => None
@@ -180,7 +203,8 @@ fn rsa_parse_prefixed(
   }
 }
 
-///| RSA verify with a pre-built Montgomery context.
+///|
+/// RSA verify with a pre-built Montgomery context.
 ///
 ///   An SSH session pins one host key, so `n'` and `R^2` can be computed once
 ///   and reused for every verification instead of once per call.
@@ -190,7 +214,7 @@ pub fn rsa_verify_ctx(
   e : @bigint.BigNat,
   sig : FixedArray[Byte],
   msg : FixedArray[Byte],
-  digest : Int,
+  digest : Int32,
 ) -> Bool {
   let sig_big = @bigint.BigNat::from_bytes_be(sig)
   let m = @bigint.mont_pow_with(ctx, sig_big, e)
@@ -212,8 +236,13 @@ pub fn rsa_verify_ctx(
   }
 }
 
-///| RSA sign PKCS#1 v1.5 for SHA-256
-pub fn rsa_sign_pkcs1_sha256(n : @bigint.BigNat, d : @bigint.BigNat, msg : FixedArray[Byte]) -> FixedArray[Byte] {
+///|
+/// RSA sign PKCS#1 v1.5 for SHA-256
+pub fn rsa_sign_pkcs1_sha256(
+  n : @bigint.BigNat,
+  d : @bigint.BigNat,
+  msg : FixedArray[Byte],
+) -> FixedArray[Byte] {
   let hash = @sha256.sha256(msg)
   let modulus_byte_len = (n.bit_length() + 7) / 8
   let t_len = sha256_digest_info_prefix.length() + hash.length()
@@ -225,7 +254,7 @@ pub fn rsa_sign_pkcs1_sha256(n : @bigint.BigNat, d : @bigint.BigNat, msg : Fixed
   em[1] = b'\x01'
   // em[2..2+ps_len-1] = 0xFF (padding) -- already 0 since we initialized to 0!
   // Wait, need 0xFF. Fix: initialize to 0xFF.
-  let _ = ps_len  // ps_len unused if pre-init; let me keep it consistent
+  let _ = ps_len // ps_len unused if pre-init; let me keep it consistent
   let em2 : FixedArray[Byte] = FixedArray::make(modulus_byte_len, b'\xFF')
   em2[0] = b'\x00'
   em2[1] = b'\x01'

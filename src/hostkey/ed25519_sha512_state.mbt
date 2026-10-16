@@ -4,11 +4,11 @@
 
 ///|
 /// 单个 block 长度,字节 (= 1024 bits = 16 × 64-bit words)
-pub let block_len : Int = 128
+pub let block_len : Int32 = 128
 
 ///|
 /// 哈希输出长度,字节 (= 512 bits = 8 × 64-bit words)
-pub let hash_len : Int = 64
+pub let hash_len : Int32 = 64
 
 ///| 80 轮 compression 的 K 常量(取自前 80 个素数立方根的小数部分前 64 bit)
 

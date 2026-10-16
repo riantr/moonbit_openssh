@@ -1,23 +1,39 @@
 ///| 主机证书验证（sshkey.c sshkey_cert_check_authority）
 ///
+
 ///| 一张证书能代替一把裸主机密钥，条件有六条，少一条都不行：
 ///
+
 ///|   1. 证书的 signature key 字段**字节等于**我们 pin 的那把 CA 公钥
+
 ///|   2. CA 对 signed_data 的签名成立（signed_data 含类型名与 signature key 字段，
+
 ///|      见 cert.mbt；**不是** nonce..reserved）
+
 ///|   3. cert type 是 host（不是 user）
+
 ///|   4. now 落在 [valid_after, valid_before] 里
+
 ///|   5. principal 列表为空（对所有 principal 有效）或包含这台主机
+
 ///|   6. critical options 为空
 ///
+
 ///| **检查顺序是刻意的：CA 验签排在所有语义检查之前。** 证书里每一个字段都是
+
 ///| 对端给的，在验签通过之前它们全是不可信的输入。先看 cert type 再验签，听起来
+
 ///| 只是「错误信息更好看」，但它会在验签之前把对端的字节喂进分支判断；而且这种
+
 ///| 顺序一旦被后人「优化」过就没有任何测试会红——因为每一条检查各自都还是绿的。
+
 ///| 所以这里把它写成一条不可协商的规则：验签不过，后面一个字段都不读。
 ///
+
 ///| 时钟由调用方传入。本包没有时间源，而有效期判定必须可重放：门禁要在同一天
+
 ///| 反复跑「过期证书必须被拒」，能读到墙上时钟的话这条断言在写出来当天之后就
+
 ///| 永远为真了，等于没有。
 
 ///|
@@ -52,10 +68,7 @@ pub(all) enum CertVerdict {
 
 ///|
 /// 字节相等
-fn cert_bytes_eq(
-  a : FixedArray[Byte],
-  b : FixedArray[Byte],
-) -> Bool {
+fn cert_bytes_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
   if a.length() != b.length() {
     return false
   }
@@ -81,9 +94,13 @@ fn sig_blob_alg(sig : FixedArray[Byte]) -> String {
 ///|
 /// 验一张主机证书
 ///
+
 ///| `ca_blob` 是 known_hosts 里 `@cert-authority` 那一行的 blob（可信输入）；
+
 ///| `principal` 是我们要连的那台主机的名字，即证书必须声称的主机名；
-///| `now` 是 Unix 秒，由调用方注入。
+
+///|
+/// `now` 是 Unix 秒，由调用方注入。
 pub fn verify_host_cert(
   cert_blob : FixedArray[Byte],
   ca_blob : FixedArray[Byte],
@@ -111,7 +128,8 @@ pub fn verify_host_cert(
   if !HostKey::agrees_with_alg(ca_key, alg) {
     return CertVerdict::Rejected(CaSignatureInvalid)
   }
-  match HostKey::verify_with_alg(ca_key, cert.signed_data, cert.signature, alg) {
+  match
+    HostKey::verify_with_alg(ca_key, cert.signed_data, cert.signature, alg) {
     Rejected(_) => return CertVerdict::Rejected(CaSignatureInvalid)
     Accepted => ()
   }

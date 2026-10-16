@@ -1,8 +1,10 @@
 ///| WebTransport Socket (wasm-gc target)
+
 ///|
 /// Loop #21: MoonBit extern 接口 ready
 /// 浏览器 host shim 实现 WebTransport API + bidirectional stream
 /// Node.js 没有原生 HTTP/3,留 Loop #22+ 接 cloudflare/quiche
+
 ///|
 /// 与 ws_socket 同模式:用 Int + 长度而非 FixedArray[Byte]
 /// host shim 直接读 wasm 内存 offset 处 N 个字节
@@ -10,7 +12,7 @@
 ///|
 /// 真 WebTransport Socket
 pub struct WtSocket {
-  handle : Int
+  handle : Int32
   mut closed : Bool
 }
 
@@ -18,7 +20,8 @@ pub struct WtSocket {
 /// 写入 buffer (固定 wasm 内存 offset 0..4096)
 let wt_buf : FixedArray[Byte] = FixedArray::make(4096, b'\x00')
 
-fn wt_buf_write(bytes : FixedArray[Byte]) -> Int {
+///|
+fn wt_buf_write(bytes : FixedArray[Byte]) -> Int32 {
   let len = if bytes.length() > 4096 { 4096 } else { bytes.length() }
   for i = 0; i < len; i = i + 1 {
     wt_buf[i] = bytes[i]
@@ -41,7 +44,7 @@ fn ascii_bytes(s : String) -> FixedArray[Byte] {
 pub fn WtSocket::connect(url : String) -> WtSocket {
   let url_len = wt_buf_write(ascii_bytes(url))
   let handle = wt_connect_extern(0, url_len)
-  { handle, closed: false }
+  { handle, closed: false, }
 }
 
 ///|
@@ -54,7 +57,7 @@ pub fn WtSocket::send(self : WtSocket, bytes : FixedArray[Byte]) -> Unit {
 }
 
 ///|
-pub fn WtSocket::read_n(self : WtSocket, n : Int) -> FixedArray[Byte] {
+pub fn WtSocket::read_n(self : WtSocket, n : Int32) -> FixedArray[Byte] {
   if self.closed {
     abort("WtSocket::read_n: closed")
   }
@@ -77,14 +80,21 @@ pub fn WtSocket::close(self : WtSocket) -> Unit {
 
 ///|
 /// host shim imports (浏览器 WebTransport API)
-extern "wasm" fn wt_connect_extern(url_ptr : Int, url_len : Int) -> Int =
-  "moonbit_wt" "wt_connect"
+extern "wasm" fn wt_connect_extern(url_ptr : Int32, url_len : Int32) -> Int32 = "moonbit_wt" "wt_connect"
 
-extern "wasm" fn wt_send_extern(handle : Int, bytes_ptr : Int, len : Int) -> Int =
-  "moonbit_wt" "wt_send"
+///|
+extern "wasm" fn wt_send_extern(
+  handle : Int32,
+  bytes_ptr : Int32,
+  len : Int32,
+) -> Int32 = "moonbit_wt" "wt_send"
 
-extern "wasm" fn wt_recv_into_extern(handle : Int, out_ptr : Int, n : Int) -> Int =
-  "moonbit_wt" "wt_recv_into"
+///|
+extern "wasm" fn wt_recv_into_extern(
+  handle : Int32,
+  out_ptr : Int32,
+  n : Int32,
+) -> Int32 = "moonbit_wt" "wt_recv_into"
 
-extern "wasm" fn wt_close_extern(handle : Int) -> Int =
-  "moonbit_wt" "wt_close"
+///|
+extern "wasm" fn wt_close_extern(handle : Int32) -> Int32 = "moonbit_wt" "wt_close"

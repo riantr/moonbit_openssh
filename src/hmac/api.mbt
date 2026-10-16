@@ -24,11 +24,11 @@
 
 ///|
 /// HMAC-SHA256 块大小(等于 SHA-256 block_size)
-pub let block_size : Int = 64
+pub let block_size : Int32 = 64
 
 ///|
 /// HMAC-SHA256 输出长度(等于 SHA-256 hash_size = 32)
-pub let output_size : Int = 32
+pub let output_size : Int32 = 32
 
 ///|
 /// ipad 常量

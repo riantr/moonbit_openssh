@@ -20,7 +20,7 @@ pub fn x25519(
   }
 
   // 1. 准备 scalar e[32](clamp per RFC 7748 § 5)
-  let e : FixedArray[UInt] = FixedArray::make(32, 0U)
+  let e : FixedArray[UInt32] = FixedArray::make(32, 0U)
   for i = 0; i < 32; i = i + 1 {
     e[i] = scalar[i].to_uint()
   }
@@ -29,7 +29,7 @@ pub fn x25519(
   e[31] = e[31] | 64U // 置 bit 6
 
   // 2. 准备 work[64] = (P_x, P_z=1)
-  let work : FixedArray[UInt] = FixedArray::make(64, 0U)
+  let work : FixedArray[UInt32] = FixedArray::make(64, 0U)
   for i = 0; i < 32; i = i + 1 {
     work[i] = point[i].to_uint()
   }
@@ -43,7 +43,7 @@ pub fn x25519(
   recip_from(work, 32)
 
   // 5. mult: x * z^(-1) → work[64..96]
-  let result : FixedArray[UInt] = FixedArray::make(32, 0U)
+  let result : FixedArray[UInt32] = FixedArray::make(32, 0U)
   fe_mult(result, work, slice_at(work, 32))
 
   // 6. freeze: mod p 归约
@@ -59,12 +59,12 @@ pub fn x25519(
 
 ///|
 /// recip 但带偏移(输入输出在 work[offset..offset+32))
-fn recip_from(work : FixedArray[UInt], offset : Int) -> Unit {
-  let z : FixedArray[UInt] = FixedArray::make(32, 0U)
+fn recip_from(work : FixedArray[UInt32], offset : Int32) -> Unit {
+  let z : FixedArray[UInt32] = FixedArray::make(32, 0U)
   for j = 0; j < 32; j = j + 1 {
     z[j] = work[offset + j]
   }
-  let out : FixedArray[UInt] = FixedArray::make(32, 0U)
+  let out : FixedArray[UInt32] = FixedArray::make(32, 0U)
   recip(out, z)
   for j = 0; j < 32; j = j + 1 {
     work[offset + j] = out[j]
@@ -73,8 +73,8 @@ fn recip_from(work : FixedArray[UInt], offset : Int) -> Unit {
 
 ///|
 /// 辅助:复制 FixedArray[UInt] 一段
-fn slice_at(src : FixedArray[UInt], offset : Int) -> FixedArray[UInt] {
-  let dst : FixedArray[UInt] = FixedArray::make(32, 0U)
+fn slice_at(src : FixedArray[UInt32], offset : Int32) -> FixedArray[UInt32] {
+  let dst : FixedArray[UInt32] = FixedArray::make(32, 0U)
   for j = 0; j < 32; j = j + 1 {
     dst[j] = src[offset + j]
   }

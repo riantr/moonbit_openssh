@@ -17,14 +17,14 @@
 ///|
 /// 返回:加 block 后的新 h
 pub fn add_block(
-  h0 : UInt,
-  h1 : UInt,
-  h2 : UInt,
-  h3 : UInt,
-  h4 : UInt,
+  h0 : UInt32,
+  h1 : UInt32,
+  h2 : UInt32,
+  h3 : UInt32,
+  h4 : UInt32,
   block : FixedArray[Byte],
   is_last : Bool,
-) -> (UInt, UInt, UInt, UInt, UInt) {
+) -> (UInt32, UInt32, UInt32, UInt32, UInt32) {
   // 把 16 字节读为 4 个 u32(若是部分 block,需先 pad)
   // 完整 block:is_last=false 或 block.length() == 16
   // 部分 block:block.length() < 16,is_last 必须 = true
@@ -61,14 +61,14 @@ pub fn add_block(
   // h2 = (m >> 52) & 0x3ffffff
   // h3 = (m >> 78) & 0x3ffffff
   // h4 = m >> 104
-  let new_h0 : UInt = h0 + (t0 & 0x3ffffffU)
+  let new_h0 : UInt32 = h0 + (t0 & 0x3ffffffU)
   let m_low_64 : UInt64 = (t1.to_uint64() << 32) | t0.to_uint64()
-  let new_h1 : UInt = h1 + ((m_low_64 >> 26) & 0x3ffffffUL).to_uint()
+  let new_h1 : UInt32 = h1 + ((m_low_64 >> 26) & 0x3ffffffUL).to_uint()
   let m_mid_64 : UInt64 = (t2.to_uint64() << 32) | t1.to_uint64()
-  let new_h2 : UInt = h2 + ((m_mid_64 >> 20) & 0x3ffffffUL).to_uint()
+  let new_h2 : UInt32 = h2 + ((m_mid_64 >> 20) & 0x3ffffffUL).to_uint()
   let m_high_64 : UInt64 = (t3.to_uint64() << 32) | t2.to_uint64()
-  let new_h3 : UInt = h3 + ((m_high_64 >> 14) & 0x3ffffffUL).to_uint()
-  let mut new_h4 : UInt = h4 + (t3 >> 8)
+  let new_h3 : UInt32 = h3 + ((m_high_64 >> 14) & 0x3ffffffUL).to_uint()
+  let mut new_h4 : UInt32 = h4 + (t3 >> 8)
   if set_high_bit {
     new_h4 = new_h4 + 0x1000000U // 1 << 24
   }

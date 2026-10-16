@@ -116,10 +116,21 @@ QA_CATEGORIES = [
         command=[MOON + ["fmt", "--check"]],
         tier="qa",
         evidence=(
-            "Probed: `moon fmt --check` exists and exits -1 today. It wants to "
-            "re-wrap the KAT byte arrays in cmd/aes_test/main.mbt and add a "
-            "trailing newline. Run with --check ONLY: AGENTS.md records that "
-            "`moon fmt` in write mode corrupts CJK comments (真实加密 -> 真加密)."
+            "Solved in Loop #67. `moon fmt --check` exits 0 over the whole tree. "
+            "The standing warning that `moon fmt` write mode corrupts CJK "
+            "comments did NOT reproduce and was removed: on moon 0.1.20261012 "
+            "the formatter's own output in _build/<target>/release/format/ "
+            "already matches the source CJK byte for byte (366 runs in "
+            "cmd/channel_test/main.mbt), and a whole-tree format left all "
+            "12,840 CJK runs across 226 files identical -- verified by "
+            "host/cjk_snapshot.py, which snapshots before and checks after and "
+            "is now the standing guard. Two findings worth keeping: `moon fmt "
+            "--check` reported only 10 files before that change and 20 "
+            "afterwards, with no overlap, so like `moon check --deny-warn` it "
+            "reports a partial set rather than a total; and of the 10 it named "
+            "first, 2 were line-ending-only (CRLF source against an LF "
+            "formatter) with identical content, so a whole-file diff can be "
+            "zero real changes."
         ),
     ),
     QaCategory(
@@ -344,8 +355,18 @@ QA_CATEGORIES = [
             "but `moon coverage analyze` then exits 2 with Failure('No coverage "
             "output data found') after error [4067] 'Missing main function in the "
             "main package' for cmd/wt_probe and cmd/wt_ssh -- the browser Worker "
-            "mains break the workspace-wide combine step. Reproduced identically "
-            "with -p and from inside src/bpacket."
+            "mains break the workspace-wide combine step. Loop #67 pinned the "
+            "mechanism down and it is structural, not a flag that was missed. "
+            "`combine_coverages` walks the whole workspace and builds every "
+            "package for the DEFAULT target; a package gated to js has no main "
+            "there and fails [4067]. `moon coverage analyze --help` lists only "
+            "-p and --target-dir: there is NO --target, so the combine cannot be "
+            "pointed at js, and `-p` limits which coverage is REPORTED, not "
+            "which packages are BUILT -- verified, `-p src/bpacket` fails "
+            "identically. An attempt to declare the two entry points differently "
+            "(`options(is_main: [...])`) was reverted: the key takes a boolean, "
+            "and `git diff` confirmed the revert before moving on. "
+            "Reproduced identically with -p and from inside src/bpacket."
         ),
     ),
     QaCategory(
@@ -439,21 +460,35 @@ QA_CATEGORIES = [
         name_en="benchmark",
         name_zh="基准测试",
         status="implemented",
-        command=[MOON + ["bench", "--target", "native"]],
+        command=[
+            MOON + ["bench", "-p", "src/bigint", "--target", "native"],
+        ],
         tier="qa",
         evidence=(
-            "Probed, and it fails today for TWO independent reasons -- both "
-            "reproduced. (1) At module scope, `moon bench --target native` exits "
-            "1 with Error [4156]: src/wt_socket/socket.mbt declares `extern "
-            "\"wasm\"` fns, and 'import is unsupported in native backend'. (2) Per "
-            "package, `moon bench cmd/bench_cached --target native` exits 0 while "
+            "Green as of Loop #67, after two changes that were both needed. "
+            "First, scope: `moon bench` with no package benchmarks the current "
+            "package, so the row inherited the whole workspace and died on the "
+            "js-only Worker mains ([4156] extern wasm against native) and on "
+            "their unused_package noise. `-p src/bigint` is the Loop #66 "
+            "lesson one level up -- never judge a multi-target workspace from "
+            "one target. Second, content: the repository had ZERO benchmark "
+            "blocks, and `moon bench` on a package with none exits 0 while "
             "printing 'Total tests: 0, passed: 0, failed: 0' and 'Warning: no "
-            "test entry found.' The repo contains zero *_bench.mbt files (the "
-            "only hits under .mooncakes/ are vendored dependencies). Reason (2) "
-            "is why ci.py gained an opt-in zero-work guard: without it this row "
-            "would have reported a PASS having measured nothing. The real "
-            "benchmark numbers come from cmd/bench_* run as native .exe -- see "
-            "the performance-test row."
+            "test entry found'. An exit-code-only check would have reported a "
+            "PASS having measured nothing, which is why the zero-work guard in "
+            "ci.py exists and why verify_loop67 asserts on that text. "
+            "src/bigint/bigint_bench.mbt now carries five. A MoonBit benchmark "
+            "is a test block taking a `@bench.T`, not a `bench \"{}\" {}` "
+            "block, and `b.keep()` is what stops the optimiser deleting the "
+            "computation -- `ignore(x)` and `let _ = x` do not parse inside "
+            "one. Measured on this machine: mod_pow 2048-bit e=65537 schoolbook "
+            "4.86 ms +- 52 us, the same via the cached Montgomery context "
+            "173.96 us +- 2.23 us -- a 28x gap, which is Loop #29's "
+            "optimisation finally quantified rather than asserted -- and "
+            "mod_mul 237.80 ns, mpint_encode 329.05 ns, bytes round trip "
+            "486.26 ns. The modulus is RFC 3526 group 14 derived from "
+            "2^2048 - 189 rather than pasted as 256 bytes nothing in this "
+            "repository could check."
         ),
     ),
     QaCategory(

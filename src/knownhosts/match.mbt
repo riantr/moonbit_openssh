@@ -9,25 +9,27 @@
 // 用于 HMAC-SHA1(salt, host) 验证 |1| 条目。
 // 已知 moonshadow / moonbitlang/core@0.10.3 默认可能不启用 SHA-1。
 
-///| 32-bit 左循环
-fn rotl32(x : UInt, n : Int) -> UInt {
+///|
+/// 32-bit 左循环
+fn rotl32(x : UInt32, n : Int32) -> UInt32 {
   (x << n) | (x >> (32 - n))
 }
 
 ///|
 priv struct Sha1State {
-  mut h0 : UInt
-  mut h1 : UInt
-  mut h2 : UInt
-  mut h3 : UInt
-  mut h4 : UInt
+  mut h0 : UInt32
+  mut h1 : UInt32
+  mut h2 : UInt32
+  mut h3 : UInt32
+  mut h4 : UInt32
   // 消息缓冲（≤ 64 字节）
   buf : FixedArray[Byte]
-  mut buf_len : Int
+  mut buf_len : Int32
   mut total : UInt64
 }
 
-///| SHA-1 初始向量
+///|
+/// SHA-1 初始向量
 fn sha1_state_new() -> Sha1State {
   {
     h0: 0x67452301U,
@@ -41,16 +43,17 @@ fn sha1_state_new() -> Sha1State {
   }
 }
 
-///| SHA-1 块处理（512-bit = 64 字节）
+///|
+/// SHA-1 块处理（512-bit = 64 字节）
 fn sha1_process_block(state : Sha1State) -> Unit {
-  let w : FixedArray[UInt] = FixedArray::make(80, 0U)
+  let w : FixedArray[UInt32] = FixedArray::make(80, 0U)
   // 前 16 字：big-endian 读入
   for i = 0; i < 16; i = i + 1 {
     let off = i * 4
-    w[i] = ((state.buf[off].to_uint() << 24) |
-      ((state.buf[off + 1].to_uint() << 16)) |
-      ((state.buf[off + 2].to_uint() << 8)) |
-      state.buf[off + 3].to_uint())
+    w[i] = (state.buf[off].to_uint() << 24) |
+      (state.buf[off + 1].to_uint() << 16) |
+      (state.buf[off + 2].to_uint() << 8) |
+      state.buf[off + 3].to_uint()
   }
   // 扩展 16..80
   for i = 16; i < 80; i = i + 1 {
@@ -99,8 +102,9 @@ fn sha1_process_block(state : Sha1State) -> Unit {
   state.h4 = state.h4 + e
 }
 
-///| SHA-1 update（任意长度）
-fn sha1_update(state : Sha1State, data : FixedArray[Byte], len : Int) -> Unit {
+///|
+/// SHA-1 update（任意长度）
+fn sha1_update(state : Sha1State, data : FixedArray[Byte], len : Int32) -> Unit {
   state.total = state.total + len.to_uint64()
   let mut i = 0
   while i < len {
@@ -118,7 +122,8 @@ fn sha1_update(state : Sha1State, data : FixedArray[Byte], len : Int) -> Unit {
   }
 }
 
-///| SHA-1 finalize → 20 字节
+///|
+/// SHA-1 finalize → 20 字节
 fn sha1_final(state : Sha1State) -> FixedArray[Byte] {
   let bit_len = state.total * 8UL
   // padding: 0x80 then zeros, then 64-bit big-endian length
@@ -165,8 +170,9 @@ fn sha1_final(state : Sha1State) -> FixedArray[Byte] {
   out
 }
 
-///| SHA-1 一次性（RFC 3174 test vector："abc" → a9993e364706816aba3e25717850c26c9cd0d89d）
-pub fn sha1(data : FixedArray[Byte], len : Int) -> FixedArray[Byte] {
+///|
+/// SHA-1 一次性（RFC 3174 test vector："abc" → a9993e364706816aba3e25717850c26c9cd0d89d）
+pub fn sha1(data : FixedArray[Byte], len : Int32) -> FixedArray[Byte] {
   let state = sha1_state_new()
   sha1_update(state, data, len)
   sha1_final(state)
@@ -174,8 +180,13 @@ pub fn sha1(data : FixedArray[Byte], len : Int) -> FixedArray[Byte] {
 
 // ============================================================ HMAC-SHA1（RFC 2104）
 
-///| HMAC-SHA1(key, msg) → 20 字节
-pub fn hmac_sha1(key : FixedArray[Byte], msg : FixedArray[Byte], msg_len : Int) -> FixedArray[Byte] {
+///|
+/// HMAC-SHA1(key, msg) → 20 字节
+pub fn hmac_sha1(
+  key : FixedArray[Byte],
+  msg : FixedArray[Byte],
+  msg_len : Int32,
+) -> FixedArray[Byte] {
   let block_key : FixedArray[Byte] = FixedArray::make(64, b'\x00')
   if key.length() > 64 {
     // 长 key：先 SHA1
@@ -212,7 +223,8 @@ pub fn hmac_sha1(key : FixedArray[Byte], msg : FixedArray[Byte], msg_len : Int) 
 
 // ============================================================ base64 解码（用于 |1| 哈希条目的 salt/hash）
 
-///| 标准 base64 解码（与 OpenSSH b64_pton 兼容；不含 padding 时也接受）
+///|
+/// 标准 base64 解码（与 OpenSSH b64_pton 兼容；不含 padding 时也接受）
 pub fn b64_decode(s : String) -> FixedArray[Byte]? {
   let bytes : StringView = s
   let result = @base64.decode(bytes, ignore_whitespace=false) catch {
@@ -225,28 +237,43 @@ pub fn b64_decode(s : String) -> FixedArray[Byte]? {
   Some(arr)
 }
 
-///| 分隔符 `|` 的 ASCII 码（UInt16 形式的 char code）
-const HASH_DELIM_CODE : Int = 0x7C  // '|'
+///|
+/// 分隔符 `|` 的 ASCII 码（UInt16 形式的 char code）
+const HASH_DELIM_CODE : Int32 = 0x7C // '|'
 
-///| 检测字符串是否以 `|1|` 开头（哈希条目）
+///|
+/// 检测字符串是否以 `|1|` 开头（哈希条目）
 pub fn is_hashed_host(s : String) -> Bool {
-  if s.length() < 3 { return false }
-  s[0].to_int() == HASH_DELIM_CODE && s[1].to_int() == '1'.to_int() && s[2].to_int() == HASH_DELIM_CODE
+  if s.length() < 3 {
+    return false
+  }
+  s[0].to_int() == HASH_DELIM_CODE &&
+  s[1].to_int() == '1'.to_int() &&
+  s[2].to_int() == HASH_DELIM_CODE
 }
 
-///| 验证 `|1|<b64-salt>|<b64-hash>` 条目是否匹配 expected_host
+///|
+/// 验证 `|1|<b64-salt>|<b64-hash>` 条目是否匹配 expected_host
 /// 返回 true iff HMAC-SHA1(salt, expected_host) 与 hash 字节相等
-pub fn match_hashed_host(expected_host : String, hashed_pattern : String) -> Bool {
+pub fn match_hashed_host(
+  expected_host : String,
+  hashed_pattern : String,
+) -> Bool {
   // 格式：|1|<b64-salt>|<b64-hash>
   // 跳过 "|1|" 前缀
   let mut i = 3
   // 找第一个 '|'（分隔 salt 和 hash）
   let mut sep_pos = -1
   while i < hashed_pattern.length() {
-    if hashed_pattern[i].to_int() == HASH_DELIM_CODE { sep_pos = i; break }
+    if hashed_pattern[i].to_int() == HASH_DELIM_CODE {
+      sep_pos = i
+      break
+    }
     i = i + 1
   }
-  if sep_pos < 0 { return false }
+  if sep_pos < 0 {
+    return false
+  }
   let salt_b64 = hashed_pattern[3:sep_pos].to_owned()
   let hash_b64 = hashed_pattern[sep_pos + 1:hashed_pattern.length()].to_owned()
   let salt = match b64_decode(salt_b64) {
@@ -265,27 +292,37 @@ pub fn match_hashed_host(expected_host : String, hashed_pattern : String) -> Boo
   // 计算 HMAC-SHA1(salt, msg)
   let actual = hmac_sha1(salt, msg, msg.length())
   // 字节比较
-  if actual.length() != expected_hash.length() { return false }
+  if actual.length() != expected_hash.length() {
+    return false
+  }
   for i = 0; i < actual.length(); i = i + 1 {
-    if actual[i] != expected_hash[i] { return false }
+    if actual[i] != expected_hash[i] {
+      return false
+    }
   }
   true
 }
 
 // ============================================================ 通配符匹配（OpenSSH match.c:82-152 转写）
 
-///| NFA 通配符：`*` 零或多字符，`?` 单字符
+///|
+/// NFA 通配符：`*` 零或多字符，`?` 单字符
 /// MoonBit String indexing 返回 UInt16 码元，对 ASCII 输入安全。
-const STAR_CODE : Int = 42   // '*'
-const QMARK_CODE : Int = 63  // '?'
+const STAR_CODE : Int32 = 42 // '*'
 
+///|
+const QMARK_CODE : Int32 = 63 // '?'
+
+///|
 fn match_pattern_nfa(s : String, pattern : String) -> Bool {
   let m = pattern.length()
-  if m == 0 { return s.length() == 0 }
+  if m == 0 {
+    return s.length() == 0
+  }
   // states[i] = 1 表示在第 i 个 pattern 字符"状态"上活跃
   // states[m] 是接受状态（已匹配完整 pattern）
-  let states : FixedArray[Int] = FixedArray::make(m + 1, 0)
-  let next_states : FixedArray[Int] = FixedArray::make(m + 1, 0)
+  let states : FixedArray[Int32] = FixedArray::make(m + 1, 0)
+  let next_states : FixedArray[Int32] = FixedArray::make(m + 1, 0)
   states[0] = 1
   // epsilon 闭包：处理开头的 '*'
   epsilon_closure(states, pattern, m)
@@ -293,9 +330,13 @@ fn match_pattern_nfa(s : String, pattern : String) -> Bool {
   while si < s.length() {
     let sc = s[si].to_int()
     // 初始化 next_states
-    for k = 0; k <= m; k = k + 1 { next_states[k] = 0 }
+    for k = 0; k <= m; k = k + 1 {
+      next_states[k] = 0
+    }
     for i = 0; i < m; i = i + 1 {
-      if states[i] == 0 { continue }
+      if states[i] == 0 {
+        continue
+      }
       let pc = pattern[i].to_int()
       if pc == STAR_CODE {
         // '*' 匹配任意字符：保持在 i
@@ -307,20 +348,32 @@ fn match_pattern_nfa(s : String, pattern : String) -> Bool {
     }
     epsilon_closure(next_states, pattern, m)
     // swap
-    for k = 0; k <= m; k = k + 1 { states[k] = next_states[k] }
+    for k = 0; k <= m; k = k + 1 {
+      states[k] = next_states[k]
+    }
     // 检查是否有活跃状态
     let mut active = 0
     for i = 0; i <= m; i = i + 1 {
-      if states[i] == 1 { active = 1; break }
+      if states[i] == 1 {
+        active = 1
+        break
+      }
     }
-    if active == 0 { return false }
+    if active == 0 {
+      return false
+    }
     si = si + 1
   }
   states[m] == 1
 }
 
-///| 处理 '*' 的 epsilon 转移（"*" 可以零或多字符，所以可以跳到自己或后继）
-fn epsilon_closure(states : FixedArray[Int], pattern : String, m : Int) -> Unit {
+///|
+/// 处理 '*' 的 epsilon 转移（"*" 可以零或多字符，所以可以跳到自己或后继）
+fn epsilon_closure(
+  states : FixedArray[Int32],
+  pattern : String,
+  m : Int32,
+) -> Unit {
   // 反复处理直到不再有新状态
   let mut changed = true
   while changed {
@@ -338,7 +391,8 @@ fn epsilon_closure(states : FixedArray[Int], pattern : String, m : Int) -> Unit 
   }
 }
 
-///| 逗号分隔模式列表匹配（任一命中即返回 true）
+///|
+/// 逗号分隔模式列表匹配（任一命中即返回 true）
 pub fn match_host_pattern(host : String, pattern_list : String) -> Bool {
   let mut start = 0
   let mut i = 0
@@ -349,17 +403,20 @@ pub fn match_host_pattern(host : String, pattern_list : String) -> Bool {
         let trimmed = trim_ws(pat)
         if trimmed.length() > 0 {
           // 跳过 `!` 否定前缀（语义跳过，不强制）
-          let real = if trimmed.length() > 0 && trimmed[0].to_int() == '!'.to_int() {
+          let real = if trimmed.length() > 0 &&
+            trimmed[0].to_int() == '!'.to_int() {
             trimmed[1:trimmed.length()].to_owned()
           } else {
             trimmed
           }
           // 哈希条目检测
           if is_hashed_host(real) {
-            if match_hashed_host(host, real) { return true }
-          } else {
+            if match_hashed_host(host, real) {
+              return true
+            }
             // 普通通配符
-            if match_pattern_nfa(host, real) { return true }
+          } else if match_pattern_nfa(host, real) {
+            return true
           }
         }
       }
@@ -370,21 +427,28 @@ pub fn match_host_pattern(host : String, pattern_list : String) -> Bool {
   false
 }
 
-///| trim ASCII 空白（match.mbt 私有副本）
+///|
+/// trim ASCII 空白（match.mbt 私有副本）
 fn trim_ws(s : String) -> String {
   let mut start = 0
   let mut end = s.length()
   while start < end {
     let c = s[start].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     start = start + 1
   }
   while end > start {
     let c = s[end - 1].to_int()
-    if c != 0x20 && c != 0x09 { break }
+    if c != 0x20 && c != 0x09 {
+      break
+    }
     end = end - 1
   }
-  if start >= end { return "" }
+  if start >= end {
+    return ""
+  }
   s[start:end].to_owned()
 }
 
@@ -394,12 +458,15 @@ fn trim_ws(s : String) -> String {
 ///   split_host_str("foo.example.com")        -> ("foo.example.com", None)
 ///   split_host_str("[foo.example.com]:2200") -> ("foo.example.com", Some(2200))
 ///   split_host_str("[foo.example.com]")      -> ("foo.example.com", None)
-fn split_host_str(s : String) -> (String, Int?) {
+fn split_host_str(s : String) -> (String, Int32?) {
   if s.length() >= 2 && s[0].to_int() == '['.to_int() {
     let mut close = -1
     let mut j = 1
     while j < s.length() {
-      if s[j].to_int() == ']'.to_int() { close = j; break }
+      if s[j].to_int() == ']'.to_int() {
+        close = j
+        break
+      }
       j = j + 1
     }
     if close > 0 {

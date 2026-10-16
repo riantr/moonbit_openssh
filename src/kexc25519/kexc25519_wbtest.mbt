@@ -19,8 +19,8 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn hx(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hx(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {

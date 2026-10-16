@@ -16,6 +16,4 @@ import {
   "openssh/openssh_moonbit/src/sha256",
 }
 
-options(
-  is_main: true,
-)
+pkgtype(kind: "executable")

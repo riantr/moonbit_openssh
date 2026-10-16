@@ -10,7 +10,7 @@
 
 ///|
 /// C: S64(b, x) = (x >> b) | (x << (64 - b))
-pub fn rotr(n : Int, x : UInt64) -> UInt64 {
+pub fn rotr(n : Int32, x : UInt64) -> UInt64 {
   (x >> n) | (x << (64 - n))
 }
 
@@ -54,7 +54,7 @@ pub fn small_sigma1(x : UInt64) -> UInt64 {
 
 ///|
 /// SHA-512 内部用 BE 解析 input block
-pub fn be8_to_64(bytes : FixedArray[Byte], offset : Int) -> UInt64 {
+pub fn be8_to_64(bytes : FixedArray[Byte], offset : Int32) -> UInt64 {
   let b0 = bytes[offset].to_uint64()
   let b1 = bytes[offset + 1].to_uint64()
   let b2 = bytes[offset + 2].to_uint64()
@@ -77,7 +77,7 @@ pub fn be8_to_64(bytes : FixedArray[Byte], offset : Int) -> UInt64 {
 /// 把 UInt64 按 big-endian 写入 FixedArray[Byte] 的指定偏移
 pub fn be64_to_8(
   bytes : FixedArray[Byte],
-  offset : Int,
+  offset : Int32,
   value : UInt64,
 ) -> Unit {
   bytes[offset] = ((value >> 56) & 0xFFUL).to_byte()

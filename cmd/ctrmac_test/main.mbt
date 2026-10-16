@@ -27,7 +27,7 @@
 ///
 /// MoonBit 的 `String` 下标返回 `UInt16`(UTF-16 码元)而不是 `Char`,
 /// 所以这里按 `UInt16` 收参,不要想当然写成 `Char`。
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -313,7 +313,7 @@ fn one_byte(b : Byte) -> FixedArray[Byte] {
 
 ///|
 /// 造一个 buf[off..] 的视图(RecvCtx 消费的是「从包首开始的连续字节」)
-fn slice_from(buf : FixedArray[Byte], off : Int) -> FixedArray[Byte] {
+fn slice_from(buf : FixedArray[Byte], off : Int32) -> FixedArray[Byte] {
   let n = buf.length() - off
   let out : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {

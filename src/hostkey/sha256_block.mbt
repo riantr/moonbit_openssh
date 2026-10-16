@@ -13,11 +13,11 @@
 ///|
 /// C: SHA256Transform(state, data) — 64 轮后 state[0..7] += {a..h}
 pub fn s256_transform(
-  state : FixedArray[UInt],
-  block : FixedArray[UInt],
+  state : FixedArray[UInt32],
+  block : FixedArray[UInt32],
 ) -> Unit {
   // W[0..15] = block; W[16..63] = message schedule
-  let w : FixedArray[UInt] = FixedArray::make(64, 0U)
+  let w : FixedArray[UInt32] = FixedArray::make(64, 0U)
   for i = 0; i < 16; i = i + 1 {
     w[i] = block[i]
   }
@@ -40,8 +40,8 @@ pub fn s256_transform(
 
   // 64 轮
   for j = 0; j < 64; j = j + 1 {
-    let t1 : UInt = h + sigma1_big(e) + s256_ch(e, f, g) + k256[j] + w[j]
-    let t2 : UInt = sigma0_big(a) + s256_maj(a, b, c)
+    let t1 : UInt32 = h + sigma1_big(e) + s256_ch(e, f, g) + k256[j] + w[j]
+    let t2 : UInt32 = sigma0_big(a) + s256_maj(a, b, c)
     h = g
     g = f
     f = e

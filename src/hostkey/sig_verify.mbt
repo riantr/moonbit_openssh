@@ -138,7 +138,7 @@ pub fn is_verified(res : VerifyResult) -> Bool {
 /// 不支持而不是遗漏:OpenSSH 8.8 起默认关闭 `ssh-rsa`,而客户端若报了这个名字
 /// 却验不了,握手的失败点会被推迟到验签那一步,报错还会指向一个根本没选中的
 /// 算法。不报它,失败发生在协商阶段,信息准确得多。
-pub fn rsa_digest_of_sigtype(sigtype : String) -> Int? {
+pub fn rsa_digest_of_sigtype(sigtype : String) -> Int32? {
   if sigtype == "rsa-sha2-256" {
     Some(@rsa.RSA_DIGEST_SHA256)
   } else if sigtype == "rsa-sha2-512" {
@@ -154,7 +154,7 @@ pub fn rsa_digest_of_sigtype(sigtype : String) -> Int? {
 /// 非证书路径上它与 `rsa_digest_of_sigtype` 接受同样的名字,但 C 里是两个函数
 /// ——keyname 那份还接受 `*-cert-v01@openssh.com`。保持两个函数,是因为把
 /// 「签名类型」和「密钥类型」合成一个,正是 RFC 8332 存在之前最容易犯的那个错。
-pub fn rsa_digest_of_keyname(alg : String) -> Int? {
+pub fn rsa_digest_of_keyname(alg : String) -> Int32? {
   rsa_digest_of_sigtype(alg)
 }
 
@@ -164,7 +164,7 @@ pub fn rsa_digest_of_keyname(alg : String) -> Int? {
 /// RSA 这一项返回的是 `"ssh-rsa"`——**密钥 blob 里的类型串**,不是协商出的
 /// 算法名。报告里同时印着 `hostkey_alg` 和 `hostkey_type` 两个字段正是为了
 /// 让这个区别看得见:RFC 8332 下它们本来就不同,只有 `rsa-sha2-*` 那一栏会变。
-pub fn HostKey::describe(self : HostKey) -> (String, Int) {
+pub fn HostKey::describe(self : HostKey) -> (String, Int32) {
   match self {
     Ed25519Key(_) => ("ssh-ed25519", 256)
     EcdsaKey(bits, _) => {
@@ -196,15 +196,18 @@ fn ed25519_alg_names() -> Array[String] {
   ["ssh-ed25519"]
 }
 
+///|
 fn ecdsa_p256_alg_names() -> Array[String] {
   ["ecdsa-sha2-nistp256"]
 }
 
+///|
 fn ecdsa_p384_alg_names() -> Array[String] {
   ["ecdsa-sha2-nistp384"]
 }
 
-///| RFC 8332 names only -- the blob's own type string `ssh-rsa` is not here.
+///|
+/// RFC 8332 names only -- the blob's own type string `ssh-rsa` is not here.
 fn rsa_alg_names() -> Array[String] {
   ["rsa-sha2-256", "rsa-sha2-512"]
 }

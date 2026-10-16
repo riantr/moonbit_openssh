@@ -27,8 +27,8 @@ fn hk_b64_nopad(data : FixedArray[Byte]) -> String {
   let n = data.length()
   let sb = StringBuilder()
   // 6 位索引查字母表(String 索引返回 UInt16 码元)
-  fn put(idx : Int) -> Unit {
-    sb.write_char(Int::unsafe_to_char(alphabet[idx].to_int()))
+  fn put(idx : Int32) -> Unit {
+    sb.write_char(Int32::unsafe_to_char(alphabet[idx].to_int()))
   }
 
   let mut i = 0

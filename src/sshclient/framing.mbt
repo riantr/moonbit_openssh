@@ -110,7 +110,7 @@ pub fn parse_plain_packet(body : FixedArray[Byte]) -> (Byte, FixedArray[Byte])? 
 
 ///|
 /// size and a sanity ceiling.
-pub fn packet_length_ok(len : Int, max : Int) -> Bool {
+pub fn packet_length_ok(len : Int32, max : Int32) -> Bool {
   len >= 8 && len <= max && len % 8 == 4
 }
 
@@ -118,7 +118,7 @@ pub fn packet_length_ok(len : Int, max : Int) -> Bool {
 
 ///|
 /// Interpret 4 big-endian length bytes. `head` must have at least 4 bytes.
-pub fn be32(head : FixedArray[Byte]) -> Int {
+pub fn be32(head : FixedArray[Byte]) -> Int32 {
   (head[0].to_int() << 24) |
   (head[1].to_int() << 16) |
   (head[2].to_int() << 8) |
@@ -138,8 +138,8 @@ pub fn be32(head : FixedArray[Byte]) -> Int {
 /// checks live in exactly one place.
 pub fn slice_bytes(
   buf : FixedArray[Byte],
-  off : Int,
-  len : Int,
+  off : Int32,
+  len : Int32,
 ) -> FixedArray[Byte]? {
   if off < 0 || len < 0 || off + len > buf.length() {
     return None
@@ -159,7 +159,10 @@ pub fn slice_bytes(
 
 ///|
 /// `off`. Returns the body and the offset just past it.
-pub fn read_field(b : FixedArray[Byte], off : Int) -> (FixedArray[Byte], Int)? {
+pub fn read_field(
+  b : FixedArray[Byte],
+  off : Int32,
+) -> (FixedArray[Byte], Int32)? {
   if off < 0 || off + 4 > b.length() {
     return None
   }
@@ -222,7 +225,7 @@ pub fn parse_ecdh_reply(
 
 ///|
 /// caller loops until one starts with `SSH-`.
-pub fn take_ident_line(buf : FixedArray[Byte], off : Int) -> (String, Int)? {
+pub fn take_ident_line(buf : FixedArray[Byte], off : Int32) -> (String, Int32)? {
   let mut i = off
   while i + 1 < buf.length() {
     if buf[i] == b'\r' && buf[i + 1] == b'\n' {
@@ -292,7 +295,7 @@ pub fn cat2(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
 pub fn bytes_to_string(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   sb.to_string()
 }

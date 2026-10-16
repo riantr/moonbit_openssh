@@ -1,5 +1,6 @@
 ///| Loop #54: 落盘这一层的测试
 ///
+
 ///|
 ///
 /// 这些测试只测**文件**，不测 known_hosts 的格式——行格式归 `src/knownhosts`，
@@ -83,7 +84,8 @@ async test "load reports a missing file as Missing, not Unreadable" {
     Read(t) => abort("a file that does not exist returned " + t)
     Unreadable(why) =>
       abort(
-        "a file that does not exist was reported as unreadable (" + why +
+        "a file that does not exist was reported as unreadable (" +
+        why +
         ") -- that would print a fault on every first-ever TOFU run",
       )
   }
@@ -94,11 +96,10 @@ async test "load round-trips content, including a missing trailing newline" {
   let path = p("roundtrip.txt")
   put(path, "alpha\nbeta")
   match load(path) {
-    Read(t) => {
+    Read(t) =>
       if t != "alpha\nbeta" {
         abort("round-trip changed the content: " + t)
       }
-    }
     Missing => abort("an existing file was reported as missing")
     Unreadable(why) => abort("could not read a file we just wrote: " + why)
   }
@@ -171,6 +172,7 @@ async test "an unwritable path is reported as Failed, not as success" {
 /// not allowed to contain those anyway, so "present, opened, not decodable" is
 /// exactly the state worth reporting rather than passing off as empty content.
 ///
+
 ///|
 /// The empty content would be the dangerous version: `Read("")` under a
 /// non-strict policy *accepts*. A file full of garbage must not be read as
@@ -184,8 +186,7 @@ async test "undecodable bytes are Unreadable, never empty content" {
   raw[2] = b'A'
   @fs.write_file(path, Bytes::from_array(raw))
   match load(path) {
-    Read(t) =>
-      abort("undecodable bytes were reported as content (" + t + ")")
+    Read(t) => abort("undecodable bytes were reported as content (" + t + ")")
     Missing => abort("a file that exists was reported as Missing")
     Unreadable(_) => ()
   }
@@ -210,6 +211,8 @@ async test "a path under a regular file is Missing, not Unreadable" {
     Read(t) => abort("a path that cannot exist read back as content: " + t)
     Missing => ()
     Unreadable(_) =>
-      abort("exists() returned false, so Unreadable would mean the file was seen")
+      abort(
+        "exists() returned false, so Unreadable would mean the file was seen",
+      )
   }
 }

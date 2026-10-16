@@ -1,11 +1,13 @@
 ///| Loop #61: the kex and host key axes, which Loop #60 declared out of scope.
 ///
+
 ///|
 ///
 /// Loop #60 enforced "a client proposal may only name algorithms the transport
 /// can run" over cipher and MAC, and said in as many words that kex and hostkey
 /// were left out. This file closes that gap.
 ///
+
 ///|
 ///
 /// **What was actually there, checked before anything was written.** The gap
@@ -26,6 +28,7 @@
 /// about. The host key names are now derived from `HostKey::agrees_with_alg`'s
 /// own tables instead of being written down twice.
 ///
+
 ///|
 ///
 /// **Why kex runnability lives here.** `src/bpacket` owns cipher and MAC
@@ -50,7 +53,8 @@ pub fn runnable_kex_names() -> Array[String] {
   runnable_kex_names_table()
 }
 
-///| Is this a KEX algorithm this client can execute?
+///|
+/// Is this a KEX algorithm this client can execute?
 pub fn is_runnable_kex(alg : String) -> Bool {
   runnable_kex_names_table().contains(alg)
 }
@@ -104,7 +108,8 @@ pub fn is_runnable_hostkey(alg : String) -> Bool {
   @hostkey.is_verifiable_alg(alg)
 }
 
-///| The certificate names in `hostkey_list`, in order.
+///|
+/// The certificate names in `hostkey_list`, in order.
 pub fn policy_gated_hostkey_names(hostkey_list : String) -> Array[String] {
   let out : Array[String] = []
   for name in split_alg_list(hostkey_list) {
@@ -115,7 +120,8 @@ pub fn policy_gated_hostkey_names(hostkey_list : String) -> Array[String] {
   out
 }
 
-///| The host key algorithm names this client can verify (see `src/hostkey`).
+///|
+/// The host key algorithm names this client can verify (see `src/hostkey`).
 pub fn runnable_hostkey_names() -> Array[String] {
   @hostkey.verifiable_alg_names()
 }

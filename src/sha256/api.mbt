@@ -10,7 +10,7 @@
 /// 计算 message 的 SHA-256 哈希
 pub fn sha256(message : FixedArray[Byte]) -> FixedArray[Byte] {
   // 1. 初始化 state 为 init_H
-  let state : FixedArray[UInt] = FixedArray::make(8, 0U)
+  let state : FixedArray[UInt32] = FixedArray::make(8, 0U)
   for i = 0; i < 8; i = i + 1 {
     state[i] = init_H[i]
   }

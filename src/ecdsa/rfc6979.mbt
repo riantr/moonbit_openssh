@@ -19,21 +19,28 @@
 ///     if 1 <= k < order: return k
 ///     K = HMAC_K(V || 0x00); V = HMAC_K(V)
 
-///| Hash algorithm selector for RFC 6979.
+///|
+/// Hash algorithm selector for RFC 6979.
 pub enum HashAlg {
   Sha256
   Sha384
 }
 
-///| HMAC for the selected algorithm.
-fn hmac(alg : HashAlg, key : FixedArray[Byte], msg : FixedArray[Byte]) -> FixedArray[Byte] {
+///|
+/// HMAC for the selected algorithm.
+fn hmac(
+  alg : HashAlg,
+  key : FixedArray[Byte],
+  msg : FixedArray[Byte],
+) -> FixedArray[Byte] {
   match alg {
     Sha256 => @hmac.hmac_sha256(key, msg)
     Sha384 => @hmac_sha384.hmac_sha384(key, msg)
   }
 }
 
-///| Hash for the selected algorithm.
+///|
+/// Hash for the selected algorithm.
 pub fn alg_hash(alg : HashAlg, msg : FixedArray[Byte]) -> FixedArray[Byte] {
   match alg {
     Sha256 => @sha256.sha256(msg)
@@ -41,23 +48,26 @@ pub fn alg_hash(alg : HashAlg, msg : FixedArray[Byte]) -> FixedArray[Byte] {
   }
 }
 
-///| Output length of the selected hash, in bytes.
-pub fn alg_hash_len(alg : HashAlg) -> Int {
+///|
+/// Output length of the selected hash, in bytes.
+pub fn alg_hash_len(alg : HashAlg) -> Int32 {
   match alg {
     Sha256 => 32
     Sha384 => 48
   }
 }
 
-///| Big-endian bytes of a small non-negative integer.
-fn int1(v : Int) -> FixedArray[Byte] {
+///|
+/// Big-endian bytes of a small non-negative integer.
+fn int1(v : Int32) -> FixedArray[Byte] {
   FixedArray::from_array([v.to_byte()])
 }
 
-///| bits2int (RFC 6979 §2.3.2): take the leftmost `bits` bits of the octet
+///|
+/// bits2int (RFC 6979 §2.3.2): take the leftmost `bits` bits of the octet
 ///   string, treating it as a big-endian integer. When the hash is at least as
 ///   long as the group order this is just a big-endian decode.
-pub fn bits2int(b : FixedArray[Byte], bits : Int) -> @bigint.BigNat {
+pub fn bits2int(b : FixedArray[Byte], bits : Int32) -> @bigint.BigNat {
   let total = b.length() * 8
   let mut v = @bigint.BigNat::from_bytes_be(b)
   if total > bits {
@@ -66,8 +76,9 @@ pub fn bits2int(b : FixedArray[Byte], bits : Int) -> @bigint.BigNat {
   v
 }
 
-///| int2octets (RFC 6979 §2.3.3): fixed-width big-endian encoding.
-pub fn int2octets(v : @bigint.BigNat, rolen : Int) -> FixedArray[Byte] {
+///|
+/// int2octets (RFC 6979 §2.3.3): fixed-width big-endian encoding.
+pub fn int2octets(v : @bigint.BigNat, rolen : Int32) -> FixedArray[Byte] {
   let raw = @bigint.BigNat::to_bytes_be(v)
   let out : FixedArray[Byte] = FixedArray::make(rolen, b'\x00')
   let take = if raw.length() > rolen { rolen } else { raw.length() }
@@ -78,13 +89,14 @@ pub fn int2octets(v : @bigint.BigNat, rolen : Int) -> FixedArray[Byte] {
   out
 }
 
-///| bits2octets (RFC 6979 §2.3.4): z1 = bits2int(H(m)); z2 = z1 - order;
+///|
+/// bits2octets (RFC 6979 §2.3.4): z1 = bits2int(H(m)); z2 = z1 - order;
 ///   if z2 < 0 use z1, else use z2; then int2octets.
 pub fn bits2octets(
   h : FixedArray[Byte],
   order : @bigint.BigNat,
-  bits : Int,
-  rolen : Int
+  bits : Int32,
+  rolen : Int32,
 ) -> FixedArray[Byte] {
   let z1 = bits2int(h, bits)
   // z1 < order is the common case; avoid BigNat::sub, which aborts on a<b.
@@ -96,7 +108,8 @@ pub fn bits2octets(
   int2octets(z, rolen)
 }
 
-///| RFC 6979 §3.2 deterministic nonce for ECDSA.
+///|
+/// RFC 6979 §3.2 deterministic nonce for ECDSA.
 ///
 ///   `priv_key` must be in [1, order-1]; `h1` is the message hash.
 ///   Returns k in [1, order-1]. The loop is bounded so a pathological HMAC
@@ -104,9 +117,9 @@ pub fn bits2octets(
 pub fn rfc6979_nonce(
   alg : HashAlg,
   order : @bigint.BigNat,
-  bits : Int,
+  bits : Int32,
   priv_key : @bigint.BigNat,
-  h1 : FixedArray[Byte]
+  h1 : FixedArray[Byte],
 ) -> @bigint.BigNat {
   let hlen = alg_hash_len(alg)
   let rolen = (bits + 7) / 8
@@ -133,7 +146,7 @@ pub fn rfc6979_nonce(
     }
     let cand = bits2int(t, bits)
     if @bigint.BigNat::cmp(cand, @bigint.BigNat::from_uint64(0UL)) > 0 &&
-       @bigint.BigNat::cmp(cand, order) < 0 {
+      @bigint.BigNat::cmp(cand, order) < 0 {
       return cand
     }
     kcur = hmac(alg, kcur, cat(vcur, int1(0)))

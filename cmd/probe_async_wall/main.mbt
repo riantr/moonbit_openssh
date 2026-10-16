@@ -1,4 +1,5 @@
-///| Loop #64 probe: can a *synchronous* MoonBit fn observe bytes that a
+///|
+/// Loop #64 probe: can a *synchronous* MoonBit fn observe bytes that a
 /// deferred JavaScript callback has not delivered yet?
 ///
 /// This decides whether `@transport.Transport` can be implemented over a real
@@ -16,27 +17,26 @@
 /// byte. If it does not -- which is the claim under test -- `sync` spins its
 /// whole budget with the callback never able to run, and reports STARVED,
 /// while `async` receives the byte.
+extern "js" fn slot_reset() -> Unit = "() => { globalThis.__probe_slot = []; }"
 
-extern "js" fn slot_reset() -> Unit =
-  "() => { globalThis.__probe_slot = []; }"
+///|
+extern "js" fn slot_empty() -> Bool = "() => globalThis.__probe_slot.length === 0"
 
-extern "js" fn slot_empty() -> Bool =
-  "() => globalThis.__probe_slot.length === 0"
-
-extern "js" fn slot_take() -> Int =
-  "() => globalThis.__probe_slot.shift()"
+///|
+extern "js" fn slot_take() -> Int32 = "() => globalThis.__probe_slot.shift()"
 
 // The stand-in for `WebSocket.onmessage`: one byte, delivered by the event loop.
-extern "js" fn arm_deferred_byte() -> Unit =
-  "() => { setTimeout(() => { globalThis.__probe_slot.push(0x5a); }, 0); }"
 
-extern "js" fn arm_deferred_promise() -> @js_async.Promise[Int] =
-  "() => new Promise((res) => { setTimeout(() => res(0x5a), 0); })"
+///|
+extern "js" fn arm_deferred_byte() -> Unit = "() => { setTimeout(() => { globalThis.__probe_slot.push(0x5a); }, 0); }"
+
+///|
+extern "js" fn arm_deferred_promise() -> @js_async.Promise[Int32] = "() => new Promise((res) => { setTimeout(() => res(0x5a), 0); })"
 
 ///|
 /// The synchronous attempt. Bounded so the probe terminates instead of hanging
 /// the process; the bound is also the measurement.
-fn sync_take(spin_budget : Int) -> Int {
+fn sync_take(spin_budget : Int32) -> Int32 {
   let mut spins = 0
   while slot_empty() && spins < spin_budget {
     spins = spins + 1
@@ -51,7 +51,7 @@ fn sync_take(spin_budget : Int) -> Int {
 ///|
 /// The asynchronous attempt: the callback this waits on is scheduled exactly
 /// like the one above.
-async fn async_take() -> Int {
+async fn async_take() -> Int32 {
   @js_async.Promise::wait(arm_deferred_promise())
 }
 
@@ -65,7 +65,9 @@ async fn main {
   if s == 0x5a {
     println("sync : GOT 0x5a -- synchronous code does yield")
   } else {
-    println("sync : STARVED after \{budget} spins -- synchronous code never yields")
+    println(
+      "sync : STARVED after \{budget} spins -- synchronous code never yields",
+    )
   }
 
   let a = async_take()

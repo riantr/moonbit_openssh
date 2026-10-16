@@ -21,16 +21,16 @@
 
 // 辅助:fe_add 但带 offset(写入 dst[offset..offset+32])
 fn fe_add_off(
-  out : FixedArray[UInt],
-  out_off : Int,
-  a : FixedArray[UInt],
-  a_off : Int,
-  b : FixedArray[UInt],
-  b_off : Int,
+  out : FixedArray[UInt32],
+  out_off : Int32,
+  a : FixedArray[UInt32],
+  a_off : Int32,
+  b : FixedArray[UInt32],
+  b_off : Int32,
 ) -> Unit {
-  let mut u : UInt = 0U
+  let mut u : UInt32 = 0U
   for j = 0; j < 31; j = j + 1 {
-    let sum : UInt = a[a_off + j] + b[b_off + j] + u
+    let sum : UInt32 = a[a_off + j] + b[b_off + j] + u
     out[out_off + j] = sum & 0xFFU
     u = sum >> 8
   }
@@ -39,16 +39,16 @@ fn fe_add_off(
 
 ///|
 fn fe_sub_off(
-  out : FixedArray[UInt],
-  out_off : Int,
-  a : FixedArray[UInt],
-  a_off : Int,
-  b : FixedArray[UInt],
-  b_off : Int,
+  out : FixedArray[UInt32],
+  out_off : Int32,
+  a : FixedArray[UInt32],
+  a_off : Int32,
+  b : FixedArray[UInt32],
+  b_off : Int32,
 ) -> Unit {
-  let mut u : UInt = 218U
+  let mut u : UInt32 = 218U
   for j = 0; j < 31; j = j + 1 {
-    let diff : UInt = a[a_off + j] + 65280U - b[b_off + j] + u
+    let diff : UInt32 = a[a_off + j] + 65280U - b[b_off + j] + u
     out[out_off + j] = diff & 0xFFU
     u = diff >> 8
   }
@@ -57,14 +57,14 @@ fn fe_sub_off(
 
 ///|
 fn fe_square_off(
-  out : FixedArray[UInt],
-  out_off : Int,
-  a : FixedArray[UInt],
-  a_off : Int,
+  out : FixedArray[UInt32],
+  out_off : Int32,
+  a : FixedArray[UInt32],
+  a_off : Int32,
 ) -> Unit {
   // square 到 out[out_off..out_off+32],输入 a[a_off..a_off+32]
   for i = 0; i < 32; i = i + 1 {
-    let mut u : UInt = 0U
+    let mut u : UInt32 = 0U
     let mut j = 0
     while j < i - j {
       u = u + a[a_off + j] * a[a_off + i - j]
@@ -77,7 +77,7 @@ fn fe_square_off(
     }
     u = u * 2U
     if (i & 1) == 0 {
-      let half : Int = i / 2
+      let half : Int32 = i / 2
       u = u + a[a_off + half] * a[a_off + half]
       u = u + 38U * a[a_off + half + 16] * a[a_off + half + 16]
     }
@@ -87,19 +87,19 @@ fn fe_square_off(
 }
 
 ///|
-fn fe_squeeze_off(a : FixedArray[UInt], off : Int) -> Unit {
-  let mut u : UInt = 0U
+fn fe_squeeze_off(a : FixedArray[UInt32], off : Int32) -> Unit {
+  let mut u : UInt32 = 0U
   for j = 0; j < 31; j = j + 1 {
-    let sum : UInt = a[off + j] + u
+    let sum : UInt32 = a[off + j] + u
     a[off + j] = sum & 0xFFU
     u = sum >> 8
   }
-  let sum : UInt = a[off + 31] + u
+  let sum : UInt32 = a[off + 31] + u
   a[off + 31] = sum & 0x7FU
   u = sum >> 7
   u = u * 19U
   for j = 0; j < 31; j = j + 1 {
-    let sum2 : UInt = a[off + j] + u
+    let sum2 : UInt32 = a[off + j] + u
     a[off + j] = sum2 & 0xFFU
     u = sum2 >> 8
   }
@@ -108,15 +108,15 @@ fn fe_squeeze_off(a : FixedArray[UInt], off : Int) -> Unit {
 
 ///|
 fn fe_mult_off(
-  out : FixedArray[UInt],
-  out_off : Int,
-  a : FixedArray[UInt],
-  a_off : Int,
-  b : FixedArray[UInt],
-  b_off : Int,
+  out : FixedArray[UInt32],
+  out_off : Int32,
+  a : FixedArray[UInt32],
+  a_off : Int32,
+  b : FixedArray[UInt32],
+  b_off : Int32,
 ) -> Unit {
   for i = 0; i < 32; i = i + 1 {
-    let mut u : UInt = 0U
+    let mut u : UInt32 = 0U
     for j = 0; j <= i; j = j + 1 {
       u = u + a[a_off + j] * b[b_off + i - j]
     }
@@ -130,23 +130,23 @@ fn fe_mult_off(
 
 ///|
 fn fe_mult121665_off(
-  out : FixedArray[UInt],
-  out_off : Int,
-  a : FixedArray[UInt],
-  a_off : Int,
+  out : FixedArray[UInt32],
+  out_off : Int32,
+  a : FixedArray[UInt32],
+  a_off : Int32,
 ) -> Unit {
-  let mut u : UInt = 0U
+  let mut u : UInt32 = 0U
   for j = 0; j < 31; j = j + 1 {
-    let sum : UInt = 121665U * a[a_off + j] + u
+    let sum : UInt32 = 121665U * a[a_off + j] + u
     out[out_off + j] = sum & 0xFFU
     u = sum >> 8
   }
-  let sum : UInt = 121665U * a[a_off + 31] + u
+  let sum : UInt32 = 121665U * a[a_off + 31] + u
   out[out_off + 31] = sum & 0x7FU
   u = sum >> 7
   u = u * 19U
   for j = 0; j < 31; j = j + 1 {
-    let sum2 : UInt = out[out_off + j] + u
+    let sum2 : UInt32 = out[out_off + j] + u
     out[out_off + j] = sum2 & 0xFFU
     u = sum2 >> 8
   }
@@ -155,23 +155,23 @@ fn fe_mult121665_off(
 
 ///|
 /// 主循环:work[64] 包含 (P_x, P_z),e[32] 是 clamped scalar
-pub fn mainloop(work : FixedArray[UInt], e : FixedArray[UInt]) -> Unit {
+pub fn mainloop(work : FixedArray[UInt32], e : FixedArray[UInt32]) -> Unit {
   // 局部变量(都是 64-limb = group element,或 32-limb = field element)
-  let xzm1 : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let xzm : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let xzmb : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let xzm1b : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let xznb : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let xzn1b : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let a0 : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let a1 : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let b0 : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let b1 : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let c1 : FixedArray[UInt] = FixedArray::make(64, 0U)
-  let r : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let s : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let t : FixedArray[UInt] = FixedArray::make(32, 0U)
-  let u : FixedArray[UInt] = FixedArray::make(32, 0U)
+  let xzm1 : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let xzm : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let xzmb : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let xzm1b : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let xznb : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let xzn1b : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let a0 : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let a1 : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let b0 : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let b1 : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let c1 : FixedArray[UInt32] = FixedArray::make(64, 0U)
+  let r : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let s : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let t : FixedArray[UInt32] = FixedArray::make(32, 0U)
+  let u : FixedArray[UInt32] = FixedArray::make(32, 0U)
 
   // 初始化 xzm1 = (P_x, 1)
   for j = 0; j < 32; j = j + 1 {
@@ -189,15 +189,15 @@ pub fn mainloop(work : FixedArray[UInt], e : FixedArray[UInt]) -> Unit {
   }
 
   // 255 轮 Montgomery ladder
-  let mut pos : Int = 254
+  let mut pos : Int32 = 254
   while pos >= 0 {
-    let b : UInt = (e[pos / 8] >> (pos & 7)) & 1U
-    let bm : UInt = bminus1(b)
+    let b : UInt32 = (e[pos / 8] >> (pos & 7)) & 1U
+    let bm : UInt32 = bminus1(b)
 
     // select: xzmb, xzm1b ← xzm, xzm1
     let mut j = 0
     while j < 64 {
-      let x : UInt = bm & (xzm[j] ^ xzm1[j])
+      let x : UInt32 = bm & (xzm[j] ^ xzm1[j])
       xzmb[j] = xzm1[j] ^ x
       xzm1b[j] = xzm[j] ^ x
       j = j + 1
@@ -246,7 +246,7 @@ pub fn mainloop(work : FixedArray[UInt], e : FixedArray[UInt]) -> Unit {
     // select(xzm, xzm1, xznb, xzn1b, b)
     j = 0
     while j < 64 {
-      let x : UInt = bm & (xznb[j] ^ xzn1b[j])
+      let x : UInt32 = bm & (xznb[j] ^ xzn1b[j])
       xzm[j] = xzn1b[j] ^ x
       xzm1[j] = xznb[j] ^ x
       j = j + 1

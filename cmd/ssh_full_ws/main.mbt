@@ -7,7 +7,8 @@
 // 本地 helper 函数 (复制自 src/sshclient/client.mbt 以避免 import ws_socket 跨包问题)
 // ============================================================================
 
-///| ASCII string → FixedArray[Byte]
+///|
+/// ASCII string → FixedArray[Byte]
 fn ascii_bytes(s : String) -> FixedArray[Byte] {
   let arr : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
   for i = 0; i < s.length(); i = i + 1 {
@@ -16,7 +17,8 @@ fn ascii_bytes(s : String) -> FixedArray[Byte] {
   arr
 }
 
-///| 拼接多个 FixedArray[Byte]
+///|
+/// 拼接多个 FixedArray[Byte]
 fn concat_long(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
   let mut total = 0
   for p in parts {
@@ -33,8 +35,12 @@ fn concat_long(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
   out
 }
 
-///| USERAUTH_REQUEST "password" payload (RFC 4252 §5)
-fn userauth_password_payload(user : String, password : String) -> FixedArray[Byte] {
+///|
+/// USERAUTH_REQUEST "password" payload (RFC 4252 §5)
+fn userauth_password_payload(
+  user : String,
+  password : String,
+) -> FixedArray[Byte] {
   concat_long([
     @sshwire.write_ssh_string(ascii_bytes(user)),
     @sshwire.write_ssh_string(ascii_bytes("ssh-connection")),
@@ -44,26 +50,32 @@ fn userauth_password_payload(user : String, password : String) -> FixedArray[Byt
   ])
 }
 
-///| 构造 server reply packet (RFC 4253 §6)
-fn make_server_packet(msg_type : Byte, payload : FixedArray[Byte]) -> FixedArray[Byte] {
+///|
+/// 构造 server reply packet (RFC 4253 §6)
+fn make_server_packet(
+  msg_type : Byte,
+  payload : FixedArray[Byte],
+) -> FixedArray[Byte] {
   @sshwire.make_packet(msg_type, payload)
 }
 
-///| server VERSION bytes
+///|
+/// server VERSION bytes
 fn make_server_version_bytes() -> FixedArray[Byte] {
   ascii_bytes("SSH-2.0-MockSSH_1.0\r\n")
 }
 
-///| server KEXINIT reply
+///|
+/// server KEXINIT reply
 fn make_server_kexinit_reply() -> FixedArray[Byte] {
   let cookie : FixedArray[Byte] = FixedArray::make(16, b'\x00')
   for i = 0; i < 16; i = i + 1 {
     cookie[i] = (0xA0 + i).to_byte()
   }
   let algs : Array[String] = [
-    "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com",
-    "chacha20-poly1305@openssh.com", "hmac-sha2-256-etm@openssh.com,hmac-sha2-256",
-    "hmac-sha2-256-etm@openssh.com,hmac-sha2-256", "none", "none", "", "",
+    "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com", "chacha20-poly1305@openssh.com",
+    "hmac-sha2-256-etm@openssh.com,hmac-sha2-256", "hmac-sha2-256-etm@openssh.com,hmac-sha2-256",
+    "none", "none", "", "",
   ]
   let parts : Array[FixedArray[Byte]] = [cookie]
   for alg in algs {
@@ -75,9 +87,12 @@ fn make_server_kexinit_reply() -> FixedArray[Byte] {
   make_server_packet(@sshwire.SSH_MSG_KEXINIT, payload)
 }
 
-///| server KEXDH_REPLY reply
+///|
+/// server KEXDH_REPLY reply
 fn make_server_kexdh_reply_reply() -> FixedArray[Byte] {
-  let alg_part : FixedArray[Byte] = @sshwire.write_ssh_string(ascii_bytes("ssh-ed25519"))
+  let alg_part : FixedArray[Byte] = @sshwire.write_ssh_string(
+    ascii_bytes("ssh-ed25519"),
+  )
   let pub_bytes : FixedArray[Byte] = FixedArray::make(32, b'\x42')
   let ks_blob = concat_long([alg_part, pub_bytes])
   let ks_str = @sshwire.write_ssh_string(ks_blob)
@@ -94,22 +109,28 @@ fn make_server_kexdh_reply_reply() -> FixedArray[Byte] {
   )
 }
 
-///| server NEWKEYS reply
+///|
+/// server NEWKEYS reply
 fn make_server_newkeys_reply() -> FixedArray[Byte] {
   make_server_packet(@sshwire.SSH_MSG_NEWKEYS, FixedArray::make(0, b'\x00'))
 }
 
-///| server USERAUTH_SUCCESS reply
+///|
+/// server USERAUTH_SUCCESS reply
 fn make_server_userauth_success_reply() -> FixedArray[Byte] {
-  make_server_packet(@sshwire.SSH_MSG_USERAUTH_SUCCESS, FixedArray::make(0, b'\x00'))
+  make_server_packet(
+    @sshwire.SSH_MSG_USERAUTH_SUCCESS,
+    FixedArray::make(0, b'\x00'),
+  )
 }
 
-///| server CHANNEL_OPEN_CONFIRMATION reply
+///|
+/// server CHANNEL_OPEN_CONFIRMATION reply
 fn make_server_channel_open_confirmation_reply(
-  recipient_channel : Int,
-  sender_channel : Int,
-  window_size : Int,
-  packet_size : Int,
+  recipient_channel : Int32,
+  sender_channel : Int32,
+  window_size : Int32,
+  packet_size : Int32,
 ) -> FixedArray[Byte] {
   let payload = concat_long([
     @sshwire.write_u32(recipient_channel.reinterpret_as_uint()),
@@ -120,16 +141,21 @@ fn make_server_channel_open_confirmation_reply(
   make_server_packet(@sshwire.SSH_MSG_CHANNEL_OPEN_CONFIRMATION, payload)
 }
 
-///| server CHANNEL_SUCCESS reply
-fn make_server_channel_success_reply(channel : Int) -> FixedArray[Byte] {
+///|
+/// server CHANNEL_SUCCESS reply
+fn make_server_channel_success_reply(channel : Int32) -> FixedArray[Byte] {
   make_server_packet(
     @sshwire.SSH_MSG_CHANNEL_SUCCESS,
     @sshwire.write_u32(channel.reinterpret_as_uint()),
   )
 }
 
-///| server CHANNEL_DATA reply
-fn make_server_channel_data_reply(channel : Int, data : FixedArray[Byte]) -> FixedArray[Byte] {
+///|
+/// server CHANNEL_DATA reply
+fn make_server_channel_data_reply(
+  channel : Int32,
+  data : FixedArray[Byte],
+) -> FixedArray[Byte] {
   let payload = concat_long([
     @sshwire.write_u32(channel.reinterpret_as_uint()),
     @sshwire.write_ssh_string(data),
@@ -137,24 +163,30 @@ fn make_server_channel_data_reply(channel : Int, data : FixedArray[Byte]) -> Fix
   make_server_packet(@sshwire.SSH_MSG_CHANNEL_DATA, payload)
 }
 
-///| server CHANNEL_EOF reply
-fn make_server_channel_eof_reply(channel : Int) -> FixedArray[Byte] {
+///|
+/// server CHANNEL_EOF reply
+fn make_server_channel_eof_reply(channel : Int32) -> FixedArray[Byte] {
   make_server_packet(
     @sshwire.SSH_MSG_CHANNEL_EOF,
     @sshwire.write_u32(channel.reinterpret_as_uint()),
   )
 }
 
-///| server CHANNEL_CLOSE reply
-fn make_server_channel_close_reply(channel : Int) -> FixedArray[Byte] {
+///|
+/// server CHANNEL_CLOSE reply
+fn make_server_channel_close_reply(channel : Int32) -> FixedArray[Byte] {
   make_server_packet(
     @sshwire.SSH_MSG_CHANNEL_CLOSE,
     @sshwire.write_u32(channel.reinterpret_as_uint()),
   )
 }
 
-///| server CHANNEL_REQUEST "exit-status" reply (RFC 4254 §6.10)
-fn make_server_exit_status_reply(channel : Int, exit_status : Int) -> FixedArray[Byte] {
+///|
+/// server CHANNEL_REQUEST "exit-status" reply (RFC 4254 §6.10)
+fn make_server_exit_status_reply(
+  channel : Int32,
+  exit_status : Int32,
+) -> FixedArray[Byte] {
   let payload = concat_long([
     @sshwire.write_u32(channel.reinterpret_as_uint()),
     @sshwire.write_u32(exit_status.reinterpret_as_uint()),
@@ -162,10 +194,11 @@ fn make_server_exit_status_reply(channel : Int, exit_status : Int) -> FixedArray
   make_server_packet(@sshwire.SSH_MSG_CHANNEL_REQUEST, payload)
 }
 
-///| 解析 server CHANNEL_OPEN_CONFIRMATION payload
+///|
+/// 解析 server CHANNEL_OPEN_CONFIRMATION payload
 fn parse_channel_open_confirmation_payload(
   payload : FixedArray[Byte],
-) -> (Int, Int, Int, Int) {
+) -> (Int32, Int32, Int32, Int32) {
   let recipient = @sshwire.read_u32(payload, 0).reinterpret_as_int()
   let sender = @sshwire.read_u32(payload, 4).reinterpret_as_int()
   let window = @sshwire.read_u32(payload, 8).reinterpret_as_int()
@@ -173,21 +206,26 @@ fn parse_channel_open_confirmation_payload(
   (recipient, sender, window, packet)
 }
 
-///| 解析 server CHANNEL_DATA payload
-fn parse_channel_data_payload(payload : FixedArray[Byte]) -> (Int, FixedArray[Byte]) {
+///|
+/// 解析 server CHANNEL_DATA payload
+fn parse_channel_data_payload(
+  payload : FixedArray[Byte],
+) -> (Int32, FixedArray[Byte]) {
   let channel = @sshwire.read_u32(payload, 0).reinterpret_as_int()
   let (data, _) = @sshwire.read_ssh_string(payload, 4)
   (channel, data)
 }
 
-///| 解析 server CHANNEL_REQUEST "exit-status" payload
-fn parse_exit_status_payload(payload : FixedArray[Byte]) -> (Int, Int) {
+///|
+/// 解析 server CHANNEL_REQUEST "exit-status" payload
+fn parse_exit_status_payload(payload : FixedArray[Byte]) -> (Int32, Int32) {
   let channel = @sshwire.read_u32(payload, 0).reinterpret_as_int()
   let exit_code = @sshwire.read_u32(payload, 4).reinterpret_as_int()
   (channel, exit_code)
 }
 
-///| FixedArray[Byte] → ASCII String
+///|
+/// FixedArray[Byte] → ASCII String
 fn bytes_to_ascii_string(bytes : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < bytes.length(); i = i + 1 {
@@ -196,8 +234,12 @@ fn bytes_to_ascii_string(bytes : FixedArray[Byte]) -> String {
   sb.to_string()
 }
 
-///| parse N 个连续 SSH packets from SshBuf
-fn parse_n_ssh_packets(buf : @sshwire.SshBuf, n : Int) -> Array[@sshwire.SshPacket] {
+///|
+/// parse N 个连续 SSH packets from SshBuf
+fn parse_n_ssh_packets(
+  buf : @sshwire.SshBuf,
+  n : Int32,
+) -> Array[@sshwire.SshPacket] {
   let packets : Array[@sshwire.SshPacket] = []
   for i = 0; i < n; i = i + 1 {
     match buf.try_parse() {
@@ -208,8 +250,9 @@ fn parse_n_ssh_packets(buf : @sshwire.SshBuf, n : Int) -> Array[@sshwire.SshPack
   packets
 }
 
-///| 7 个 post-auth server replies 总字节数 (与 mock_ssh_server_v2_v2.mjs concat 1 buffer 一致)
-fn compute_post_auth_total_length(stdout_msg : String) -> Int {
+///|
+/// 7 个 post-auth server replies 总字节数 (与 mock_ssh_server_v2_v2.mjs concat 1 buffer 一致)
+fn compute_post_auth_total_length(stdout_msg : String) -> Int32 {
   let packets = [
     make_server_userauth_success_reply(),
     make_server_channel_open_confirmation_reply(0, 100, 2097152, 32768),
@@ -233,8 +276,11 @@ fn compute_post_auth_total_length(stdout_msg : String) -> Int {
 ///|
 /// 完整 SSH client 写 + 收协议闭环 (Loop #23 G2, WebSocket path / wasm-only)
 pub fn ssh_client_full_unencrypted_ws(
-  user : String, password : String, command : String, ws_url : String,
-) -> (FixedArray[Byte], FixedArray[Byte], String, Int, Int) {
+  user : String,
+  password : String,
+  command : String,
+  ws_url : String,
+) -> (FixedArray[Byte], FixedArray[Byte], String, Int32, Int32) {
   let stdout_msg = "hello from mock server (cmd: \{command})\n"
   let sock = @ws_socket.Socket::connect(ws_url)
 
@@ -244,25 +290,33 @@ pub fn ssh_client_full_unencrypted_ws(
 
   // 2. KEXINIT
   let cookie : FixedArray[Byte] = FixedArray::from_array([
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
-    0x0d, 0x0e, 0x0f, 0x10,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    0x0e, 0x0f, 0x10,
   ])
   let prop = @kexflow.Proposal::default_client(false)
   let ic_payload = @kexflow.kexinit_payload(cookie, prop)
   let alice_priv : FixedArray[Byte] = FixedArray::from_array([
-    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72,
-    0x51, 0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
-    0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51,
+    0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77,
+    0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
   ])
   let started = @kexflow.flow_start(
     @kexflow.FlowConfig::make(
       ascii_bytes("SSH-2.0-MoonBit"),
       ascii_bytes("SSH-2.0-MockSSH_1.0"),
-      cookie, alice_priv, false, "demo", 22, [],
+      cookie,
+      alice_priv,
+      false,
+      "demo",
+      22,
+      [],
     ),
     prop,
   )
-  let kexinit_packet = @sshwire.make_packet(@sshwire.SSH_MSG_KEXINIT, ic_payload)
+  let kexinit_packet = @sshwire.make_packet(
+    @sshwire.SSH_MSG_KEXINIT,
+    ic_payload,
+  )
   sock.send(kexinit_packet)
   let _ = sock.read_n(make_server_kexinit_reply().length())
   sock.send(started.init_msg)
@@ -298,7 +352,9 @@ pub fn ssh_client_full_unencrypted_ws(
   if packets[1].msg_type != @sshwire.SSH_MSG_CHANNEL_OPEN_CONFIRMATION {
     abort("open_confirm: expected 0x5b got")
   }
-  let (_, remote_channel, _, _) = parse_channel_open_confirmation_payload(packets[1].payload)
+  let (_, remote_channel, _, _) = parse_channel_open_confirmation_payload(
+    packets[1].payload,
+  )
   // 5.3 CHANNEL_SUCCESS
   if packets[2].msg_type != @sshwire.SSH_MSG_CHANNEL_SUCCESS {
     abort("channel_success: expected 0x63 got")
@@ -345,6 +401,7 @@ pub fn ssh_client_full_unencrypted_ws(
 // main — 跑 ssh_client_full_unencrypted_ws + 5 行输出
 // ============================================================================
 
+///|
 fn main {
   // ws_url 从 argv 取 (浏览器端 ws_shim 注入)
   let ws_url = "ws://localhost:2224"

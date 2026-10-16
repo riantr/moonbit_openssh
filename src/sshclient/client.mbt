@@ -1,10 +1,17 @@
 ///| SSH 完整 client flow (RFC 4253/4252/4254):
+
 ///|   1. 版本字符串交换 (RFC 4253 §4.2)
+
 ///|   2. KEXINIT 协商 (RFC 4253 §7)
+
 ///|   3. KEXDH_INIT + KEXDH_REPLY + NEWKEYS (RFC 4253 §8)
+
 ///|   4. NEWKEYS 后切换 chacha20-poly1305 (RFC 4253 §6 + chacha20-poly1305@openssh.com)
+
 ///|   5. SSH-USERAUTH "none" (RFC 4252)
+
 ///|   6. CHANNEL OPEN + exec (RFC 4254)
+
 ///|   7. 读 DATA + EOF + CLOSE (mock)
 //|
 /// Loop #19: 加入 SendCtx.emit (NEWKEYS 后 chacha20-poly1305 真实加密)
@@ -23,7 +30,10 @@ fn ascii_bytes(s : String) -> FixedArray[Byte] {
 ///|
 /// 拼两个 FixedArray
 fn concat(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
-  let out : FixedArray[Byte] = FixedArray::make(a.length() + b.length(), b'\x00')
+  let out : FixedArray[Byte] = FixedArray::make(
+    a.length() + b.length(),
+    b'\x00',
+  )
   for i = 0; i < a.length(); i = i + 1 {
     out[i] = a[i]
   }
@@ -44,7 +54,11 @@ fn userauth_none_payload(user : String) -> FixedArray[Byte] {
 
 ///|
 /// CHANNEL_OPEN session (RFC 4254 §5.1)
-fn channel_open_payload(sender : Int, window : Int, max_packet : Int) -> FixedArray[Byte] {
+fn channel_open_payload(
+  sender : Int32,
+  window : Int32,
+  max_packet : Int32,
+) -> FixedArray[Byte] {
   let s = @sshwire.write_ssh_string(ascii_bytes("session"))
   let u1 = @sshwire.write_u32(sender.reinterpret_as_uint())
   let u2 = @sshwire.write_u32(window.reinterpret_as_uint())
@@ -54,7 +68,10 @@ fn channel_open_payload(sender : Int, window : Int, max_packet : Int) -> FixedAr
 
 ///|
 /// CHANNEL_REQUEST exec (RFC 4254 §6.2)
-fn channel_request_exec_payload(channel : Int, command : String) -> FixedArray[Byte] {
+fn channel_request_exec_payload(
+  channel : Int32,
+  command : String,
+) -> FixedArray[Byte] {
   let u1 = @sshwire.write_u32(channel.reinterpret_as_uint())
   let s1 = @sshwire.write_ssh_string(ascii_bytes("exec"))
   let want : FixedArray[Byte] = FixedArray::from_array([b'\x01']) // true
@@ -73,7 +90,7 @@ fn make_enc_key_ctos_demo() -> FixedArray[Byte] {
   let key : FixedArray[Byte] = FixedArray::make(64, b'\x00')
   // Pattern: 0xCC 0x10 .. 0xCF 0x10 (main_key=0..31 + header_key=32..63)
   for i = 0; i < 64; i = i + 1 {
-    key[i] = ((i & 0xFF).to_byte())
+    key[i] = (i & 0xFF).to_byte()
   }
   // 覆盖部分字节做标识 (让 main_key 和 header_key 不同)
   for i = 0; i < 32; i = i + 1 {
@@ -96,7 +113,7 @@ fn emit_result_wire(r : @bpacket.EmitResult) -> FixedArray[Byte] {
 
 ///|
 /// SendCtx::emit pad_src 参数 (deterministic for byte-exact,全 0x00)
-fn zero_pad_src(max : Int) -> FixedArray[Byte] {
+fn zero_pad_src(max : Int32) -> FixedArray[Byte] {
   FixedArray::make(max, b'\x00')
 }
 
@@ -110,7 +127,7 @@ pub fn ssh_client_run(
   user : String,
   command : String,
   mock_responses : Array[FixedArray[Byte]],
-) -> (FixedArray[Byte], FixedArray[Byte], Int, Int, Int) {
+) -> (FixedArray[Byte], FixedArray[Byte], Int32, Int32, Int32) {
   let sock = @socket.MockSocket::make(mock_responses)
 
   // 1. 发送 client version (unencrypted)
@@ -121,28 +138,36 @@ pub fn ssh_client_run(
 
   // 3. KEXINIT (unencrypted, Loop #12 kexflow::kexinit_payload)
   let cookie : FixedArray[Byte] = FixedArray::from_array([
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
-    0x0d, 0x0e, 0x0f, 0x10,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    0x0e, 0x0f, 0x10,
   ])
   let prop = @kexflow.Proposal::default_client(false)
   let ic_payload = @kexflow.kexinit_payload(cookie, prop)
 
   let alice_priv : FixedArray[Byte] = FixedArray::from_array([
-    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72,
-    0x51, 0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
-    0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51,
+    0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77,
+    0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
   ])
   let started = @kexflow.flow_start(
     @kexflow.FlowConfig::make(
       ascii_bytes("SSH-2.0-MoonBit"),
       ascii_bytes("SSH-2.0-OpenSSH_8.4"),
-      cookie, alice_priv, false, "demo", 22, [],
+      cookie,
+      alice_priv,
+      false,
+      "demo",
+      22,
+      [],
     ),
     prop,
   )
 
   // 4. 发 KEXINIT (unencrypted, sshwire.make_packet path)
-  let kexinit_packet = @sshwire.make_packet(@sshwire.SSH_MSG_KEXINIT, ic_payload)
+  let kexinit_packet = @sshwire.make_packet(
+    @sshwire.SSH_MSG_KEXINIT,
+    ic_payload,
+  )
   sock.send(kexinit_packet)
 
   // 5. 发 KEXECDH_INIT (started.init_msg 已经含 type + len + Q_C)
@@ -151,7 +176,11 @@ pub fn ssh_client_run(
   // 6. NEWKEYS (unencrypted, send_ctx::emit path)
   let send_ctx = @bpacket.SendCtx::new()
   let newkeys_initial_packet = emit_result_wire(
-    send_ctx.emit(@sshwire.SSH_MSG_NEWKEYS, FixedArray::make(0, b'\x00'), zero_pad_src(64)),
+    send_ctx.emit(
+      @sshwire.SSH_MSG_NEWKEYS,
+      FixedArray::make(0, b'\x00'),
+      zero_pad_src(64),
+    ),
   )
   sock.send(newkeys_initial_packet)
 
@@ -163,7 +192,11 @@ pub fn ssh_client_run(
   // 8. SSH-USERAUTH (Aead mode, seqnr = 1)
   let auth_payload = userauth_none_payload(user)
   let userauth_wire = emit_result_wire(
-    send_ctx.emit(@sshwire.SSH_MSG_USERAUTH_REQUEST, auth_payload, zero_pad_src(64)),
+    send_ctx.emit(
+      @sshwire.SSH_MSG_USERAUTH_REQUEST,
+      auth_payload,
+      zero_pad_src(64),
+    ),
   )
   sock.send(userauth_wire)
 
@@ -177,7 +210,11 @@ pub fn ssh_client_run(
   // 10. CHANNEL REQUEST exec (Aead mode, seqnr = 3)
   let exec_payload = channel_request_exec_payload(0, command)
   let exec_wire = emit_result_wire(
-    send_ctx.emit(@sshwire.SSH_MSG_CHANNEL_REQUEST, exec_payload, zero_pad_src(64)),
+    send_ctx.emit(
+      @sshwire.SSH_MSG_CHANNEL_REQUEST,
+      exec_payload,
+      zero_pad_src(64),
+    ),
   )
   sock.send(exec_wire)
 
@@ -253,9 +290,9 @@ fn make_server_kexinit_reply() -> FixedArray[Byte] {
     cookie[i] = (0xA0 + i).to_byte()
   }
   let algs : Array[String] = [
-    "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com",
-    "chacha20-poly1305@openssh.com", "hmac-sha2-256-etm@openssh.com,hmac-sha2-256",
-    "hmac-sha2-256-etm@openssh.com,hmac-sha2-256", "none", "none", "", "",
+    "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com", "chacha20-poly1305@openssh.com",
+    "hmac-sha2-256-etm@openssh.com,hmac-sha2-256", "hmac-sha2-256-etm@openssh.com,hmac-sha2-256",
+    "none", "none", "", "",
   ]
   let parts : Array[FixedArray[Byte]] = [cookie]
   for alg in algs {
@@ -270,7 +307,9 @@ fn make_server_kexinit_reply() -> FixedArray[Byte] {
 ///|
 /// 构造 server KEXDH_REPLY reply (mock v2, simplified)
 fn make_server_kexdh_reply_reply() -> FixedArray[Byte] {
-  let alg_part : FixedArray[Byte] = @sshwire.write_ssh_string(ascii_bytes("ssh-ed25519"))
+  let alg_part : FixedArray[Byte] = @sshwire.write_ssh_string(
+    ascii_bytes("ssh-ed25519"),
+  )
   let pub_bytes : FixedArray[Byte] = FixedArray::make(32, b'\x42')
   let ks_blob = concat_long([alg_part, pub_bytes])
   let ks_str = @sshwire.write_ssh_string(ks_blob)
@@ -305,10 +344,10 @@ fn make_server_userauth_success_reply() -> FixedArray[Byte] {
 ///|
 /// 构造 server CHANNEL_OPEN_CONFIRMATION reply (4 fields, 16 bytes payload)
 fn make_server_channel_open_confirmation_reply(
-  recipient_channel : Int,
-  sender_channel : Int,
-  window_size : Int,
-  packet_size : Int,
+  recipient_channel : Int32,
+  sender_channel : Int32,
+  window_size : Int32,
+  packet_size : Int32,
 ) -> FixedArray[Byte] {
   let payload = concat_long([
     @sshwire.write_u32(recipient_channel.reinterpret_as_uint()),
@@ -321,7 +360,7 @@ fn make_server_channel_open_confirmation_reply(
 
 ///|
 /// 构造 server CHANNEL_SUCCESS reply (4 bytes channel)
-fn make_server_channel_success_reply(channel : Int) -> FixedArray[Byte] {
+fn make_server_channel_success_reply(channel : Int32) -> FixedArray[Byte] {
   make_server_packet(
     @sshwire.SSH_MSG_CHANNEL_SUCCESS,
     @sshwire.write_u32(channel.reinterpret_as_uint()),
@@ -331,7 +370,7 @@ fn make_server_channel_success_reply(channel : Int) -> FixedArray[Byte] {
 ///|
 /// 构造 server CHANNEL_DATA reply
 fn make_server_channel_data_reply(
-  channel : Int,
+  channel : Int32,
   data : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   let payload = concat_long([
@@ -343,7 +382,7 @@ fn make_server_channel_data_reply(
 
 ///|
 /// 构造 server CHANNEL_EOF reply
-fn make_server_channel_eof_reply(channel : Int) -> FixedArray[Byte] {
+fn make_server_channel_eof_reply(channel : Int32) -> FixedArray[Byte] {
   make_server_packet(
     @sshwire.SSH_MSG_CHANNEL_EOF,
     @sshwire.write_u32(channel.reinterpret_as_uint()),
@@ -352,7 +391,7 @@ fn make_server_channel_eof_reply(channel : Int) -> FixedArray[Byte] {
 
 ///|
 /// 构造 server CHANNEL_CLOSE reply
-fn make_server_channel_close_reply(channel : Int) -> FixedArray[Byte] {
+fn make_server_channel_close_reply(channel : Int32) -> FixedArray[Byte] {
   make_server_packet(
     @sshwire.SSH_MSG_CHANNEL_CLOSE,
     @sshwire.write_u32(channel.reinterpret_as_uint()),
@@ -362,8 +401,8 @@ fn make_server_channel_close_reply(channel : Int) -> FixedArray[Byte] {
 ///|
 /// 构造 server CHANNEL_REQUEST "exit-status" reply (RFC 4254 §6.10)
 fn make_server_exit_status_reply(
-  channel : Int,
-  exit_status : Int,
+  channel : Int32,
+  exit_status : Int32,
 ) -> FixedArray[Byte] {
   let payload = concat_long([
     @sshwire.write_u32(channel.reinterpret_as_uint()),
@@ -376,7 +415,7 @@ fn make_server_exit_status_reply(
 /// 解析 server CHANNEL_OPEN_CONFIRMATION payload → (recipient, sender, window, packet_size)
 fn parse_channel_open_confirmation_payload(
   payload : FixedArray[Byte],
-) -> (Int, Int, Int, Int) {
+) -> (Int32, Int32, Int32, Int32) {
   let recipient = @sshwire.read_u32(payload, 0).reinterpret_as_int()
   let sender = @sshwire.read_u32(payload, 4).reinterpret_as_int()
   let window = @sshwire.read_u32(payload, 8).reinterpret_as_int()
@@ -388,7 +427,7 @@ fn parse_channel_open_confirmation_payload(
 /// 解析 server CHANNEL_DATA payload → (channel, data bytes)
 fn parse_channel_data_payload(
   payload : FixedArray[Byte],
-) -> (Int, FixedArray[Byte]) {
+) -> (Int32, FixedArray[Byte]) {
   let channel = @sshwire.read_u32(payload, 0).reinterpret_as_int()
   let (data, _) = @sshwire.read_ssh_string(payload, 4)
   (channel, data)
@@ -396,7 +435,7 @@ fn parse_channel_data_payload(
 
 ///|
 /// 解析 server CHANNEL_REQUEST "exit-status" payload → (channel, exit_code)
-fn parse_exit_status_payload(payload : FixedArray[Byte]) -> (Int, Int) {
+fn parse_exit_status_payload(payload : FixedArray[Byte]) -> (Int32, Int32) {
   let channel = @sshwire.read_u32(payload, 0).reinterpret_as_int()
   let exit_code = @sshwire.read_u32(payload, 4).reinterpret_as_int()
   (channel, exit_code)
@@ -435,7 +474,7 @@ pub fn ssh_client_full_unencrypted(
   user : String,
   password : String,
   command : String,
-) -> (FixedArray[Byte], FixedArray[Byte], String, Int, Int) {
+) -> (FixedArray[Byte], FixedArray[Byte], String, Int32, Int32) {
   let stdout_msg = "hello from mock server\n"
   let server_packets = make_server_packets_v2(stdout_msg)
   let sock = @socket.MockSocket::make(server_packets)
@@ -446,25 +485,33 @@ pub fn ssh_client_full_unencrypted(
 
   // ---- 2. KEXINIT ----
   let cookie : FixedArray[Byte] = FixedArray::from_array([
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
-    0x0d, 0x0e, 0x0f, 0x10,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    0x0e, 0x0f, 0x10,
   ])
   let prop = @kexflow.Proposal::default_client(false)
   let ic_payload = @kexflow.kexinit_payload(cookie, prop)
   let alice_priv : FixedArray[Byte] = FixedArray::from_array([
-    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72,
-    0x51, 0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
-    0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51,
+    0xb2, 0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77,
+    0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
   ])
   let started = @kexflow.flow_start(
     @kexflow.FlowConfig::make(
       ascii_bytes("SSH-2.0-MoonBit"),
       ascii_bytes("SSH-2.0-MockSSH_1.0"),
-      cookie, alice_priv, false, "demo", 22, [],
+      cookie,
+      alice_priv,
+      false,
+      "demo",
+      22,
+      [],
     ),
     prop,
   )
-  let kexinit_packet = @sshwire.make_packet(@sshwire.SSH_MSG_KEXINIT, ic_payload)
+  let kexinit_packet = @sshwire.make_packet(
+    @sshwire.SSH_MSG_KEXINIT,
+    ic_payload,
+  )
   sock.send(kexinit_packet)
   let _ = sock.read_n(server_packets[1].length())
   sock.send(started.init_msg)
@@ -496,7 +543,10 @@ pub fn ssh_client_full_unencrypted(
 
   // ---- 4. CHANNEL_OPEN session ----
   let open_payload = channel_open_payload(0, 2097152, 32768)
-  let open_wire = @sshwire.make_packet(@sshwire.SSH_MSG_CHANNEL_OPEN, open_payload)
+  let open_wire = @sshwire.make_packet(
+    @sshwire.SSH_MSG_CHANNEL_OPEN,
+    open_payload,
+  )
   sock.send(open_wire)
   let open_confirm_reply = sock.read_n(server_packets[5].length())
   let open_confirm_buf = @sshwire.SshBuf::new()
@@ -585,8 +635,8 @@ pub fn ssh_client_full_unencrypted(
   let sent = sock.sent_bytes()
   sock.close()
   let recv = concat_long([
-    userauth_success_reply, open_confirm_reply, success_reply, data_reply,
-    eof_reply, exit_reply, close_reply,
+    userauth_success_reply, open_confirm_reply, success_reply, data_reply, eof_reply,
+    exit_reply, close_reply,
   ])
   (sent, recv, stdout_str, exit_code, remote_channel)
 }

@@ -22,26 +22,32 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-///| 单个 channel 的最大包长(channels.h:231 CHAN_SES_PACKET_DEFAULT)
-pub const CHAN_PACKET_DEFAULT : Int = 32 * 1024
+///|
+/// 单个 channel 的最大包长(channels.h:231 CHAN_SES_PACKET_DEFAULT)
+pub const CHAN_PACKET_DEFAULT : Int32 = 32 * 1024
 
-///| 本端初始窗口(channels.h:232 CHAN_SES_WINDOW_DEFAULT = 64 * 32 KiB)
-pub const CHAN_WINDOW_DEFAULT : Int = 64 * CHAN_PACKET_DEFAULT
+///|
+/// 本端初始窗口(channels.h:232 CHAN_SES_WINDOW_DEFAULT = 64 * 32 KiB)
+pub const CHAN_WINDOW_DEFAULT : Int32 = 64 * CHAN_PACKET_DEFAULT
 
-///| SSH2_EXTENDED_DATA_STDERR(channels.c:3128)
-pub const EXTENDED_DATA_STDERR : Int = 1
+///|
+/// SSH2_EXTENDED_DATA_STDERR(channels.c:3128)
+pub const EXTENDED_DATA_STDERR : Int32 = 1
 
-///| 我们作为客户端使用的本地 channel 号
-pub const LOCAL_CHANNEL : Int = 0
+///|
+/// 我们作为客户端使用的本地 channel 号
+pub const LOCAL_CHANNEL : Int32 = 0
 
-///| 我们作为客户端使用的本地 channel 号(可传别的值)
-pub const DEFAULT_LOCAL_CHANNEL : Int = 0
+///|
+/// 我们作为客户端使用的本地 channel 号(可传别的值)
+pub const DEFAULT_LOCAL_CHANNEL : Int32 = 0
 
 // ---------------------------------------------------------------------------
 // Outbound payloads
 // ---------------------------------------------------------------------------
 
-///| ASCII 文本 -> 字节。与 `src/userauth` 里的同名私有函数重复是有意的:
+///|
+/// ASCII 文本 -> 字节。与 `src/userauth` 里的同名私有函数重复是有意的:
 /// 从 `src/sshclient` 拿会把 `@tcp` 拖进来,而 `src/sshwire` 不依赖任何东西。
 fn ch_ascii(s : String) -> FixedArray[Byte] {
   let a : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
@@ -51,11 +57,9 @@ fn ch_ascii(s : String) -> FixedArray[Byte] {
   a
 }
 
-///| 字节串拼接
-pub fn ch_cat(
-  a : FixedArray[Byte],
-  b : FixedArray[Byte],
-) -> FixedArray[Byte] {
+///|
+/// 字节串拼接
+pub fn ch_cat(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(
     a.length() + b.length(),
     b'\x00',
@@ -87,8 +91,9 @@ pub fn ch_cat_all(parts : Array[FixedArray[Byte]]) -> FixedArray[Byte] {
   out
 }
 
-///| u32 小端写入(channels.c 用的是 `sshpkt_put_u32`,即网络字节序大端)
-fn u32be(v : Int) -> FixedArray[Byte] {
+///|
+/// u32 小端写入(channels.c 用的是 `sshpkt_put_u32`,即网络字节序大端)
+fn u32be(v : Int32) -> FixedArray[Byte] {
   @sshwire.write_u32(v.reinterpret_as_uint())
 }
 
@@ -100,9 +105,9 @@ fn u32be(v : Int) -> FixedArray[Byte] {
 ///     uint32  initial window size
 ///     uint32  maximum packet size
 pub fn channel_open_payload(
-  sender : Int,
-  window : Int,
-  max_packet : Int,
+  sender : Int32,
+  window : Int32,
+  max_packet : Int32,
 ) -> FixedArray[Byte] {
   ch_cat_all([
     @sshwire.write_ssh_string(ch_ascii("session")),
@@ -120,7 +125,7 @@ pub fn channel_open_payload(
 ///     boolean want reply
 ///     ...    type-specific
 pub fn channel_request_payload(
-  recipient : Int,
+  recipient : Int32,
   request_type : String,
   want_reply : Bool,
   extra : FixedArray[Byte],
@@ -141,7 +146,7 @@ pub fn channel_request_payload(
 ///     boolean TRUE
 ///     string  command
 pub fn channel_exec_payload(
-  recipient : Int,
+  recipient : Int32,
   command : String,
 ) -> FixedArray[Byte] {
   channel_request_payload(
@@ -176,7 +181,7 @@ pub fn channel_exec_payload(
 /// 处理(session.c:2175-2192),也就是必须在 exec / shell 之前发;发晚了
 /// `session_input_channel_req` 直接不进那个 if,请求被无声丢弃。
 pub fn channel_env_payload(
-  recipient : Int,
+  recipient : Int32,
   name : String,
   value : String,
 ) -> FixedArray[Byte] {
@@ -191,37 +196,37 @@ pub fn channel_env_payload(
   )
 }
 
-///| CHANNEL_WINDOW_ADJUST 的 payload(uint32 recipient, uint32 bytes)
+///|
+/// CHANNEL_WINDOW_ADJUST 的 payload(uint32 recipient, uint32 bytes)
 pub fn channel_window_adjust_payload(
-  recipient : Int,
-  bytes : Int,
+  recipient : Int32,
+  bytes : Int32,
 ) -> FixedArray[Byte] {
   ch_cat(u32be(recipient), u32be(bytes))
 }
 
-///| CHANNEL_DATA 的 payload(uint32 recipient, string data)
+///|
+/// CHANNEL_DATA 的 payload(uint32 recipient, string data)
 pub fn channel_data_payload(
-  recipient : Int,
+  recipient : Int32,
   data : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   ch_cat(u32be(recipient), @sshwire.write_ssh_string(data))
 }
 
-///| CHANNEL_EXTENDED_DATA 的 payload(uint32 recipient, uint32 code, string data)
+///|
+/// CHANNEL_EXTENDED_DATA 的 payload(uint32 recipient, uint32 code, string data)
 pub fn channel_extended_data_payload(
-  recipient : Int,
-  code : Int,
+  recipient : Int32,
+  code : Int32,
   data : FixedArray[Byte],
 ) -> FixedArray[Byte] {
-  ch_cat_all([
-    u32be(recipient),
-    u32be(code),
-    @sshwire.write_ssh_string(data),
-  ])
+  ch_cat_all([u32be(recipient), u32be(code), @sshwire.write_ssh_string(data)])
 }
 
-///| 只有 channel 号的 payload(CHANNEL_SUCCESS / FAILURE / EOF / CLOSE)
-pub fn channel_bare_payload(recipient : Int) -> FixedArray[Byte] {
+///|
+/// 只有 channel 号的 payload(CHANNEL_SUCCESS / FAILURE / EOF / CLOSE)
+pub fn channel_bare_payload(recipient : Int32) -> FixedArray[Byte] {
   u32be(recipient)
 }
 
@@ -229,16 +234,20 @@ pub fn channel_bare_payload(recipient : Int) -> FixedArray[Byte] {
 // Interactive: pty-req / shell / window-change
 // ---------------------------------------------------------------------------
 
-///| tty modes 串的结束符(ttymodes.c:60 `TTY_OP_END`)
+///|
+/// tty modes 串的结束符(ttymodes.c:60 `TTY_OP_END`)
 pub const TTY_OP_END : Byte = b'\x00'
 
-///| 波特率 opcode(ttymodes.c:64 `TTY_OP_ISPEED = 128`)
+///|
+/// 波特率 opcode(ttymodes.c:64 `TTY_OP_ISPEED = 128`)
 pub const TTY_OP_ISPEED : Byte = b'\x80'
 
-///| 波特率 opcode(ttymodes.c:65 `TTY_OP_OSPEED = 129`)
+///|
+/// 波特率 opcode(ttymodes.c:65 `TTY_OP_OSPEED = 129`)
 pub const TTY_OP_OSPEED : Byte = b'\x81'
 
-///| 空 string(pty/shell 请求的尾部就是它)
+///|
+/// 空 string(pty/shell 请求的尾部就是它)
 fn empty_wire() -> FixedArray[Byte] {
   FixedArray::make(0, b'\x00')
 }
@@ -256,7 +265,7 @@ fn empty_wire() -> FixedArray[Byte] {
 /// 的、服务端忽略它不认识的」,不发任何东西服务端也能接受
 /// (`ttymodes.c:354` 的 `if (len == 0) return;`,paramiko 就是这么发的)。
 /// 我们跟 OpenSSH 客户端(`clientloop.c:2746`)一样把结束符带上。
-pub fn tty_modes_bytes(baud : Int) -> FixedArray[Byte] {
+pub fn tty_modes_bytes(baud : Int32) -> FixedArray[Byte] {
   ch_cat_all([
     FixedArray::from_array([TTY_OP_ISPEED]),
     u32be(baud),
@@ -284,12 +293,12 @@ pub fn tty_modes_bytes(baud : Int) -> FixedArray[Byte] {
 /// (session.c:1872)。写成 row-then-col 的话 pty 照样能开,但窗口尺寸整个
 /// 转置,而「转置后仍然是合法 pty」正是它容易蒙混过关的原因。
 pub fn channel_pty_req_payload(
-  recipient : Int,
+  recipient : Int32,
   term : String,
-  cols : Int,
-  rows : Int,
-  pixel_width : Int,
-  pixel_height : Int,
+  cols : Int32,
+  rows : Int32,
+  pixel_width : Int32,
+  pixel_height : Int32,
   modes : FixedArray[Byte],
 ) -> FixedArray[Byte] {
   channel_request_payload(
@@ -312,7 +321,7 @@ pub fn channel_pty_req_payload(
 ///
 /// 除了公共前缀之外没有别的字段——交互式 shell 不带命令,命令由之后
 /// CHANNEL_DATA(stdin)送上去。
-pub fn channel_shell_payload(recipient : Int) -> FixedArray[Byte] {
+pub fn channel_shell_payload(recipient : Int32) -> FixedArray[Byte] {
   channel_request_payload(recipient, "shell", true, empty_wire())
 }
 
@@ -340,7 +349,7 @@ pub fn channel_shell_payload(recipient : Int) -> FixedArray[Byte] {
 /// 「子系统自己的字节」:SFTP 的包被原样塞进 CHANNEL_DATA,两端都不解释它。
 /// 这一点不是这里实现的——它在 `src/sftp`,而这层只负责把请求发出去。
 pub fn channel_subsystem_payload(
-  recipient : Int,
+  recipient : Int32,
   name : String,
 ) -> FixedArray[Byte] {
   channel_request_payload(
@@ -368,11 +377,11 @@ pub fn channel_subsystem_payload(
 /// 这里也没有 modes 串——服务端读完这四个 u32 紧跟一个
 /// `sshpkt_get_end`(:1851),多写字节会被当成协议错误。
 pub fn channel_window_change_payload(
-  recipient : Int,
-  cols : Int,
-  rows : Int,
-  pixel_width : Int,
-  pixel_height : Int,
+  recipient : Int32,
+  cols : Int32,
+  rows : Int32,
+  pixel_width : Int32,
+  pixel_height : Int32,
 ) -> FixedArray[Byte] {
   channel_request_payload(
     recipient,
@@ -400,8 +409,8 @@ pub fn channel_window_change_payload(
 /// 看起来就像命令没产生任何输出。
 pub fn parse_exit_signal(
   payload : FixedArray[Byte],
-  off : Int,
-) -> ((String, Bool, String)?) {
+  off : Int32,
+) -> (String, Bool, String)? {
   match read_string_at(payload, off) {
     None => None
     Some((name, o1)) =>
@@ -420,11 +429,9 @@ pub fn parse_exit_signal(
                 if o3 != payload.length() {
                   None
                 } else {
-                  Some((
-                    bytes_to_ascii_str(name),
-                    core,
-                    bytes_to_ascii_str(msg),
-                  ))
+                  Some(
+                    (bytes_to_ascii_str(name), core, bytes_to_ascii_str(msg)),
+                  )
                 }
             }
         }
@@ -436,27 +443,25 @@ pub fn parse_exit_signal(
 // Inbound parsers
 // ---------------------------------------------------------------------------
 
-///| 从 `off` 处读 u32,返回 `(值, 新偏移)`;越界返回 None
-pub fn read_u32_at(
-  b : FixedArray[Byte],
-  off : Int,
-) -> (Int, Int)? {
+///|
+/// 从 `off` 处读 u32,返回 `(值, 新偏移)`;越界返回 None
+pub fn read_u32_at(b : FixedArray[Byte], off : Int32) -> (Int32, Int32)? {
   if off < 0 || off + 4 > b.length() {
     return None
   }
-  let v =
-    (b[off].to_int() << 24) |
+  let v = (b[off].to_int() << 24) |
     (b[off + 1].to_int() << 16) |
     (b[off + 2].to_int() << 8) |
     b[off + 3].to_int()
   Some((v, off + 4))
 }
 
-///| 从 `off` 处读 string,返回 `(字节, 新偏移)`
+///|
+/// 从 `off` 处读 string,返回 `(字节, 新偏移)`
 pub fn read_string_at(
   b : FixedArray[Byte],
-  off : Int,
-) -> (FixedArray[Byte], Int)? {
+  off : Int32,
+) -> (FixedArray[Byte], Int32)? {
   match read_u32_at(b, off) {
     None => None
     Some((n, o)) =>
@@ -472,11 +477,12 @@ pub fn read_string_at(
   }
 }
 
-///| 把字节当 ASCII 串(只用于和协议里的字面量比较)
+///|
+/// 把字节当 ASCII 串(只用于和协议里的字面量比较)
 pub fn bytes_to_ascii_str(b : FixedArray[Byte]) -> String {
   let sb = StringBuilder()
   for i = 0; i < b.length(); i = i + 1 {
-    sb.write_char(Int::unsafe_to_char(b[i].to_int()))
+    sb.write_char(Int32::unsafe_to_char(b[i].to_int()))
   }
   sb.to_string()
 }
@@ -493,7 +499,7 @@ pub fn bytes_to_ascii_str(b : FixedArray[Byte]) -> String {
 /// CLOSE)用的都是对端给的这个号,不是我们自己开通道时用的 0。
 pub fn parse_open_confirmation(
   payload : FixedArray[Byte],
-) -> (Int, Int, Int)? {
+) -> (Int32, Int32, Int32)? {
   match read_u32_at(payload, 0) {
     None => None
     Some((_, o1)) =>
@@ -520,9 +526,7 @@ pub fn parse_open_confirmation(
 ///|
 /// CHANNEL_OPEN_FAILURE (§5.1):uint32 recipient, uint32 reason, string description,
 /// string language tag
-pub fn parse_open_failure(
-  payload : FixedArray[Byte],
-) -> (Int, String)? {
+pub fn parse_open_failure(payload : FixedArray[Byte]) -> (Int32, String)? {
   match read_u32_at(payload, 0) {
     None => None
     Some((_, o1)) =>
@@ -546,10 +550,9 @@ pub fn parse_open_failure(
   }
 }
 
-///| CHANNEL_DATA:uint32 recipient, string data
-pub fn parse_data(
-  payload : FixedArray[Byte],
-) -> (Int, FixedArray[Byte])? {
+///|
+/// CHANNEL_DATA:uint32 recipient, string data
+pub fn parse_data(payload : FixedArray[Byte]) -> (Int32, FixedArray[Byte])? {
   match read_u32_at(payload, 0) {
     None => None
     Some((who, o1)) =>
@@ -565,10 +568,11 @@ pub fn parse_data(
   }
 }
 
-///| CHANNEL_EXTENDED_DATA:uint32 recipient, uint32 code, string data
+///|
+/// CHANNEL_EXTENDED_DATA:uint32 recipient, uint32 code, string data
 pub fn parse_extended_data(
   payload : FixedArray[Byte],
-) -> (Int, Int, FixedArray[Byte])? {
+) -> (Int32, Int32, FixedArray[Byte])? {
   match read_u32_at(payload, 0) {
     None => None
     Some((who, o1)) =>
@@ -588,10 +592,9 @@ pub fn parse_extended_data(
   }
 }
 
-///| CHANNEL_WINDOW_ADJUST:uint32 recipient, uint32 bytes to add
-pub fn parse_window_adjust(
-  payload : FixedArray[Byte],
-) -> (Int, Int)? {
+///|
+/// CHANNEL_WINDOW_ADJUST:uint32 recipient, uint32 bytes to add
+pub fn parse_window_adjust(payload : FixedArray[Byte]) -> (Int32, Int32)? {
   match read_u32_at(payload, 0) {
     None => None
     Some((who, o1)) =>
@@ -615,7 +618,7 @@ pub fn parse_window_adjust(
 /// 之后)。返回 None 表示 want_reply 之后连一个字节都没有。
 pub fn parse_request_header(
   payload : FixedArray[Byte],
-) -> (Int, String, Bool, Int)? {
+) -> (Int32, String, Bool, Int32)? {
   match read_u32_at(payload, 0) {
     None => None
     Some((who, o1)) =>
@@ -632,8 +635,9 @@ pub fn parse_request_header(
   }
 }
 
-///| 只有 channel 号的包(SUCCESS / FAILURE / EOF / CLOSE)
-pub fn parse_channel_id(payload : FixedArray[Byte]) -> Int? {
+///|
+/// 只有 channel 号的包(SUCCESS / FAILURE / EOF / CLOSE)
+pub fn parse_channel_id(payload : FixedArray[Byte]) -> Int32? {
   match read_u32_at(payload, 0) {
     None => None
     Some((v, o1)) => if o1 == payload.length() { Some(v) } else { None }
@@ -652,13 +656,14 @@ pub fn parse_channel_id(payload : FixedArray[Byte]) -> Int? {
 /// 累积量而不是「补到多少」——两者都能让连接继续,但只有累积量与 C 一致,
 /// 对拍时不会差一个常数。
 pub(all) struct LocalWindow {
-  max : Int
-  cur : Int
-  consumed : Int
-  max_packet : Int
+  max : Int32
+  cur : Int32
+  consumed : Int32
+  max_packet : Int32
 }
 
-///| 初始窗口:max = cur = CHAN_WINDOW_DEFAULT,consumed = 0
+///|
+/// 初始窗口:max = cur = CHAN_WINDOW_DEFAULT,consumed = 0
 pub fn LocalWindow::new() -> LocalWindow {
   {
     max: CHAN_WINDOW_DEFAULT,
@@ -673,9 +678,14 @@ pub fn LocalWindow::new() -> LocalWindow {
 ///
 /// 扣减用饱和语义:窗口不足时置 0 而不是绕回。绕回会让后续每一次消费都
 /// 「成功」,而实际早就没有窗口了。
-pub fn LocalWindow::consume(self : LocalWindow, n : Int) -> LocalWindow {
+pub fn LocalWindow::consume(self : LocalWindow, n : Int32) -> LocalWindow {
   let next = if n > self.cur { 0 } else { self.cur - n }
-  { max: self.max, cur: next, consumed: self.consumed + n, max_packet: self.max_packet }
+  {
+    max: self.max,
+    cur: next,
+    consumed: self.consumed + n,
+    max_packet: self.max_packet,
+  }
 }
 
 ///|
@@ -691,8 +701,7 @@ pub fn LocalWindow::should_adjust(self : LocalWindow) -> Bool {
   if self.consumed <= 0 {
     return false
   }
-  (self.max - self.cur > self.max_packet * 3) ||
-  (self.cur < self.max / 2)
+  self.max - self.cur > self.max_packet * 3 || self.cur < self.max / 2
 }
 
 ///|
@@ -711,7 +720,8 @@ pub fn LocalWindow::take_adjust(self : LocalWindow) -> LocalWindow? {
   })
 }
 
-///| 这次调整要发多少字节
-pub fn LocalWindow::adjust_amount(self : LocalWindow) -> Int {
+///|
+/// 这次调整要发多少字节
+pub fn LocalWindow::adjust_amount(self : LocalWindow) -> Int32 {
   self.consumed
 }

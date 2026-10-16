@@ -1,16 +1,21 @@
-﻿///| Loop #53 主机证书测试
+///| Loop #53 主机证书测试
 ///
+
 ///| 固定件全部由 `host/cert_gen_fixture.py` 从真实的 `ssh-keygen -s` 证书生成，
+
 ///| 证书字段顺序、`signed_data` 切片长度、`SSH_CERT_TYPE_*` 常量都对着字节核过，
+
 ///| 且与 `ssh-keygen -L` 的输出交叉验证（见 cert.mbt 顶部）。
 ///
+
 ///| 时钟一律显式传入，不读墙上时间——否则「过期证书必须被拒」这条断言在写出来的
+
 ///| 第二天就永远为真了，等于没有。
 
 ///|
 fn cert_b64(s : String) -> FixedArray[Byte] {
   let view : StringView = s
-  let res = try { @base64.decode(view, ignore_whitespace=false) } catch {
+  let res = @base64.decode(view, ignore_whitespace=false) catch {
     _ => Bytes::new(0)
   }
   let arr : FixedArray[Byte] = FixedArray::make(res.length(), b'\x00')
@@ -23,14 +28,17 @@ fn cert_b64(s : String) -> FixedArray[Byte] {
 ///|
 /// GOOD_CERT 的有效期正中（由 ssh-keygen -V -1d:+1d 生成，落在固定件窗口内）
 /// GOOD_CERT 的有效期正中（由生成脚本算出的窗口中点，不手写时间戳）
-const NOW_MID : UInt64 = (@hostkey.GOOD_CERT_VALID_AFTER + @hostkey.GOOD_CERT_VALID_BEFORE) / 2UL
+const NOW_MID : UInt64 = (
+    @hostkey.GOOD_CERT_VALID_AFTER + @hostkey.GOOD_CERT_VALID_BEFORE
+  ) /
+  2UL
 
 ///|
 fn cert_ok(v : @hostkey.CertVerdict) -> Bool {
   v is Trusted(_)
 }
 
-///
+///|
 /// 期望「证书可信」，失败时把**具体理由**打出来。理由比行号有用得多：同一个
 /// test 里「被拒」可以是换 CA、过期、principal 不对、验签失败，处置完全不同。
 fn cert_expect_trusted(v : @hostkey.CertVerdict) -> Unit {
@@ -60,7 +68,7 @@ fn cert_reason(v : @hostkey.CertVerdict) -> String {
 
 ///|
 /// 从 blob 偏移 off 起把一个字节翻转，用来制造「结构仍合法但内容被改过」的证书
-fn cert_flip(blob : FixedArray[Byte], off : Int) -> FixedArray[Byte] {
+fn cert_flip(blob : FixedArray[Byte], off : Int32) -> FixedArray[Byte] {
   let out = FixedArray::make(blob.length(), b'\x00')
   for i = 0; i < blob.length(); i = i + 1 {
     out[i] = blob[i]
@@ -70,7 +78,7 @@ fn cert_flip(blob : FixedArray[Byte], off : Int) -> FixedArray[Byte] {
 }
 
 ///|
-fn cert_truncate(blob : FixedArray[Byte], n : Int) -> FixedArray[Byte] {
+fn cert_truncate(blob : FixedArray[Byte], n : Int32) -> FixedArray[Byte] {
   let out = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     out[i] = blob[i]
@@ -90,12 +98,13 @@ fn cert_parse_or_die(b : FixedArray[Byte]) -> @hostkey.HostCert {
 // 解析
 // ---------------------------------------------------------------------------
 
+///|
 test "cert_parse_good" {
   let c = cert_parse_or_die(cert_b64(@hostkey.GOOD_CERT))
   assert_eq(c.cert_type_name, "ssh-ed25519-cert-v01@openssh.com")
   assert_eq(c.key_type_name, "ssh-ed25519")
   assert_eq(c.cert_type, @hostkey.SSH_CERT_TYPE_HOST)
-  assert_eq(c.key_id, "host.example.com")  // CA-assigned key id, NOT the principal
+  assert_eq(c.key_id, "host.example.com") // CA-assigned key id, NOT the principal
   assert_eq(c.principals.length(), 1)
   assert_eq(c.principals[0], "127.0.0.1")
   assert_eq(c.serial, 0UL)
@@ -110,6 +119,7 @@ test "cert_parse_good" {
   assert_eq(c.signed_data.length(), @hostkey.GOOD_CERT_SIGNED_LEN)
 }
 
+///|
 test "cert_inner_key_round_trips" {
   let cert = cert_parse_or_die(cert_b64(@hostkey.GOOD_CERT))
   let key = match @hostkey.HostKey::from_blob(cert.inner_key_blob) {
@@ -127,6 +137,7 @@ test "cert_inner_key_round_trips" {
   }
 }
 
+///|
 test "cert_names_its_signer" {
   let cert = cert_parse_or_die(cert_b64(@hostkey.GOOD_CERT))
   let ca = cert_b64(@hostkey.CA_PUB)
@@ -136,6 +147,7 @@ test "cert_names_its_signer" {
   }
 }
 
+///|
 test "cert_signed_data_is_the_prefix" {
   let blob = cert_b64(@hostkey.GOOD_CERT)
   let cert = cert_parse_or_die(blob)
@@ -146,6 +158,7 @@ test "cert_signed_data_is_the_prefix" {
   }
 }
 
+///|
 test "cert_type_name_helpers" {
   assert_true(@hostkey.is_cert_type_name("ssh-ed25519-cert-v01@openssh.com"))
   assert_true(!@hostkey.is_cert_type_name("ssh-ed25519"))
@@ -153,11 +166,15 @@ test "cert_type_name_helpers" {
     @hostkey.plain_type_of_cert("ssh-ed25519-cert-v01@openssh.com"),
     "ssh-ed25519",
   )
-  assert_eq(@hostkey.plain_type_of_cert("ssh-rsa-cert-v01@openssh.com"), "ssh-rsa")
+  assert_eq(
+    @hostkey.plain_type_of_cert("ssh-rsa-cert-v01@openssh.com"),
+    "ssh-rsa",
+  )
   assert_true(@hostkey.looks_like_cert(cert_b64(@hostkey.GOOD_CERT)))
   assert_true(!@hostkey.looks_like_cert(cert_b64(@hostkey.HOST_PUB)))
 }
 
+///|
 test "cert_structural_failures" {
   let blob = cert_b64(@hostkey.GOOD_CERT)
   match @hostkey.HostCert::from_blob(cert_truncate(blob, blob.length() - 20)) {
@@ -178,6 +195,7 @@ test "cert_structural_failures" {
   }
 }
 
+///|
 test "cert_principals_are_a_blob_of_strings" {
   let c = cert_parse_or_die(cert_b64(@hostkey.NON_HOST_PRINCIPAL_CERT))
   assert_eq(c.principals.length(), 2)
@@ -196,6 +214,7 @@ test "cert_principals_are_a_blob_of_strings" {
 // 验证
 // ---------------------------------------------------------------------------
 
+///|
 test "cert_verifies_with_pinned_ca" {
   let v = @hostkey.verify_host_cert(
     cert_b64(@hostkey.GOOD_CERT),
@@ -206,6 +225,7 @@ test "cert_verifies_with_pinned_ca" {
   cert_expect_trusted(v)
 }
 
+///|
 test "cert_signed_data_tamper_is_caught" {
   // 翻的是 nonce（blob 偏移 0x28），结构仍然完全合法——只改内容不改布局。
   // 若把检查顺序改成「先看语义字段后验签」，这条仍然会红，所以它同时也在钉顺序。
@@ -218,6 +238,7 @@ test "cert_signed_data_tamper_is_caught" {
   assert_eq(cert_reason(v), "ca-sig-invalid")
 }
 
+///|
 test "cert_signature_tamper_is_caught" {
   let blob = cert_b64(@hostkey.GOOD_CERT)
   let v = @hostkey.verify_host_cert(
@@ -229,11 +250,17 @@ test "cert_signature_tamper_is_caught" {
   assert_eq(cert_reason(v), "ca-sig-invalid")
 }
 
+///|
 test "cert_wrong_ca_is_ca_not_pinned" {
   // 这两种区分不是洁癖：前者是「这台主机的 CA 不在你 pin 的名单里」，后者是
   // 「有人在中间乱改」。处置完全不同。
   let cert = cert_b64(@hostkey.ROGUE_CA_CERT)
-  let v = @hostkey.verify_host_cert(cert, cert_b64(@hostkey.CA_PUB), "127.0.0.1", NOW_MID)
+  let v = @hostkey.verify_host_cert(
+    cert,
+    cert_b64(@hostkey.CA_PUB),
+    "127.0.0.1",
+    NOW_MID,
+  )
   assert_eq(cert_reason(v), "ca-not-pinned")
   // 同一张证书配上它自己的 CA 就该过——否则上面那条可能只是「这张证书坏了」
   let v2 = @hostkey.verify_host_cert(
@@ -245,6 +272,7 @@ test "cert_wrong_ca_is_ca_not_pinned" {
   cert_expect_trusted(v2)
 }
 
+///|
 test "cert_ca_anchor_is_exactly_the_pinned_one" {
   // CA 信任锚的语义是「这张证书由**这一把** CA 签的」，两个方向都要成立：
   //
@@ -254,7 +282,12 @@ test "cert_ca_anchor_is_exactly_the_pinned_one" {
   // 第二条容易被写成「任何不是 ca.pub 的证书都必须被拒」，那是把 CA 信任锚
   // 退化成了「只认一把写死的钥匙」——每台主机换一把 CA 就得改代码。
   let cert = cert_b64(@hostkey.ROGUE_CA_CERT)
-  let wrong = @hostkey.verify_host_cert(cert, cert_b64(@hostkey.CA_PUB), "127.0.0.1", NOW_MID)
+  let wrong = @hostkey.verify_host_cert(
+    cert,
+    cert_b64(@hostkey.CA_PUB),
+    "127.0.0.1",
+    NOW_MID,
+  )
   assert_eq(cert_reason(wrong), "ca-not-pinned")
   let right = @hostkey.verify_host_cert(
     cert,
@@ -265,6 +298,7 @@ test "cert_ca_anchor_is_exactly_the_pinned_one" {
   cert_expect_trusted(right)
 }
 
+///|
 test "user_certificate_is_not_a_host_certificate" {
   // 这是本轮最贵的一条常量：SSH_CERT_TYPE_USER=1 / HOST=2。若写反，一张发给
   // alice 的用户证书就会被当成主机证书。这里连 principal 都传成证书自己声称的
@@ -274,10 +308,16 @@ test "user_certificate_is_not_a_host_certificate" {
   assert_eq(@hostkey.SSH_CERT_TYPE_USER, 1)
   assert_eq(@hostkey.SSH_CERT_TYPE_HOST, 2)
   assert_eq(c.principals[0], "alice")
-  let v = @hostkey.verify_host_cert(cert_b64(@hostkey.USER_CERT), cert_b64(@hostkey.CA_PUB), "alice", NOW_MID)
+  let v = @hostkey.verify_host_cert(
+    cert_b64(@hostkey.USER_CERT),
+    cert_b64(@hostkey.CA_PUB),
+    "alice",
+    NOW_MID,
+  )
   assert_eq(cert_reason(v), "not-host")
 }
 
+///|
 test "cert_validity_window" {
   let cert = cert_b64(@hostkey.EXPIRED_CERT)
   let ca = cert_b64(@hostkey.CA_PUB)
@@ -286,9 +326,19 @@ test "cert_validity_window" {
   let inside = (c.valid_after + c.valid_before) / 2UL
   let v_ok = @hostkey.verify_host_cert(cert, ca, "127.0.0.1", inside)
   cert_expect_trusted(v_ok)
-  let v_expired = @hostkey.verify_host_cert(cert, ca, "127.0.0.1", c.valid_before + 1UL)
+  let v_expired = @hostkey.verify_host_cert(
+    cert,
+    ca,
+    "127.0.0.1",
+    c.valid_before + 1UL,
+  )
   assert_eq(cert_reason(v_expired), "expired")
-  let v_early = @hostkey.verify_host_cert(cert, ca, "127.0.0.1", c.valid_after - 1UL)
+  let v_early = @hostkey.verify_host_cert(
+    cert,
+    ca,
+    "127.0.0.1",
+    c.valid_after - 1UL,
+  )
   assert_eq(cert_reason(v_early), "not-yet-valid")
   // 好证书用两个远离窗口的时间各判一次——两个方向都要区分得开。探针由常量
   // 推出而不是写死日期：写死的日期在固定件重新签发之后会悄悄落进窗口内部，
@@ -310,6 +360,7 @@ test "cert_validity_window" {
   assert_eq(cert_reason(v_future), "expired")
 }
 
+///|
 test "cert_principal_mismatch" {
   let cert = cert_b64(@hostkey.OTHER_PRINCIPAL_CERT)
   let ca = cert_b64(@hostkey.CA_PUB)
@@ -326,6 +377,7 @@ test "cert_principal_mismatch" {
   assert_eq(cert_reason(v3), "principal-mismatch")
 }
 
+///|
 test "cert_principal_comparison_is_exact" {
   let v = @hostkey.verify_host_cert(
     cert_b64(@hostkey.GOOD_CERT),

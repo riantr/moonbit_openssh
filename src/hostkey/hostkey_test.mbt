@@ -18,8 +18,8 @@ fn hk_hex(hex : String) -> FixedArray[Byte] {
 }
 
 ///|
-fn hk_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hk_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -72,11 +72,12 @@ fn hk_parse_name(res : @hostkey.ParseResult) -> String {
   match res {
     Parsed(Ed25519Key(_)) => "Parsed(ed25519)"
     Parsed(RsaKey(_, _)) => "Parsed(rsa)"
-    Parsed(EcdsaKey(bits, _)) => if bits == 256 {
-      "Parsed(ecdsa-p256)"
-    } else {
-      "Parsed(ecdsa-p384)"
-    }
+    Parsed(EcdsaKey(bits, _)) =>
+      if bits == 256 {
+        "Parsed(ecdsa-p256)"
+      } else {
+        "Parsed(ecdsa-p384)"
+      }
     Rejected(e) => hk_err_name(e)
   }
 }
@@ -102,7 +103,11 @@ fn hk_check_parse(
 }
 
 ///|
-fn hk_check_verify(res : @hostkey.VerifyResult, want : String, label : String) -> Unit {
+fn hk_check_verify(
+  res : @hostkey.VerifyResult,
+  want : String,
+  label : String,
+) -> Unit {
   let got = hk_verify_name(res)
   if got != want {
     abort("\{label}: got \{got}, want \{want}")
@@ -118,9 +123,9 @@ fn hk_ed25519_key(blob_hex : String, label : String) -> @hostkey.HostKey {
 }
 
 ///|
-fn hk_u32(v : Int) -> FixedArray[Byte] {
+fn hk_u32(v : Int32) -> FixedArray[Byte] {
   let a : FixedArray[Byte] = FixedArray::make(4, b'\x00')
-  let u : UInt = v.reinterpret_as_uint()
+  let u : UInt32 = v.reinterpret_as_uint()
   a[0] = ((u >> 24) & 0xFFU).to_byte()
   a[1] = ((u >> 16) & 0xFFU).to_byte()
   a[2] = ((u >> 8) & 0xFFU).to_byte()
@@ -163,7 +168,7 @@ fn hk_ascii(s : String) -> FixedArray[Byte] {
 
 ///|
 /// 确定性填充:i & 0xFF
-fn hk_seq(n : Int) -> FixedArray[Byte] {
+fn hk_seq(n : Int32) -> FixedArray[Byte] {
   let a : FixedArray[Byte] = FixedArray::make(n, b'\x00')
   for i = 0; i < n; i = i + 1 {
     a[i] = (i & 0xFF).to_byte()
@@ -173,7 +178,7 @@ fn hk_seq(n : Int) -> FixedArray[Byte] {
 
 ///|
 /// trim 后大端 bit length(本地副本,镜像包内私有实现)
-fn hk_bitlen(b : FixedArray[Byte]) -> Int {
+fn hk_bitlen(b : FixedArray[Byte]) -> Int32 {
   let n = b.length()
   if n == 0 {
     return 0
@@ -462,7 +467,10 @@ test "t7_verify_preconditions" {
     "t7 empty sig",
   )
   // msg 超上限(>1<<20)
-  let big : FixedArray[Byte] = FixedArray::make(@hostkey.MAX_SIGN_DATA_SIZE + 1, b'\x41')
+  let big : FixedArray[Byte] = FixedArray::make(
+    @hostkey.MAX_SIGN_DATA_SIZE + 1,
+    b'\x41',
+  )
   hk_check_verify(
     key.verify(
       big,
@@ -474,7 +482,10 @@ test "t7_verify_preconditions" {
     "t7 oversized msg",
   )
   // 边界:恰等于上限 → 过前置,进密码学验证必败
-  let edge : FixedArray[Byte] = FixedArray::make(@hostkey.MAX_SIGN_DATA_SIZE, b'\x42')
+  let edge : FixedArray[Byte] = FixedArray::make(
+    @hostkey.MAX_SIGN_DATA_SIZE,
+    b'\x42',
+  )
   hk_check_verify(
     key.verify(
       edge,

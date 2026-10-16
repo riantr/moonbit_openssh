@@ -18,13 +18,13 @@ pub fn KxBuf::new() -> KxBuf {
 
 ///|
 /// 单字节
-pub fn KxBuf::put_u8(self : KxBuf, v : UInt) -> Unit {
+pub fn KxBuf::put_u8(self : KxBuf, v : UInt32) -> Unit {
   self.data.push((v & 0xFFU).to_byte())
 }
 
 ///|
 /// u32 大端(SSH2 网络序)
-pub fn KxBuf::put_u32(self : KxBuf, v : UInt) -> Unit {
+pub fn KxBuf::put_u32(self : KxBuf, v : UInt32) -> Unit {
   for i = 0; i < 4; i = i + 1 {
     self.data.push(((v >> ((3 - i) * 8)) & 0xFFU).to_byte())
   }

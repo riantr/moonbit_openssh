@@ -11,7 +11,8 @@
 /// 客户端签名用的 blob 和服务端读到的 blob 就会对不上——而且这种不一致
 /// 表现为一个笼统的 "invalid signature",极难定位。
 
-///| 公钥点的 X 坐标
+///|
+/// 公钥点的 X 坐标
 ///
 /// KAT 需要拿它和 RFC 6979 公布的 Ux 直接比对,所以这是一个真实的对外接口,
 /// 不是为了绕过封装。
@@ -19,12 +20,14 @@ pub fn Point::x(self : Point) -> @bigint.BigNat {
   self.x
 }
 
-///| 公钥点的 Y 坐标
+///|
+/// 公钥点的 Y 坐标
 pub fn Point::y(self : Point) -> @bigint.BigNat {
   self.y
 }
 
-///| 曲线阶 n(私钥的取值上界)
+///|
+/// 曲线阶 n(私钥的取值上界)
 ///
 /// 公开出来是因为调用方需要用它**校验**一把外来私钥。没有这个访问器,
 /// 调用方只能拿私钥去试签,失败了也分不清是越界还是签名本身有问题。
@@ -32,12 +35,14 @@ pub fn Curve::order(c : Curve) -> @bigint.BigNat {
   c.n
 }
 
-///| 签名的 r 分量
+///|
+/// 签名的 r 分量
 pub fn Signature::r(self : Signature) -> @bigint.BigNat {
   self.r
 }
 
-///| 签名的 s 分量
+///|
+/// 签名的 s 分量
 pub fn Signature::s(self : Signature) -> @bigint.BigNat {
   self.s
 }

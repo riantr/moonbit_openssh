@@ -1,4 +1,5 @@
-///| Loop #26 DH group 14 KEX API verification (cmd/kexdh_test)
+///|
+/// Loop #26 DH group 14 KEX API verification (cmd/kexdh_test)
 ///
 /// Demonstrates:
 ///   - RFC 3526 group 14 (2048-bit MODP) prime loads correctly
@@ -9,7 +10,6 @@
 ///   KAT values for 2048-bit pow(2, x, p) require proper Montgomery REDC.
 ///   Current implementation uses Knuth Algorithm D which has overflow bugs
 ///   for multi-limb operations. Smaller pow tests in cmd/bigint_test pass.
-
 fn main {
   // ============ G1 RFC 3526 group 14 prime metadata ============
   let prime_bytes = @kexdh.group14_prime()
@@ -74,7 +74,10 @@ fn main {
   let k_c_hex = @bigint.BigNat::to_hex(k_client)
   let k_c_first8 = k_c_hex.unsafe_substring(start=0, end=8)
   let k_c_last_start = k_c_hex.length() - 8
-  let k_c_last8 = k_c_hex.unsafe_substring(start=k_c_last_start, end=k_c_last_start + 8)
+  let k_c_last8 = k_c_hex.unsafe_substring(
+    start=k_c_last_start,
+    end=k_c_last_start + 8,
+  )
   println("dh14_K_client_first8: " + k_c_first8)
   println("dh14_K_client_last8: " + k_c_last8)
 
@@ -82,12 +85,19 @@ fn main {
   let k_s_hex = @bigint.BigNat::to_hex(k_server)
   let k_s_first8 = k_s_hex.unsafe_substring(start=0, end=8)
   let k_s_last_start = k_s_hex.length() - 8
-  let k_s_last8 = k_s_hex.unsafe_substring(start=k_s_last_start, end=k_s_last_start + 8)
+  let k_s_last8 = k_s_hex.unsafe_substring(
+    start=k_s_last_start,
+    end=k_s_last_start + 8,
+  )
   println("dh14_K_server_first8: " + k_s_first8)
   println("dh14_K_server_last8: " + k_s_last8)
 
   // ============ G6 consistency: K_client == K_server ============
   let consistency = @bigint.BigNat::cmp(k_client, k_server)
-  let consistency_str = if consistency == 0 { "MATCH" } else { "MISMATCH_DEFERRED" }
+  let consistency_str = if consistency == 0 {
+    "MATCH"
+  } else {
+    "MISMATCH_DEFERRED"
+  }
   println("dh14_consistency: " + consistency_str)
 }

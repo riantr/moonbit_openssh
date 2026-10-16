@@ -1,4 +1,5 @@
-///| Loop #57: unit tests for the ssh_config *rules*, not just the parse.
+///|
+/// Loop #57: unit tests for the ssh_config *rules*, not just the parse.
 ///
 /// Loop #24 left this package with **zero** `moon test` cases -- its checks lived
 /// in `cmd/sshconfig_test`, which prints values and asserts nothing. So the
@@ -10,7 +11,6 @@
 /// The cases that matter are the ones the old implementation got wrong. Each one
 /// has a note saying what it used to do, because a test that only records current
 /// behaviour stops being evidence the moment the behaviour is wrong again.
-
 test "t1_first_obtained_wins_across_matching_blocks" {
   // The bug this loop is about: `Host *` at the end of a file is invisible to a
   // resolver that only looks at the first matching block.
@@ -21,6 +21,7 @@ test "t1_first_obtained_wins_across_matching_blocks" {
   assert_eq(@sshconfig.resolved_value("web1", s, "Port"), "2222")
 }
 
+///|
 test "t2_options_before_the_first_host_apply_globally" {
   // Used to be dropped entirely: the parser flushed a section with no patterns
   // only when `in_section` was set, which is false before the first `Host`.
@@ -31,6 +32,7 @@ test "t2_options_before_the_first_host_apply_globally" {
   assert_eq(@sshconfig.resolved_value("web1", s, "ServerAliveInterval"), "30")
 }
 
+///|
 test "t3_negated_pattern_vetoes_the_whole_block" {
   // Not "that one pattern is skipped": one match on a `!` pattern discards the
   // block, positive patterns included.
@@ -40,6 +42,7 @@ test "t3_negated_pattern_vetoes_the_whole_block" {
   assert_eq(@sshconfig.resolved_value("other", s, "Compression"), "yes")
 }
 
+///|
 test "t4_keyword_is_case_insensitive_and_duplicate_takes_the_first" {
   // readconf.c uses strcasecmp. Used to compare keywords with `==`.
   let cfg = "HOST alpha\n  USER u1\n  user u2\n  PoRt 2202\n"
@@ -49,6 +52,7 @@ test "t4_keyword_is_case_insensitive_and_duplicate_takes_the_first" {
   assert_eq(@sshconfig.resolved_value("alpha", s, "PORT"), "2202")
 }
 
+///|
 test "t5_equals_separator_and_inline_comment" {
   // Used to fail both: `Port=2202` became a keyword literally named
   // "Port=2202", and `bob # note` became the value "bob # note".
@@ -58,6 +62,7 @@ test "t5_equals_separator_and_inline_comment" {
   assert_eq(@sshconfig.resolved_value("gamma", s, "ConnectTimeout"), "7")
 }
 
+///|
 test "t6_host_pattern_matching_is_case_sensitive" {
   // ssh_config(5) is ambiguous here; this was checked rather than assumed.
   // `Host Web1` does NOT match host `web1` (verified with ssh -G).
@@ -66,6 +71,7 @@ test "t6_host_pattern_matching_is_case_sensitive" {
   assert_eq(@sshconfig.resolved_value("Web1", s, "User"), "up")
 }
 
+///|
 test "t7_multivalued_keywords_accumulate" {
   // IdentityFile is in readconf.c's oMultiValued list: two matching Host blocks
   // both survive. A resolver that treats everything as first-wins silently
@@ -78,10 +84,13 @@ test "t7_multivalued_keywords_accumulate" {
   assert_eq(ids[0], "/one")
   assert_eq(ids[1], "/three")
   // Single-valued in the same file still keeps only the first.
-  let mixed = @sshconfig.parse_ssh_config("Host x\n  User u1\nHost *\n  User u2\n")
+  let mixed = @sshconfig.parse_ssh_config(
+    "Host x\n  User u1\nHost *\n  User u2\n",
+  )
   assert_eq(@sshconfig.resolved_value("x", mixed, "User"), "u1")
 }
 
+///|
 test "t8_fallback_cascades_through_several_blocks" {
   let cfg = "Host *.prod.example.com\n  User u1\n  HostName h1\n\nHost *.example.com\n  Port 2223\n\nHost *\n  IdentityFile /k/three\n  ConnectTimeout 9\n"
   let s = @sshconfig.parse_ssh_config(cfg)
@@ -97,6 +106,7 @@ test "t8_fallback_cascades_through_several_blocks" {
   assert_eq(@sshconfig.resolved_value(other, s, "User"), "")
 }
 
+///|
 test "t9_match_host_option_agrees_with_the_resolver" {
   // The Loop #24 entry point now delegates, so it cannot drift from the rules.
   let cfg = "Host web1\n  User deploy\n\nHost *\n  Port 2222\n"
@@ -111,6 +121,7 @@ test "t9_match_host_option_agrees_with_the_resolver" {
   }
 }
 
+///|
 test "t10_fnmatch_agrees_with_openssh_on_every_loop24_case" {
   // Loop #24's fnmatch block counted passing `if` conditions and printed the
   // count against a **hardcoded** `fnmatch_total = 23`, then exited 0 either way.
@@ -169,8 +180,14 @@ test "t10_fnmatch_agrees_with_openssh_on_every_loop24_case" {
     if got != expect {
       mismatched = mismatched + 1
       println(
-        "fnmatch(" + pat + ", " + s + ") = " + got.to_string() +
-        ", OpenSSH says " + expect.to_string(),
+        "fnmatch(" +
+        pat +
+        ", " +
+        s +
+        ") = " +
+        got.to_string() +
+        ", OpenSSH says " +
+        expect.to_string(),
       )
     }
     i = i + 1

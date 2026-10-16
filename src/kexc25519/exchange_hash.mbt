@@ -18,7 +18,7 @@
 
 ///|
 /// SSH2_MSG_KEXINIT = 20(ssh2.h)
-const KX_MSG_KEXINIT : UInt = 20U
+const KX_MSG_KEXINIT : UInt32 = 20U
 
 ///| 版本串与 kexinit payload。
 

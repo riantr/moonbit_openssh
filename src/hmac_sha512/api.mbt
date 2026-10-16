@@ -24,11 +24,11 @@
 
 ///|
 /// HMAC-SHA512 块大小(等于 SHA-512 block_size)
-pub let block_size : Int = 128
+pub let block_size : Int32 = 128
 
 ///|
 /// HMAC-SHA512 输出长度(等于 SHA-512 hash_size = 64)
-pub let output_size : Int = 64
+pub let output_size : Int32 = 64
 
 ///|
 /// ipad 常量

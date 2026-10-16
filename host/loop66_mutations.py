@@ -97,6 +97,20 @@ MUTATIONS = [
         'import {\n  "openssh/openssh_moonbit/src/sshwire",',
         live=True,
     ),
+    # Moved here from host/loop67_mutations.py after it MISSED there. The reason
+    # is worth keeping: `verify_loop67.mjs` invokes the Loop #66 gate with
+    # `--skip-live` so a mutation run stays affordable, and that flag skips
+    # exactly the check this mutation attacks -- the accept-table equality,
+    # which is the only thing in the repository that notices a stray unused
+    # import. So the mutation belongs beside the check, not beside the loop
+    # that happened to introduce the import.
+    Mutation(
+        "M9", "re-add src/wtlive's dead moonbitlang/async import",
+        "src/wtlive/moon.pkg",
+        'import {\n',
+        'import {\n  "moonbitlang/async",\n',
+        live=True,
+    ),
 ]
 
 

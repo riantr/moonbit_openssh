@@ -19,7 +19,7 @@
 fn entry_matches_spec(
   entry : KnownHostEntry,
   host_only : String,
-  port_caller : Int,
+  port_caller : Int32,
 ) -> Bool {
   let specs = entry.host_specs
   for i = 0; i < specs.length(); i = i + 1 {
@@ -36,7 +36,9 @@ fn entry_matches_spec(
     } else {
       match_pattern_nfa(host_only, spec.host_only)
     }
-    if hit { return true }
+    if hit {
+      return true
+    }
   }
   false
 }
@@ -65,7 +67,7 @@ fn entry_matches_spec(
 fn find_last_direct_match_v2(
   entries : Array[KnownHostEntry],
   host_only : String,
-  port_caller : Int,
+  port_caller : Int32,
 ) -> KnownHostEntry? {
   let mut found : KnownHostEntry? = None
   for i = 0; i < entries.length(); i = i + 1 {
@@ -85,22 +87,28 @@ fn find_last_direct_match_v2(
 fn has_cert_authority_match(
   entries : Array[KnownHostEntry],
   host_only : String,
-  port_caller : Int,
+  port_caller : Int32,
 ) -> Bool {
   for i = 0; i < entries.length(); i = i + 1 {
     let e = entries[i]
-    if e.marker == Marker::CertAuthority && entry_matches_spec(e, host_only, port_caller) {
+    if e.marker == Marker::CertAuthority &&
+      entry_matches_spec(e, host_only, port_caller) {
       return true
     }
   }
   false
 }
 
-///| 字节级 blob 比较
+///|
+/// 字节级 blob 比较
 fn blob_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
-  if a.length() != b.length() { return false }
+  if a.length() != b.length() {
+    return false
+  }
   for i = 0; i < a.length(); i = i + 1 {
-    if a[i] != b[i] { return false }
+    if a[i] != b[i] {
+      return false
+    }
   }
   true
 }
@@ -123,10 +131,12 @@ fn blob_eq(a : FixedArray[Byte], b : FixedArray[Byte]) -> Bool {
 pub fn check_host_key(
   entries : Array[KnownHostEntry],
   host_str : String,
-  port : Int,
+  port : Int32,
   presented_blob : FixedArray[Byte],
 ) -> HostStatus {
-  if entries.length() == 0 { return Unknown }
+  if entries.length() == 0 {
+    return Unknown
+  }
   // 1. Normalize caller
   let (host_only, port_from_str) = split_host_str(host_str)
   let port_caller = if port == 0 {
@@ -141,7 +151,7 @@ pub fn check_host_key(
   for i = 0; i < entries.length(); i = i + 1 {
     let e = entries[i]
     if e.marker == Marker::Revoked && blob_eq(e.key_blob, presented_blob) {
-      return Mismatch  // key 在 @revoked 列表中,无论 host 匹不匹配都拒绝
+      return Mismatch // key 在 @revoked 列表中,无论 host 匹不匹配都拒绝
     }
   }
   // 3. last-match-wins 找 host+port 命中的**直接**条目
@@ -173,14 +183,15 @@ pub fn check_host_key_legacy(
   check_host_key(entries, host, 0, presented_blob)
 }
 
-///| strict-kex 感知:strict_kex=true 时 Unknown 升级为 InvalidEntry(拒绝)
+///|
+/// strict-kex 感知:strict_kex=true 时 Unknown 升级为 InvalidEntry(拒绝)
 ///
 /// Loop #51: `CertAuthority` **不**升级。它已经是一个拒绝了,而把它变成
 /// InvalidEntry 会把「用 CA pin 的」和「条目坏了」混成一类。
 pub fn check_host_key_strict(
   entries : Array[KnownHostEntry],
   host_str : String,
-  port : Int,
+  port : Int32,
   presented_blob : FixedArray[Byte],
   strict_kex : Bool,
 ) -> HostStatus {
@@ -191,7 +202,8 @@ pub fn check_host_key_strict(
   }
 }
 
-///| strict backward-compat shim
+///|
+/// strict backward-compat shim
 pub fn check_host_key_strict_legacy(
   entries : Array[KnownHostEntry],
   host : String,

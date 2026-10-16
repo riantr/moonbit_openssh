@@ -13,12 +13,14 @@
 /// one. If it cannot, the answer is not "try harder": the browser path needs a
 /// different shape, and saying so precisely is the deliverable.
 
-///| A plain function. If wasm-gc can export it, it appears in the module's
+///|
+/// A plain function. If wasm-gc can export it, it appears in the module's
 /// export table alongside `_start`.
-pub fn probe_step(n : Int) -> Int {
+pub fn probe_step(n : Int32) -> Int32 {
   n + 1
 }
 
+///|
 fn main {
   println("probe_step(41) = \{probe_step(41)}")
 }

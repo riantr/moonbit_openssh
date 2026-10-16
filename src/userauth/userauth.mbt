@@ -29,13 +29,16 @@
 ///     所以实际流程是「先把请求拼到签名之前 → 签 → 再把签名追加到末尾」。
 ///     RFC 4252 §7 的 boolean TRUE 就是在声明「后面跟着签名」。
 
-///| publickey 方法名
+///|
+/// publickey 方法名
 pub const AUTH_METHOD_PUBLICKEY : String = "publickey"
 
-///| USERAUTH_REQUEST 里的 service name(RFC 4252 §5)
+///|
+/// USERAUTH_REQUEST 里的 service name(RFC 4252 §5)
 pub const AUTH_SERVICE_CONNECTION : String = "ssh-connection"
 
-///| SSH boolean TRUE 的 wire 形式(RFC 4251 §5)
+///|
+/// SSH boolean TRUE 的 wire 形式(RFC 4251 §5)
 pub const SSH_BOOL_TRUE : Byte = b'\x01'
 
 ///|
@@ -53,10 +56,7 @@ fn ua_ascii(s : String) -> FixedArray[Byte] {
 
 ///|
 /// 拼接两个字节数组。
-fn ua_concat(
-  a : FixedArray[Byte],
-  b : FixedArray[Byte],
-) -> FixedArray[Byte] {
+fn ua_concat(a : FixedArray[Byte], b : FixedArray[Byte]) -> FixedArray[Byte] {
   let out : FixedArray[Byte] = FixedArray::make(
     a.length() + b.length(),
     b'\x00',
@@ -171,9 +171,11 @@ pub fn userauth_publickey_signed_request(
     Some(s) => s
   }
   let sig_blob = @ecdsa.encode_sig_blob(curve, sig)
-  Some((
-    blob,
-    sig_blob,
-    userauth_publickey_request(user, service, key_type, blob, sig_blob),
-  ))
+  Some(
+    (
+      blob,
+      sig_blob,
+      userauth_publickey_request(user, service, key_type, blob, sig_blob),
+    ),
+  )
 }

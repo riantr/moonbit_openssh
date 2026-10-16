@@ -18,14 +18,14 @@ fn hex_to_bytes(hex : String) -> FixedArray[Byte] {
 ///|
 /// 解析 "ab" 形式的两个 hex char 为 1 byte
 fn parse_byte(hi : UInt16, lo : UInt16) -> Byte {
-  let h : Int = hex_digit(hi)
-  let l : Int = hex_digit(lo)
+  let h : Int32 = hex_digit(hi)
+  let l : Int32 = hex_digit(lo)
   ((h * 16 + l).reinterpret_as_uint() & 0xFFU).to_byte()
 }
 
 ///|
-fn hex_digit(c : UInt16) -> Int {
-  let code : Int = c.to_int()
+fn hex_digit(c : UInt16) -> Int32 {
+  let code : Int32 = c.to_int()
   if code >= 48 && code <= 57 {
     code - 48
   } else if code >= 97 && code <= 102 {
@@ -50,7 +50,7 @@ test "rfc7748_alice" {
     "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
   )
   let actual = @x25519.x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1
@@ -74,7 +74,7 @@ test "rfc7748_bob" {
     "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
   )
   let actual = @x25519.x25519(scalar, point)
-  let mut diff_count : Int = 0
+  let mut diff_count : Int32 = 0
   for i = 0; i < 32; i = i + 1 {
     if actual[i] != expected[i] {
       diff_count = diff_count + 1

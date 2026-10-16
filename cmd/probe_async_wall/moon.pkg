@@ -3,4 +3,18 @@ import {
   "moonbitlang/async/js_async",
 }
 
+///| Loop #64: the synchronous-wall probe. js target only -- `main.mbt` is
+///| `extern "js"` end to end, which the native and wasm backends reject.
+///|
+///| Loop #67: the gate was never declared, so `moon check` on the default
+///| target failed with [4067] "Missing main function" on a package that is
+///| correct, and the warning collector reported it as a package that does not
+///| build. Declared here for the same reason `src/wt` and `cmd/wt_probe` carry
+///| theirs -- gated per file rather than per package, so a consumer that wants
+///| another target fails at its own compile instead of silently here.
+
+options(
+  targets: { "main.mbt": [ "js" ] },
+)
+
 pkgtype(kind: "executable")

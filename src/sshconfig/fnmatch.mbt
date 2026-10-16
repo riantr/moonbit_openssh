@@ -19,7 +19,7 @@ pub fn fnmatch(pattern : String, str : String) -> Bool {
 
 ///|
 /// 递归双指针匹配: p[pi..] vs s[si..]
-fn fnmatch_bytes(p : String, s : String, pi : Int, si : Int) -> Bool {
+fn fnmatch_bytes(p : String, s : String, pi : Int32, si : Int32) -> Bool {
   let mut pi2 = pi
   let mut si2 = si
 

@@ -11,7 +11,7 @@
 /// caller 一般不需要看到 HostSpec;可通过 host_patterns 做错误消息。
 pub struct HostSpec {
   host_only : String
-  host_port : Int?
+  host_port : Int32?
 }
 
 ///|
@@ -65,7 +65,8 @@ pub(all) enum HostStatus {
   InvalidEntry
 } derive(Eq)
 
-///| Loop #66: same explicit promotion as `Marker` above.
+///|
+/// Loop #66: same explicit promotion as `Marker` above.
 pub extend HostStatus with Eq::{equal, not_equal}
 
 ///|
@@ -85,7 +86,7 @@ pub(all) struct KnownHostEntry {
   /// 整行原文（用于错误消息）
   raw_line : String
   /// 源文件行号（用于错误消息；纯字符串输入时为 caller 传入值）
-  linenum : Int
+  linenum : Int32
 }
 
 ///|

@@ -48,7 +48,7 @@ extern "js" fn cfg(name : String) -> String = "((n) => (globalThis.__wt_cfg && g
 
 ///|
 /// Call into plain JavaScript, to prove the FFI boundary is live in a Worker.
-extern "js" fn js_probe() -> Int = "(() => (typeof globalThis) === 'object' && typeof globalThis.WorkerGlobalScope !== 'undefined' ? 1 : 0)"
+extern "js" fn js_probe() -> Int32 = "(() => (typeof globalThis) === 'object' && typeof globalThis.WorkerGlobalScope !== 'undefined' ? 1 : 0)"
 
 ///|
 

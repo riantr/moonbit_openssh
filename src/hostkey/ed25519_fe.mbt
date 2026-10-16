@@ -182,7 +182,7 @@ fn fe_freeze_inplace(r : Fe) -> Unit {
 
 ///|
 /// 连续 n 次 squaring: r = x^(2^n)
-fn fe_square_n(x : Fe, n : Int) -> Fe {
+fn fe_square_n(x : Fe, n : Int32) -> Fe {
   let mut r = x
   for _i = 0; _i < n; _i = _i + 1 {
     r = fe_square(r)

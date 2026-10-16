@@ -363,7 +363,7 @@ fn ge_cmov_aff(r : Ge_aff, p : Ge_aff, b : UInt64) -> Unit {
 
 ///|
 /// 注意:C 是 32-bit shift(0xFFFFFFFF >> 31 = 1),MoonBit 用 UInt64 必须 >> 63 再 & 1
-fn ge_equal_i8(b : Int, c : Int) -> UInt64 {
+fn ge_equal_i8(b : Int32, c : Int32) -> UInt64 {
   let ub = b.to_uint64() & 0xFFUL
   let uc = c.to_uint64() & 0xFFUL
   let x = ub ^ uc
@@ -375,7 +375,7 @@ fn ge_equal_i8(b : Int, c : Int) -> UInt64 {
 
 ///|
 /// b 是 Int,signed range [-4, 3]
-fn ge_negative(b : Int) -> UInt64 {
+fn ge_negative(b : Int32) -> UInt64 {
   if b < 0 {
     1UL
   } else {
@@ -387,7 +387,7 @@ fn ge_negative(b : Int) -> UInt64 {
 
 ///|
 /// 对应 C: choose_t
-fn ge_choose_t(pos : Int, b : Int) -> Ge_aff {
+fn ge_choose_t(pos : Int32, b : Int32) -> Ge_aff {
   let t = ge_aff_new()
   // base = multiples[5*pos+0]
   let base = ge25519_base_multiples_affine[5 * pos + 0]

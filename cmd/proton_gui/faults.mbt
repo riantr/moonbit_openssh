@@ -32,7 +32,7 @@
 // hex helpers
 // ---------------------------------------------------------------------------
 
-fn hex_nibble(c : UInt16) -> Int {
+fn hex_nibble(c : UInt16) -> Int32 {
   let n = c.to_int()
   if n >= 48 && n <= 57 {
     return n - 48
@@ -77,7 +77,7 @@ fn to_hex(b : FixedArray[Byte]) -> String {
 // ---------------------------------------------------------------------------
 
 ///|
-fn opt_int(v : Int?) -> String {
+fn opt_int(v : Int32?) -> String {
   match v {
     None => "-"
     Some(x) => x.to_string()
@@ -199,8 +199,8 @@ pub(all) struct Run {
   done : Bool
   failed : Bool
   reason : String
-  version : Int
-  extensions : Int
+  version : Int32
+  extensions : Int32
   ext_names : Array[String]
 }
 
@@ -398,7 +398,7 @@ pub fn run_named(name : String) -> (Bool, Array[String], Run, FaultCase) {
 
 ///|
 /// cheaper than explaining the box.
-pub fn run_all() -> (Int, Array[String], Array[String]) {
+pub fn run_all() -> (Int32, Array[String], Array[String]) {
   let fails : Array[String] = []
   let notes : Array[String] = []
   for i = 0; i < fault_cases.length(); i = i + 1 {
