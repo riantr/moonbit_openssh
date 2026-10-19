@@ -1,0 +1,63 @@
+# Line endings are a repository rule, not a developer's git config.
+#
+# ## Why this file exists
+#
+# Measured on GitHub run 39200128854: `actions/checkout` on `windows-latest`
+# checked the entire tree out with CRLF, and six gates went red for it.
+#
+# The rule that prevented this -- "never check out CRLF here" -- was NOT in the
+# repository. It was in one developer's global git config:
+#
+#     git config --global core.autocrlf false
+#     git config --global core.eol lf
+#
+# A global config does not travel with a clone. Git for Windows defaults to
+# `core.autocrlf=true`, so the runner got CRLF and the developer got LF, from
+# the same commit.
+#
+# This is the same defect as Loop #69's hardcoded `SSHD_BIN`, and the same
+# lesson: **a claim about the machine that is not in the repository is not a
+# rule, it is a coincidence that happens to hold on your machine.**
+#
+# ## What CRLF actually broke, so this is not hypothetical
+#
+#   verify_loop67  reported the whole tree as CRLF -- it is the gate that has
+#                  been guarding this the entire time
+#   verify_loop57  `values match ssh -G 0 keyword(s)` for all 8 cases: the
+#   verify_loop58  MoonBit resolver matched ZERO Host blocks, while `ssh -G`
+#                  (C, tolerant) answered everything. src/sshconfig/parser.mbt
+#                  has no `\r` handling anywhere, so `Host *.example.com\r`
+#                  matches nothing. One side all-correct, one side all-empty
+#                  is a shape only a line ending produces.
+#   verify_loop56  `SHA-1(b''...) == hashlib` failed while `b'abc'` passed --
+#                  the empty input vector was the one carrying a stray `\r`
+#   verify_loop62  `[7713 vs 7621 bytes]`: 92 bytes, which is 92 lines' worth
+#                  of `\r`. Worse, the generator writes in Python text mode, so
+#                  on Windows it rewrote the committed file in place -- the gate
+#                  was modifying the working tree it was asserting against.
+#   verify_loop66  `only 0 entries carry a reason string`: the accept table was
+#                  CRLF enough to break the reason field it asserts on
+#
+# ## The rules
+#
+# `eol=lf` is deliberate and not merely `text=auto`. `text=auto` alone leaves
+# the *checkout* conversion to `core.autocrlf`, which is exactly the setting
+# that was wrong. Pinning `eol=lf` means the working tree is LF regardless of
+# what the machine's git believes, so the file works on a developer machine, a
+# GitHub runner, and a fresh clone under any global config.
+* text=auto eol=lf
+
+# Batch is the exception, and it is not an aesthetic choice.
+#
+# `verify_c/build_poly1305.bat` contains `goto :check`. cmd.exe label
+# resolution is not reliable in an LF-only batch file, so normalising these to
+# LF would trade a class of CI failures for a class of local ones. Keep them
+# CRLF on checkout; the repository stores them with whatever git stores, and
+# `verify_loop67` only polices the files the MoonBit formatter owns.
+*.bat text eol=crlf
+
+# Tracked build outputs. `text=auto` detects these as binary by their NUL
+# bytes, but saying so removes the dependence on that heuristic being right.
+*.wasm binary
+*.png binary
+*.ico binary
