@@ -70,10 +70,24 @@ const SSHD_BIN = found ? join(found, 'sshd.exe') : null;
 const KEYGEN_BIN = found && existsSync(join(found, 'ssh-keygen.exe'))
   ? join(found, 'ssh-keygen.exe')
   : 'ssh-keygen';
-const DIR = join(ROOT, '.loop31', 'sshd');
-
 const argv = process.argv.slice(2);
-const PORT = Number(argv[argv.indexOf('--port') + 1]) || 22222;
+const flag = (name) => {
+  const i = argv.indexOf(name);
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : '';
+};
+// Loop #74: `--dir` exists so a gate can run this file's REAL key generation
+// against an empty directory. The `-b` splice bug below lived for months behind
+// `if (!existsSync(priv))`, which on any developer machine is permanently false
+// -- the four host keys were generated on 2026-09-30 and reused ever since. A
+// test that re-implements the argument construction instead of calling this file
+// would test the copy, so the copy is not what gets tested.
+const DIR_OVERRIDE = flag('--dir');
+const DIR = DIR_OVERRIDE
+  ? resolve(DIR_OVERRIDE)
+  : join(ROOT, '.loop31', 'sshd');
+const KEYS_ONLY = argv.includes('--keys-only');
+
+const PORT = Number(flag('--port')) || 22222;
 const STOP = argv.includes('--stop');
 const HOSTKEY_ALGS = (() => {
   const i = argv.indexOf('--hostkey-algs');
@@ -151,7 +165,31 @@ for (const [type, bits, name] of KEYS) {
     const args = ['-t', type, '-f', priv, '-q', '-C', 'loop31 test host key'];
     // ssh-keygen 8.0p1 takes -b for RSA/ECDSA but not for ed25519, whose size
     // is fixed at 256. Passing -b there is an error, not a warning.
-    if (bits !== null) args.splice(3, 0, '-b', String(bits));
+    //
+    // Loop #74: this was `splice(3, ...)`, which inserted `-b <bits>` BETWEEN
+    // `-f` and its filename. ssh-keygen then took `-b` as the output path,
+    // promoted `256` and the real path to positional arguments, and answered
+    //
+    //   Error: Command failed: ...\ssh-keygen.exe -t ecdsa -f -b 256
+    //          D:\...\hostkey_ecdsa_256 -q -C loop31 test host key -N
+    //   Too many arguments.
+    //
+    // Two things kept it invisible. The whole branch is behind
+    // `if (!existsSync(priv))`, and the four host keys on a developer machine
+    // were generated on 2026-09-30 and have been reused ever since -- so the
+    // line has never executed here. And on CI, where .loop31/ is always fresh,
+    // it fails every single run, which is why loop65 died with
+    // `sshd never came up; the probe did not test anything` and then reported
+    // LEAK CONFIRMED: a gate that could not test anything reported the thing it
+    // was built to detect. Loop #72's stdio forwarding is what finally made the
+    // ssh-keygen error visible; before that the transcript was 65 bytes long.
+    //
+    // The index is `indexOf(priv) + 1` because splice INSERTS BEFORE the given
+    // position: the filename is element 3, so 3 would put `-b` in front of it --
+    // which is the bug this comment is about, arrived at again by a different
+    // route. Written as an expression rather than a literal so the next person
+    // who inserts an argument before the filename does not have to remember.
+    if (bits !== null) args.splice(args.indexOf(priv) + 1, 0, '-b', String(bits));
     // -N must be an actually-empty argument. The two-character string `""`
     // is accepted as "no passphrase" by the old PEM formats and silently
     // becomes the passphrase for the newer OpenSSH private key format --
@@ -161,6 +199,22 @@ for (const [type, bits, name] of KEYS) {
     sh(KEYGEN_BIN, args);
     console.log(`generated ${name}`);
   }
+}
+
+// Stop here when the caller only wanted the keys. This exists so a gate can ask
+// the question CI actually asks -- "on a machine that has never run this, do
+// the host keys appear?" -- without starting a server, writing a config, or
+// binding a port. Everything before this line is the code that was broken.
+if (KEYS_ONLY) {
+  const missing = KEYS
+    .map(([, , name]) => name)
+    .filter((name) => !existsSync(join(DIR, name)) || !existsSync(join(DIR, `${name}.pub`)));
+  if (missing.length) {
+    console.error(`host keys missing after generation: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  console.log(`host keys ready in ${DIR}`);
+  process.exit(0);
 }
 
 // ---- authorized_keys: the test client's public key (empty for now; we use
