@@ -224,6 +224,54 @@ jobs:
           }
           Write-Host "CEF layout present: $layout"
 
+      # Loop #74: verify_loop53.mjs opens by requiring eleven certificate
+      # fixtures in `.loop53/`, and NOTHING in this repository created them.
+      # They were made once, on one machine, on 2026-10-13, and every run since
+      # -- all of them local -- found them already there. On a fresh runner:
+      #
+      #   loop53: FAIL  fixtures  missing .loop53/ca
+      #   loop53: 2/3 checks passed
+      #
+      # Same shape as the `-b` splice fixed in this loop: a gate whose inputs
+      # exist only where the gate has already run, green on every developer
+      # machine and red on every clean checkout. It cost three 16-minute runs to
+      # notice.
+      #
+      # `host/cert_gen_fixture.py` looks like the producer and is not -- it READS
+      # `.loop53/*.pub` and emits `src/hostkey/cert_fixture.mbt`. It is also
+      # referenced nowhere in the tree.
+      #
+      # Generating rather than committing the keys: they are throwaway test keys
+      # that sign nothing, so the security cost of committing them is nil, but a
+      # repository that carries private keys keeps carrying them and a reviewer
+      # cannot tell a test CA from a real one in a diff. Generating makes the
+      # fixture set reproducible and reviewable as code.
+      #
+      # Known gap, stated rather than hidden: `cert_fixture.mbt` is committed and
+      # was generated from the PREVIOUS `.loop53` certificates, and no gate
+      # compares the two. Fresh fixtures therefore widen a gap that already
+      # exists. loop53 asserts behaviour over these vectors, not particular
+      # bytes, so this run tests what it claims to test; closing the
+      # correspondence is separate work with its own loop.
+      - name: Provision the loop53 certificate fixtures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node host\gen_loop53_fixtures.mjs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gen_loop53_fixtures.mjs exited $LASTEXITCODE"
+            exit 1
+          }
+          # And then ask, rather than trusting the generator's own summary: the
+          # gate will otherwise be the one to discover a missing file, three
+          # steps later, in a message that names neither the cause nor the
+          # command that fixes it.
+          node host\gen_loop53_fixtures.mjs --check
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "the loop53 certificate fixtures are still incomplete after generating"
+            exit 1
+          }
+
       - name: Run gates
         run: python ci/ci.py --tiers env,build,gates --json ci/artifacts/ci.json
         env:
