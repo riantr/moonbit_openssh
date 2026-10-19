@@ -1816,9 +1816,74 @@ is a machine nobody has set up, and the only reliable way to know what it needs
 is to let a run fail and read what it said.
 
 The command is `proton_cli cef setup`, read from `proton_cli cef --help` rather
-than guessed. There is no `--dry-run`, so it runs only in CI, never locally,
-and the workflow fails loudly if `proton_cli.exe` is absent rather than letting
-it surface later as a missing C header in an unrelated file.
+than guessed. There is no `--dry-run`, so it runs only in CI, never locally.
+
+**And the first version of that step was wrong in a way worth recording,
+because it is the same mistake this file keeps making.** It asserted that
+`proton_cli.exe` ships with the MoonBit CLI and lives in
+`$env:USERPROFILE\.moon\bin`, and failed the workflow if the file was not
+there. Run `39230209722` answered in one second:
+
+```
+Write-Error: proton_cli.exe not found at C:\Users\runneradmin\.moon\bin\proton_cli.exe
+  -- it ships with the MoonBit CLI install.
+```
+
+The error message repeated the assumption as its own justification. That is the
+shape to watch for: a check whose complaint is a restatement of the thing it
+never verified.
+
+What the toolchain actually does, each part read rather than remembered:
+
+- `https://cli.moonbitlang.com/install/powershell.ps1` fetches
+  `moonbit-latest.zip` and `moonbit-windows-x86_64-dev.zip` and extracts them
+  into `.moon`. Neither archive contains `proton_cli.exe`. `moon --help` has no
+  `proton` subcommand. **The Proton CLI is not part of the MoonBit CLI
+  distribution.**
+- It is a **registry package**. `moon view moonbit-community/proton_cli` ->
+  `0.5.0`, repository `github.com/moonbit-community/proton/tree/main/cli`.
+- The published Proton README says
+  `moon install --path cli --bin target\proton-tools`. That line is wrong:
+  `moon install --help` has no `--path`. The real signature is a positional
+  `SOURCE` (`user/module/pkg[@version]`) plus `--bin DIR`. Copying the README
+  would have failed on the runner for a different reason and cost another run.
+- `justjavac/proton_cli` -- the name in that README -- is **deprecated**;
+  `moon view` says so and names `moonbit-community/proton_cli` as the
+  replacement.
+
+So the step installs it, and does not name the file it expects:
+
+```
+moon install "moonbit-community/proton_cli@0.3.4" --bin "$env:USERPROFILE\.moon\bin"
+```
+
+**Pinned, and the pin is load-bearing.** `proton_cli cef requirements` on 0.3.4
+prints:
+
+```json
+{"proton_version":"0.3.4","platform":"win32-x64",
+ "cef_archive":"cef_binary_150.0.19+gcf60f42+chromium-150.0.7871.252_windows64_minimal",
+ "cef_sha256":"169847f3d000ded924c619e4d2d042ca3c44d2a5a0398dfdf521c70d34739761",
+ "layout_version":1}
+```
+
+`169847f3` is the sha in the original C1083 failure text. A floating
+`@latest` would install 0.5.0, which requires a different CEF archive, and the
+CLI and the build would then disagree about which CEF this is -- the same "an
+untrue declaration" shape that Loop #68 and Loop #66 both had to chase. The pin
+is not taste; it is the only thing that keeps the two halves agreeing.
+
+Then the step verifies the outcome instead of trusting the exit code: it re-reads
+`cef requirements`, reconstructs the layout path from what the tool said, and
+fails if `sdk\include\capi\cef_browser_capi.h` is not there. A green
+`cef setup` that installed the wrong archive would otherwise become a C1083 four
+steps away in a different file.
+
+The binary's own name is discovered with `Get-ChildItem -Filter 'proton*.exe'`
+rather than written down, because the README calls it `proton` and the file that
+appears is `proton_cli.exe`. Naming it would be a guess about a filename, in the
+one step whose entire subject is a toolchain component that was not where the
+previous version said it was.
 
 #### 4. The evidence chain had a fourth hole
 

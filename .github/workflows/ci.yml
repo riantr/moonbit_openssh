@@ -145,26 +145,84 @@ jobs:
       # third runner prerequisite in a row (paramiko, then Playwright, then
       # this) that was "obviously already there" and was not.
       #
-      # `proton_cli cef setup` is named from `proton_cli cef --help` rather than
-      # guessed. There is no --dry-run, so it runs only here, never locally.
-      # The existence check is explicit because the failure this replaces was
-      # silent: a missing tool would otherwise become a compiler error about a
-      # header, four steps later, in a different file.
+      # The first attempt at this step asserted that `proton_cli.exe` ships with
+      # the MoonBit CLI and lives in `$env:USERPROFILE\.moon\bin`. It does not.
+      # Run 39230209722 answered in one second:
+      #
+      #   Write-Error: proton_cli.exe not found at
+      #     C:\Users\runneradmin\.moon\bin\proton_cli.exe -- it ships with the
+      #     MoonBit CLI install.
+      #
+      # `https://cli.moonbitlang.com/install/powershell.ps1` was then read in
+      # full: it fetches `moonbit-latest.zip` and
+      # `moonbit-windows-x86_64-dev.zip` from cli.moonbitlang.com and extracts
+      # them into `.moon`. Neither archive contains `proton_cli.exe`, and
+      # `moon --help` has no `proton` subcommand. The tool is distributed as a
+      # REGISTRY package instead, which is why a developer machine has one and a
+      # runner does not.
+      #
+      # Two facts here came from reading the actual tool rather than from
+      # memory, and both contradicted something I would otherwise have shipped:
+      #
+      #   * `moon install --help` has NO `--path` flag. The published Proton
+      #     README says `moon install --path cli --bin target\proton-tools`,
+      #     and that line fails. The real signature is a positional SOURCE
+      #     (`user/module/pkg[@version]`) plus `--bin DIR`.
+      #   * `justjavac/proton_cli` is DEPRECATED; `moon view` says so and points
+      #     at `moonbit-community/proton_cli`.
+      #
+      # The version is pinned, and the reason is in the assertion below rather
+      # than in taste: the CEF archive is a property of the CLI version. 0.3.4
+      # requires `cef_binary_150.0.19+gcf60f42+chromium-150.0.7871.252`,
+      # sha256 169847f3..., which is exactly the `cef-169847f3...` in the failure
+      # above. A floating `@latest` would have installed 0.5.0, which wants a
+      # different archive, and the two halves of the build would have disagreed
+      # about which CEF this is -- the same "an untrue declaration" failure this
+      # repository has now hit three times.
       - name: Provision the Proton CEF runtime
         shell: pwsh
-        # Bounded on purpose. `cef setup` downloads and unpacks a CEF layout,
-        # and there is no --dry-run to rehearse it against -- so this is the one
-        # step in the job whose behaviour is being discovered rather than
-        # verified. A 20-minute cap turns "the runner hung on a prompt" into a
-        # red step with a name, instead of a 6-hour job timeout.
+        # Bounded on purpose: `cef setup` downloads and unpacks a ~150MB CEF
+        # layout and there is no --dry-run to rehearse it against, so this is
+        # the one step in the job whose behaviour is being discovered rather
+        # than verified. A cap turns "the runner hung" into a red step with a
+        # name instead of a 6-hour job timeout.
         timeout-minutes: 20
         run: |
-          $cli = "$env:USERPROFILE\.moon\bin\proton_cli.exe"
-          if (-not (Test-Path $cli)) {
-            Write-Error "proton_cli.exe not found at $cli -- it ships with the MoonBit CLI install. Without it `cmd/proton_gui` cannot build its C stub, and the failure surfaces as a missing cef_browser_capi.h several steps away."
+          $ErrorActionPreference = 'Stop'
+          $binDir = "$env:USERPROFILE\.moon\bin"
+          # Pinned to the version whose `cef requirements` matches the sha the
+          # build resolves. See the comment above.
+          moon install "moonbit-community/proton_cli@0.3.4" --bin $binDir
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "moon install moonbit-community/proton_cli@0.3.4 exited $LASTEXITCODE"
             exit 1
           }
-          & $cli cef setup
+          # Discovered, not assumed: the published README calls the binary
+          # `proton` and the file this writes is `proton_cli.exe`. Naming it
+          # here would be a guess about a filename, in the step whose whole
+          # subject is a toolchain component that was not where I said it was.
+          $cli = Get-ChildItem $binDir -Filter 'proton*.exe' -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $cli) {
+            Write-Error "moon install reported success but no proton*.exe is in $binDir"
+            exit 1
+          }
+          & $cli.FullName cef setup
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "`"$($cli.Name) cef setup` exited $LASTEXITCODE"
+            exit 1
+          }
+          # And then check the thing the build actually asks for, by asking the
+          # tool rather than by remembering the layout convention. A mismatch
+          # here is the C1083 from four steps away, said out loud instead.
+          $req = (& $cli.FullName cef requirements | ConvertFrom-Json)
+          $layout = "$env:USERPROFILE\.proton\store\$($req.platform)\cef-$($req.cef_sha256)-layout-$($req.layout_version)"
+          Write-Host "proton $($req.proton_version) wants CEF $($req.cef_archive)"
+          if (-not (Test-Path (Join-Path $layout 'sdk\include\capi\cef_browser_capi.h'))) {
+            Write-Error "cef setup exited 0 but $layout\sdk\include\capi\cef_browser_capi.h is absent -- cmd/proton_gui will fail with C1083"
+            exit 1
+          }
+          Write-Host "CEF layout present: $layout"
 
       - name: Run gates
         run: python ci/ci.py --tiers env,build,gates --json ci/artifacts/ci.json
