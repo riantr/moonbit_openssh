@@ -2203,12 +2203,30 @@ are still red, for the reasons recorded under Loop #66 and Loop #67.
 `ci/release.py`. **No tag while the local CI is not fully green — including when
 the owner asks directly.** The gate does not know who is asking; the tag is
 produced by `git tag` from `next_tag()`, never hand-typed. `next_tag` moves only
-the trailing number (`v0.1.0` → `v0.1.1`), preserving zero padding, and refuses
+the trailing number (`v0.1.0` -> `v0.1.1`), preserving zero padding, and refuses
 rather than guessing when there is nothing to move. Gitee may be pushed at any
-time; GitHub only after a green run and a tag — and note this repository has
-**only** an `origin` → gitee remote, so that half is policy with nothing to act
-on yet. Tiers excluded from the tag decision (`peer-gates`, `mutations`) are
-printed at the moment the decision is made, not hidden.
+time; GitHub only after a green run and a tag. Tiers excluded from the tag
+decision (`peer-gates`, `mutations`) are printed at the moment the decision is
+made, not hidden.
+
+**Both halves of that rule now have a remote, as of 2026-10-19.** This file
+previously said the GitHub half was "policy with nothing to act on yet"; that is
+no longer true and the note was removed rather than left to mislead:
+
+| remote | URL | role |
+|---|---|---|
+| `origin` | `git@gitee.com:ren-yongxiang/moonbit_openssh.git` | day-to-day storage |
+| `github` | `git@github.com:riantr/moonbit_openssh.git` | version/release updates |
+
+The Gitee repository was renamed from `moonbit-openssh` to `moonbit_openssh` and
+re-created empty, so this is a move rather than a second origin -- one remote per
+host, and `origin` still means "the one you push to normally". The rename is why
+the old path 404s now: `git ls-remote` on it fails with `404 not found`, which is
+worth knowing before anyone concludes the SSH key broke.
+
+The GitHub rule is unchanged and still has teeth: a green run is necessary but
+not sufficient. `v0.1.1` was computable the moment qa reached 12/12, and pushing
+it to GitHub still required the tag to exist first.
 
 A self-check case caught a contradiction here: this file originally promised to
 refuse a date-shaped tag like `release-2026-10`, while the implementation
