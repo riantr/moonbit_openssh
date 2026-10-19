@@ -9,9 +9,25 @@
 #   local:  python ci/ci.py
 #   here:   python ci/ci.py --json ci/artifacts/ci.json
 #
-# The one genuinely CI-shaped thing this file adds is caching. `moon` and the
-# dependency cache are the slow part of a cold gate run, and neither belongs in
-# the repository.
+# The runner is WINDOWS, and that is load-bearing rather than incidental.
+#
+# `ci/qa.py` wraps every toolchain invocation as ["cmd", "/c", "moon", ...], and
+# the .mjs gates shell out the same way. On ubuntu that fails with exit 127 --
+# "command not found" -- on every single step, so the job was never going to go
+# green there. That is not a bug in this workflow file: it is the workflow
+# disagreeing with the engine it wraps. Measured on ubuntu-latest at commit
+# a676ff7: `FAIL env moon version exit 127`, `FAIL build ... exit 127`, and so
+# on for the whole step list.
+#
+# Making the engine cross-platform instead would be the other fix, and it is a
+# bigger one: it touches ci/qa.py, ci/ci.py and every gate that shells out.
+# Moving the runner costs one line per job and changes nothing about what is
+# actually being verified. The trade is runner minutes -- Windows runners bill
+# at roughly twice the Linux rate.
+#
+# This file was never exercised on GitHub before 2026-10-19; the local path
+# (`python ci/ci.py`) bypasses it entirely, which is how a Windows-only engine
+# sat behind an ubuntu runner without anyone noticing.
 
 name: CI
 
@@ -28,7 +44,7 @@ concurrency:
 jobs:
   gates:
     name: gates
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 60
 
     steps:
@@ -36,9 +52,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up MoonBit
-        run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+        uses: ./.github/actions/setup-moonbit
 
       - name: Cache MoonBit dependencies
         uses: actions/cache@v4
@@ -82,16 +96,14 @@ jobs:
     # engine's own exit code is still honest: if it exits 1 the job is red.
     name: qa category matrix
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up MoonBit
-        run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+        uses: ./.github/actions/setup-moonbit
 
       - name: Show the QA categories
         run: python ci/ci.py --tiers qa --list
@@ -103,7 +115,7 @@ jobs:
     # Runs first and fast. If the engine's own accounting is broken, nothing
     # the gates report can be trusted, so this gates everything else.
     name: engine self-check
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 5
 
     steps:
@@ -127,7 +139,7 @@ jobs:
     # Pushing to gitee is allowed at any time. Pushing to GitHub is allowed
     # only after a green run and a tag -- see ci/release.py.
     name: release gate (report only)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 20
     if: always() && needs.engine-self-check.result == 'success'
 
@@ -137,9 +149,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Set up MoonBit
-        run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+        uses: ./.github/actions/setup-moonbit
       - name: Would a tag be allowed right now?
         # Exits 1 when the gate would refuse, which is the honest answer.
         # This job is allowed to fail: a red gate is the expected state most
