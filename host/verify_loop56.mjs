@@ -233,10 +233,36 @@ function main() {
   // the one that names which assertion broke.
   const cFail = (c.text.match(/^\s*fail\b/gim) || []).length;
   const cTotal = /Total:\s*(\d+)\/(\d+)\s+passed/.exec(c.text);
+  // The FAILING assertions, all of them, not the last five lines of the output.
+  //
+  // Run 39231921826 said `12 fail line(s)` and then showed four of them:
+  //
+  //   FAIL  c harness  12 fail line(s); FAIL C56 C2 direct entry wins over CA
+  //         -> Ok | FAIL C56 C3 presenting the CA's own key must NOT be Ok |
+  //         FAIL C56 C3 ... and must be CertAuthority | Total: 16/28 passed
+  //
+  // `.slice(-5)` keeps the tail, and in a harness that prints PASS lines in
+  // order the tail is the Total plus the last few -- never the ones in the
+  // middle that were also failing. So the gate announced twelve failures and
+  // supplied four, and the eight it dropped are exactly the evidence needed to
+  // tell a compiler difference from a logic regression. That is the fourth
+  // recurrence of the Loop #70 disease (engine 12 lines, upload path, dotfiles,
+  // `stdio: 'ignore'`), and the first one written by the loop whose own subject
+  // was proving the C reference agrees.
+  const failLines = (c.text.match(/^\s*fail\b.*$/gim) || []).map((l) => l.trim());
   if (c.error || c.status === null) {
     bad("c harness", `did not run: ${c.error || `exit ${c.status}`}`);
   } else if (cFail > 0 || !cTotal || cTotal[1] !== cTotal[2]) {
-    bad("c harness", `${cFail} fail line(s); ` + c.text.trim().split("\n").slice(-5).join(" | "));
+    // Full transcript on disk as well as in the message: the message is what a
+    // reader sees, the file is what a later loop can diff against.
+    keep('loop56-c-harness', c.text);
+    bad("c harness",
+        `${cFail} of ${cTotal ? cTotal[2] : "?"} assertion(s) failed` +
+        (failLines.length ? `:\n      ${failLines.join("\n      ")}` : "") +
+        (failLines.length && failLines.length < cFail
+           ? `\n      ...and ${cFail - failLines.length} more; the full output is in .loop70/`
+           : "") +
+        (cTotal ? `\n      ${cTotal[1]}/${cTotal[2]} passed` : ""));
   } else {
     ok("c harness", `${cTotal[1]}/${cTotal[2]} passed`);
   }
