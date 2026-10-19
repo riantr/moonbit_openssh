@@ -1281,6 +1281,120 @@ global environment" is not "this module may import it", and moon says so
 explicitly; `src/sftp` checks green on all four targets; the KAT still prints
 `ALL PASS (24 session cases, 7 inbuf cases)`.
 
+### Loop #69: a gate that dies at exit is not a pass, and a red step whose evidence was thrown away is not a bug report
+
+GitHub run `39194939821` was the first run on the Windows runner to get past the
+engine's own accounting, and it failed 18 of 47 steps. The interesting part is
+not the 18. It is that **the log could not explain them.**
+
+#### Defect 1: the engine keeps 12 lines, so a 928-second failure arrives as a fragment
+
+`ci/ci.py` stored `lines[-12:]` per step and that was the whole record. Measured
+on that run: `verify_loop45` burned **928.7s** and the surviving text ended at
+`import paramiko`. Every follow-up question -- which fixture, did it build, was
+the port taken -- needed a fact that had already been discarded, and the only
+way to get it back was another 25-minute run.
+
+This is **Loop #42's defect 3, one level up**. That loop fixed nested gates that
+kept a 200-char summary and lost the rest; the fix was to write the failing
+child's whole output to disk *at the moment of failure*. The CI engine has been
+doing the same discarding ever since, and nobody noticed because a summary is
+the right size for reading a green-ish run and the wrong size for reading a red
+one.
+
+A failing step now writes its complete stdout to `ci/artifacts/steps/<name>.log`
+and `ci.json` carries a `full_log` key pointing at it. Passing steps write
+nothing: an artifact full of green noise is an artifact nobody opens. The
+workflow uploads the whole directory, not just `ci.json`.
+
+The new self-check case is the one the defect is about -- a step that fails
+*after* printing more than 12 lines, asserting the dropped **first** line is on
+disk. Checking that a file exists would pass against a 12-line tail that happens
+to be written. Engine self-check **24/24**.
+
+#### Defect 2: two environment facts, both of which the workflow asserted were unnecessary
+
+`ModuleNotFoundError: No module named 'paramiko'` and `'cryptography'` account
+for ~11 of the 18. The Python MITM peers (`host/*.py`, `host/sftp_mitm.py`) are
+not vendored and the runner's Python has neither.
+
+The workflow carried a comment explaining why Playwright browsers were *not*
+installed: "the gates that drive a real browser are peer-gates and do not run in
+this tier". That reasoning is wrong in the same shape as the comment above it in
+the same file -- it assumed a fact about the tier assignment instead of
+measuring it. `verify_loop47` is in the **default** tier, reaches Playwright
+unconditionally at startup, and takes a different code path when the binary is
+absent:
+
+```
+Executable doesn't exist at ...\ms-playwright\chromium-1124\chrome-win\chrome.exe
+SKIP  the Worker run
+FAIL  harness  ReferenceError: Cannot access 'only' before initialization
+```
+
+Two lessons worth keeping. First, a comment justifying an omission is a claim
+that can rot, and it rotted silently for two runs. Second, **the reason a
+comment gave for skipping a step is not evidence that skipping was right** --
+that is the whole reason this repository stopped curating lists and started
+re-deriving them at runtime.
+
+#### Defect 3: `host/sshd_setup.mjs` knew one developer's install prefix
+
+```js
+const SSHD_BIN = 'C:\\Program Files\\OpenSSH-Win64\\sshd.exe';
+```
+
+That is the portable Win32-OpenSSH build, installed on the machine these gates
+were developed on. A GitHub `windows-latest` runner has the *inbox* Windows
+feature instead, at `C:\Windows\System32\OpenSSH`. So every gate that needs a
+server (loop31, 40, 47, 48, 50, 51, 54, 55, 62, 65, 66) died on a runner that
+had sshd perfectly well.
+
+It now probes three known locations and takes the first that exists, and when
+none does it says so once, by name, before spawning anything -- instead of an
+ENOENT from inside `spawn`, which reads as a bug in this file rather than as
+"this machine has no sshd server".
+
+**A hardcoded absolute path in a gate helper is a claim about the machine, and
+the machine is not the repository.**
+
+#### Defect 4: `verify_loop41` printed ALL PASS and then crashed
+
+```
+ALL PASS (29 checks)
+node : Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 76
+EXIT=-1073740791
+```
+
+Reproduced locally at roughly **1 run in 4**; on run `39194939821` it is why
+`verify_loop41.mjs` failed in 2.6s. The cause is a genuine race:
+`cleanup()` called `child.kill()`, `cdp.close()` and `process.exit()` with
+nothing awaited between them. `kill()` only *requests* termination and
+`WebSocket.close()` only starts the closing handshake, so `process.exit()` tore
+the loop down while libuv was mid-close on both handles.
+
+`cleanup()` is now async and waits for the socket and the child to actually
+close; the tail sets `process.exitCode` and lets the loop drain, with an
+unref'd 10s timer as the escape hatch for a handle nobody remembered. Verified
+**5/5 clean runs**, but the honest statement is that a race proved by 5 passes
+is not proved -- what makes this more than a lucky streak is that the
+`process.exit()` that was racing has been *removed*, not merely retried.
+
+**No mutation was added for it, deliberately.** A mutation that reproduces a
+1-in-4 race cannot be relied on to fail, and a mutation that cannot be relied on
+to fail is worse than no mutation -- it sits in the count looking like coverage.
+Same reasoning as Loop #68's deleted `MOON_COVE_REPORT_ENABLED` variant.
+
+#### Still open
+
+`verify_loop57/58/59` (ssh_config) failed on the runner with keywords reported
+"not resolved" and one fixture's `IdentityFile` resolving to `/cli/key|/tmp/a`
+instead of `/cli/key`. All three pass locally against
+`OpenSSH_for_Windows_9.5p2`. `/tmp/a` is a value that exists in
+`verify_c/sshconfig/syntax.conf` and in no other fixture, so the runner is
+resolving a *different config* than the gate wrote. Not yet understood; the full
+per-step output from defect 1 is what will settle it on the next run.
+
 ### Loop #68: the last red row was two untrue declarations, and a third failure that was this repository's own build cache
 
 `test-coverage` had been red for about a dozen loops. Loop #67 pinned the

@@ -32,8 +32,39 @@ import { dirname, join, resolve } from 'node:path';
 import net from 'node:net';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const SSHD_BIN = 'C:\\Program Files\\OpenSSH-Win64\\sshd.exe';
-const KEYGEN_BIN = 'C:\\Program Files\\OpenSSH-Win64\\ssh-keygen.exe';
+
+// Two OpenSSH installations exist on Windows and they are not the same thing.
+//
+//   C:\Program Files\OpenSSH-Win64\  the portable Win32-OpenSSH build. This
+//                                    is the one these gates were developed
+//                                    against, on a developer machine.
+//   C:\Windows\System32\OpenSSH\      the inbox Windows optional feature.
+//                                    This is what a GitHub `windows-latest`
+//                                    runner has.
+//
+// Hardcoding the first one made this file work on exactly one machine and
+// fail everywhere else -- measured on GitHub run 39194939821, where every gate
+// that needs an sshd (loop31, loop40, loop47, loop48, loop50, loop51, loop54,
+// loop55, loop62, loop65, loop66) died without ever starting a server. The
+// error named the missing `.exe`, which is why it read as "sshd is not
+// installed" rather than "this file knows one developer's install prefix".
+//
+// So: probe the known locations, in order, and take the first pair that
+// exists. A location list rather than a PATH lookup because the OpenSSH
+// binaries are not on PATH by default and `where sshd` finds neither.
+const SSHD_DIRS = [
+  'C:\\Program Files\\OpenSSH-Win64',
+  'C:\\Windows\\System32\\OpenSSH',
+  'C:\\Program Files\\OpenSSH',
+];
+const found = SSHD_DIRS.find((d) => existsSync(join(d, 'sshd.exe')));
+const SSHD_BIN = found ? join(found, 'sshd.exe') : null;
+// ssh-keygen is a separate binary in the same directory; it is allowed to be
+// missing from a pair that has sshd, but if it is missing too there is nothing
+// to fall back on and the caller should hear about it once, clearly.
+const KEYGEN_BIN = found && existsSync(join(found, 'ssh-keygen.exe'))
+  ? join(found, 'ssh-keygen.exe')
+  : 'ssh-keygen';
 const DIR = join(ROOT, '.loop31', 'sshd');
 
 const argv = process.argv.slice(2);
@@ -84,6 +115,17 @@ if (STOP) {
 
 function readFileSafe(p) {
   try { return readFileSync(p, 'utf8').trim(); } catch { return '0'; }
+}
+
+// One loud failure, naming the three places that were looked at. Previously
+// this surfaced as an ENOENT from deep inside `spawn`, which reads as a bug
+// in this file rather than as "this machine has no sshd server".
+if (!SSHD_BIN) {
+  console.error('no sshd.exe in any of:');
+  for (const d of SSHD_DIRS) console.error('  ' + d);
+  console.error('install one, or add its directory to SSHD_DIRS in ' +
+                'host/sshd_setup.mjs');
+  process.exit(3);
 }
 
 mkdirSync(DIR, { recursive: true });

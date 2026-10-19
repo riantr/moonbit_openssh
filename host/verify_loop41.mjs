@@ -496,6 +496,9 @@ const runBridge = () =>
     ok("bridge ready on the real document", page.url);
 
     const cdp = new Cdp(page.ws);
+    // Track the raw socket, not the Cdp wrapper: `closed()` waits for a
+    // 'close' event, and the event lives on the WebSocket.
+    openCdp = page.ws;
     const { sessionId } = page;
 
     // The namespace itself, asserted rather than assumed. Readiness above
@@ -539,6 +542,7 @@ const runBridge = () =>
     if (!all || typeof all.total !== "number") {
       bad("sftp_fault_all", "no usable reply: " + JSON.stringify(all).slice(0, 300));
       cdp.close();
+      openCdp = null;
       return;
     }
     ok("sftp_fault_all over the bridge", `${all.passed}/${all.total}`);
@@ -655,19 +659,88 @@ const runBridge = () =>
     }
 
     cdp.close();
+    await closed(page.ws, 5000);
+    openCdp = null;
   });
 
-function cleanup() {
+// Close `handle` and WAIT for it to be closed.
+//
+// Why this exists: this file used to call `child.kill()`, `cdp.close()` and
+// then `process.exit(0)` in the same breath, with nothing awaited in between.
+// `kill()` only *requests* termination, and `WebSocket.close()` only starts the
+// closing handshake. `process.exit()` then tears the event loop down while
+// libuv is mid-close on both of those handles, which lands on
+//
+//     Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)
+//     file src\win\async.c, line 76
+//
+// and the process dies with STATUS_STACK_BUFFER_OVERRUN (0xC0000409) AFTER
+// printing `ALL PASS (29 checks)`. So the gate reported success and returned a
+// crash exit code at the same time.
+//
+// It was intermittent -- 1 run in 4 locally, and on GitHub run 39194939821 it
+// was the reason `verify_loop41.mjs` failed in 2.6s -- because it is a race, and
+// a loaded CI runner loses it more often than an idle laptop does. A gate whose
+// verdict depends on the machine's mood is not a gate.
+function closed(handle, ms) {
+  if (!handle || typeof handle.once !== "function") return Promise.resolve();
+  // Already finished? A WebSocket reports CLOSED (3); a ChildProcess has a
+  // non-null exitCode or signalCode once it is gone.
+  if (handle.readyState === 3) return Promise.resolve();
+  if ("exitCode" in handle && (handle.exitCode !== null || handle.signalCode !== null)) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    handle.once("close", done);
+    if ("exitCode" in handle) handle.once("exit", done);
+  });
+}
+
+let openCdp = null;
+
+// Set the exit code and let the loop drain, instead of calling process.exit().
+//
+// cleanup() has already waited for the bridge and the CDP socket to finish
+// closing, so by here nothing of ours should still be pending. If something
+// IS still pending -- a stray handle, a timer nobody cancelled -- the
+// unref'd timer below is the escape hatch: it does not hold the loop open, so
+// a clean drain still exits immediately with this code, and a stuck run exits
+// after 10s instead of hanging until the CI job times out.
+//
+// This is the whole fix for the 0xC0000409 abort: process.exit() was the
+// thing racing libuv's close path, and it is no longer called.
+function finish(code) {
+  process.exitCode = code;
+  const bail = setTimeout(() => process.exit(code), 10000);
+  bail.unref?.();
+}
+
+async function cleanup() {
+  if (openCdp) {
+    try {
+      openCdp.close();
+    } catch {
+      /* already gone */
+    }
+    await closed(openCdp, 2000);
+    openCdp = null;
+  }
   if (child && !child.killed) {
     try {
       child.kill();
     } catch {
       /* already gone */
     }
+    await closed(child, 5000);
     child = null;
   }
 }
-
 // ---------------------------------------------------------------------------
 
 // The MITM is the slowest step by far -- 50 sessions, each one a real TCP
@@ -686,7 +759,7 @@ try {
     await s();
   }
 } finally {
-  cleanup();
+  await cleanup();
 }
 
 const logDir = path.join(root, ".loop41");
@@ -701,11 +774,11 @@ writeFileSync(
 console.log("");
 if (failures.length === 0) {
   console.log(`ALL PASS (${checks} checks)`);
-  process.exit(0);
+  finish(0);
 } else {
   console.log(`${failures.length} FAILURES`);
   for (const f of failures) {
     console.log("FAIL " + f);
   }
-  process.exit(1);
+  finish(1);
 }

@@ -163,9 +163,10 @@ class Step(object):
         self.seconds = 0.0
         self.exit_code = None
         self.tail = ""
+        self.log = ""
 
     def as_dict(self):
-        return {
+        d = {
             "tier": self.tier,
             "name": self.name,
             "status": self.status,
@@ -173,6 +174,9 @@ class Step(object):
             "seconds": round(self.seconds, 1),
             "exit_code": self.exit_code,
         }
+        if self.log:
+            d["full_log"] = "steps/" + self.log
+        return d
 
 
 def _run_argv(argv, cwd, timeout):
@@ -195,6 +199,50 @@ def _run_argv(argv, cwd, timeout):
         return 124, out
 
 
+def _safe_log_name(step):
+    """A step name is a file name like `verify_loop47.mjs` or `build src\\x`.
+    Windows rejects `\\ : * ? " < > |` in a path component, and the build
+    steps carry backslashes, so the name is reduced to a conservative set
+    rather than to whatever `name` happens to be this month."""
+    keep = []
+    for ch in step.name:
+        keep.append(ch if (ch.isalnum() or ch in "._-") else "_")
+    out = "".join(keep).strip("._") or "step"
+    return out[:120] + ".log"
+
+
+def _keep_full_output(step, out):
+    """Persist a failing step's ENTIRE stdout, not just the 12-line tail.
+
+    Why this exists: the tail is what the console gets, and it is the right
+    size for a human reading a green-ish run. It is the wrong size for
+    diagnosing a red one -- measured on GitHub run 39194939821, `verify_loop45`
+    burned 928.7s and the 12 lines that survived showed `import paramiko` as
+    the final line, with the 900 seconds before it thrown away. Every
+    follow-up question about that step ("which module, which fixture, did it
+    build?") needed a fact the log no longer had, and the only way to get it
+    was another 25-minute run.
+
+    So the summary stays short and the full transcript goes to disk, where
+    the workflow uploads it as an artifact. Steps that PASS write nothing:
+    an artifact full of green noise is an artifact nobody opens.
+    """
+    step.log = _safe_log_name(step)
+    directory = os.path.join(ARTIFACT_DIR, "steps")
+    try:
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        with io.open(os.path.join(directory, step.log), "w",
+                     encoding="utf-8", errors="replace") as fh:
+            fh.write(out)
+    except OSError as exc:
+        # Losing the log must not lose the run. Say so and carry on -- a
+        # step that failed for a real reason still fails for that reason.
+        sys.stderr.write("could not keep full output for %s: %s\n"
+                         % (step.name, exc))
+        step.log = ""
+
+
 def run_step(step):
     start = time.time()
     chunks = []
@@ -215,6 +263,7 @@ def run_step(step):
     if code != 0:
         step.status = "failed"
         step.detail = "exit %d" % code
+        _keep_full_output(step, out)
         return False
 
     # A gate that exits 0 while printing FAIL is a broken gate. Believing the
@@ -223,12 +272,14 @@ def run_step(step):
         step.status = "failed"
         first = FAIL_LINE_RE.search(out).group(0).strip()
         step.detail = "exit 0 but the gate printed FAIL"
+        _keep_full_output(step, out)
         return False
 
     # Exit 0 having done nothing is the same lie, wearing a different hat.
     if step.zero_work_guard and ZERO_WORK_RE.search(out):
         step.status = "failed"
         step.detail = "vacuous pass: ran 0 test/bench entries"
+        _keep_full_output(step, out)
         return False
 
     m = None
@@ -239,6 +290,7 @@ def run_step(step):
         if m.group(1) != m.group(2):
             step.status = "failed"
             step.detail += " (but exit 0)"
+            _keep_full_output(step, out)
             return False
     else:
         step.detail = "ok"
@@ -728,7 +780,23 @@ def self_check():
     """
     failures = []
 
+    steps_dir = os.path.join(ARTIFACT_DIR, "steps")
+    try:
+        preexisting = set(os.listdir(steps_dir))
+    except OSError:
+        preexisting = set()
+
+    # Every probe below is a step that fails ON PURPOSE, so every probe now
+    # leaves a log under ci/artifacts/steps/ behind it. This function's own
+    # docstring says "nothing touches the working tree", and a leftover log
+    # from the last self-check is exactly the kind of thing that sends the
+    # next person looking for a failure that is not there. Collected and
+    # removed once, at the end, rather than cleaned up per probe -- so a
+    # probe that crashes still gets swept.
+    probe_steps = []
+
     def case(name, step, want_status, want_return):
+        probe_steps.append(step)
         ok = run_step(step)
         if step.status != want_status:
             failures.append("%s: status %s, wanted %s" % (name, step.status, want_status))
@@ -745,6 +813,7 @@ def self_check():
     # The PowerShell 5.1 trap in the shape it actually appears: one failing
     # step inside a list must not be counted as zero failures.
     one_bad = Step("self", "bad", ["cmd", "/c", "exit", "1"])
+    probe_steps.append(one_bad)
     run_step(one_bad)
     got = len([s for s in [one_bad] if s.status == "failed"])
     if got != 1:
@@ -753,7 +822,31 @@ def self_check():
     case("missing command", Step("self", "ghost", ["definitely-not-a-command-xyz"]),
          "failed", 1)
 
-    total = 5
+    # The full-output capture, exercised on the case it exists for: a step
+    # that fails AFTER printing more than the 12 lines the tail keeps. If the
+    # first line is not on disk afterwards, a red CI step is undiagnosable
+    # again -- which is the situation this was written to end.
+    long_step = Step("self", "selfcheck-probe",
+                     ["cmd", "/c", "for /L %i in (1,1,30) do @echo PROBE_LINE%i & exit /b 1"])
+    probe_steps.append(long_step)
+    run_step(long_step)
+    probe_path = os.path.join(ARTIFACT_DIR, "steps", long_step.log)
+    kept = ""
+    if os.path.isfile(probe_path):
+        with io.open(probe_path, encoding="utf-8", errors="replace") as fh:
+            kept = fh.read()
+        # Leave the tree exactly as it was found: this is a self-check, not a
+        # build, and a stray log under ci/artifacts is someone's next puzzle.
+        os.remove(probe_path)
+    else:
+        failures.append("full output: no log file for a failing step")
+    if "PROBE_LINE1" not in kept:
+        failures.append("full output: the line the 12-line tail drops is not "
+                        "in the kept log")
+    if long_step.log not in (long_step.as_dict().get("full_log") or ""):
+        failures.append("full output: as_dict does not point at the log")
+
+    total = 6
     failures.extend(qa_self_check())
     total += qa_self_check_count
     failures.extend(release_self_check())
@@ -768,6 +861,16 @@ def self_check():
     print("self-check: %d/%d cases passed" % (total - len(failures), total))
     for f in failures:
         print("  FAIL %s" % f)
+
+    # Sweep only what this invocation created. Snapshot-then-delete rather
+    # than "empty the directory": a self-check run right after a real CI run
+    # must not throw away that run's evidence on its way out.
+    try:
+        for name in set(os.listdir(steps_dir)) - preexisting:
+            os.remove(os.path.join(steps_dir, name))
+    except OSError as exc:
+        sys.stderr.write("self-check could not sweep %s: %s\n" % (steps_dir, exc))
+
     if failures:
         print("ENGINE SELF-CHECK FAILED -- do not trust a CI run from this build")
         return 1

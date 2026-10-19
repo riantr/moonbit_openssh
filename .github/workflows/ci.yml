@@ -69,13 +69,42 @@ jobs:
       # `npm ci` rather than `npm install`: package-lock.json is committed, and
       # ci installs exactly that tree instead of resolving ranges afresh, so a
       # green run names the dependency versions it actually used.
-      #
-      # Deliberately NOT installing Playwright browsers. The gates that drive a
-      # real browser (verify_loop32..40) are peer-gates and do not run in this
-      # tier; adding a browser download here would cost minutes per run to serve
-      # gates that are not executing.
       - name: Install Node dependencies
         run: npm ci --no-audit --no-fund
+
+      # These two are NOT optional extras, and the earlier comment here was
+      # wrong about the second one.
+      #
+      # paramiko and cryptography are not vendored. The MITM peers that drive
+      # the forgeries (host/*.py, host/sftp_mitm.py) import them, and a fresh
+      # runner's Python has neither. Measured on GitHub run 39194939821, this
+      # one omission is what turned ~11 gates red:
+      #
+      #     ModuleNotFoundError: No module named 'paramiko'
+      #     ModuleNotFoundError: No module named 'cryptography'
+      #
+      # loop45 is the expensive one: it burned 928.7s and its LAST surviving
+      # output line was `import paramiko`. It failed for the same reason.
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check paramiko cryptography
+
+      # The previous version of this file said, in a comment, that installing
+      # Playwright browsers would "cost minutes per run to serve gates that
+      # are not executing". That was wrong, and it was wrong by the same
+      # reasoning error as the comment above it: it assumed the gates that
+      # drive a browser are all in peer-gates. They are not.
+      #
+      # Measured on run 39194939821:
+      #
+      #     Executable doesn't exist at ...\ms-playwright\chromium-1124\...
+      #     SKIP  the Worker run
+      #     FAIL  harness  ReferenceError: Cannot access 'only' before ...
+      #
+      # verify_loop47 reaches Playwright unconditionally at startup and takes
+      # a different code path when the browser is absent. It is in the default
+      # tier, it runs here, and it needs the binary.
+      - name: Install the Playwright browser
+        run: npx playwright install chromium
 
       - name: Set up MoonBit
         uses: ./.github/actions/setup-moonbit
@@ -101,12 +130,15 @@ jobs:
       - name: Run gates
         run: python ci/ci.py --tiers env,build,gates --json ci/artifacts/ci.json
 
+      # The whole directory, not just ci.json. ci/artifacts/steps/ holds the
+      # complete stdout of every failing step, which is the only place the
+      # middle of a 15-minute failure still exists once the job ends.
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-report
-          path: ci/artifacts/ci.json
+          path: ci/artifacts/
           if-no-files-found: warn
 
   qa-matrix:
