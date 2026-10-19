@@ -26,7 +26,13 @@ import shutil
 import subprocess
 import sys
 
-ROOT = r"E:\src\moon\openssh_moonbit"
+# Loop #71: this was ROOT = r"E:\src\moon\openssh_moonbit". A GitHub runner
+# checks out to D:\a\<repo>\<repo>, so the hardcoded root sent every mutation
+# to a directory that does not exist there -- and a mutation harness pointed at
+# a missing tree does not report "the tree is missing", it reports whatever the
+# tools say about nothing. Derived from __file__ instead, so it travels with the
+# clone.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GATE = os.path.join("host", "verify_loop64.mjs")
 
 # (name, relative path, unique ASCII anchor, replacement)

@@ -18,7 +18,10 @@ import os
 import subprocess
 import sys
 
-ROOT = r"E:\src\moon\openssh_moonbit"
+# Loop #71: this was ROOT = r"E:\src\moon\openssh_moonbit" -- one developer's
+# checkout location, asserted as if every clone shared it. Derived from
+# __file__ so it travels with the repository.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GATE = ["cmd", "/c", "node", r"host\verify_loop65.mjs"]
 
 # The nine-line justification for the two gates this loop reclassified. Kept

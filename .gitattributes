@@ -47,14 +47,36 @@
 # GitHub runner, and a fresh clone under any global config.
 * text=auto eol=lf
 
-# Batch is the exception, and it is not an aesthetic choice.
+# Batch is NOT an exception, and this file used to say it was.
 #
-# `verify_c/build_poly1305.bat` contains `goto :check`. cmd.exe label
-# resolution is not reliable in an LF-only batch file, so normalising these to
-# LF would trade a class of CI failures for a class of local ones. Keep them
-# CRLF on checkout; the repository stores them with whatever git stores, and
-# `verify_loop67` only polices the files the MoonBit formatter owns.
-*.bat text eol=crlf
+# It said `*.bat text eol=crlf`, justified by the claim that cmd.exe label
+# resolution is unreliable in an LF-only batch file. That claim was never
+# measured, it was assumed -- and the repository contradicted it: all nine
+# verify_c/build_*.bat were already stored as LF, `build_poly1305.bat` already
+# used `goto :check`, and it worked.
+#
+# Measured rather than assumed, after Loop #71 added a `goto :cc_ready` block
+# to eight more of them (still LF, no exception):
+#
+#     > cmd /c build_aead.bat
+#     using gcc
+#     Building aead_kat.exe ...
+#     BUILD OK
+#     exit 0
+#
+# The goto resolved, the label was found, the harness ran. So LF is fine here
+# and the exception was removed rather than left in place looking load-bearing.
+#
+# Leaving it would have been worse than being wrong in the first place: an
+# exception list is a place the CRLF guard STOPS LOOKING, so an unjustified
+# entry is nine files with a permanent blind spot. (Residual uncertainty worth
+# naming: measured on Windows 10.0.26300 only. The GitHub runner is a different
+# image, so the first CI run that executes these is the real measurement.)
+#
+# What the exception cost, concretely, before it was caught: a rule whose stated
+# reason was false, protecting files that needed no protection, derived from
+# the same habit Loop #70 exists to end -- writing down an assumption and then
+# treating the writing-down as the proof.
 
 # Tracked build outputs. `text=auto` detects these as binary by their NUL
 # bytes, but saying so removes the dependence on that heuristic being right.

@@ -148,6 +148,25 @@ jobs:
           path: |
             ci/artifacts/
             .loop70/
+          # `include-hidden-files` is not optional here, it is the whole reason
+          # this step does not work without it. upload-artifact@v4 SKIPS
+          # dot-prefixed paths by default, so `.loop70/` matched nothing while
+          # `ci/artifacts/` matched something -- and `if-no-files-found: warn`
+          # stayed quiet, because from the step's point of view it had found
+          # files.
+          #
+          # Measured on run 39206855898, the run that first asked for
+          # `.loop70/`: the artifact contains `ci/artifacts/ci.json` and five
+          # step logs, and no `.loop70/` at all. verify_loop41, 55, 56 and 65
+          # all failed, so those transcripts were written. They were then
+          # discarded with the runner.
+          #
+          # This is the third time in three loops that a fix was correct and
+          # the plumbing ate it: Loop #69's 12 lines, Loop #70's `.loop70/`
+          # living outside the upload path, and now a dotfile the uploader
+          # ignores. Each time the failure was invisible because the thing
+          # being fixed was the thing doing the hiding.
+          include-hidden-files: true
           if-no-files-found: warn
 
   qa-matrix:

@@ -1,5 +1,16 @@
 ///| GENERATED FILE -- do not edit by hand.
 
+// machine-path-exempt-file: every `E:/...` below is a CAPTURED WIRE BYTE, not
+// a path this code reads. host/sftp_capture.py recorded these frames from a
+// live OpenSSH 8.0p1 internal-sftp session on the machine that ran the
+// capture, so the client's request strings contain that machine's absolute
+// paths. They are compared byte-for-byte against host/sftp_oracle.py, which
+// frames the same bytes independently -- rewriting them would not make the
+// vectors portable, it would make the comparison meaningless. Regenerating
+// means re-capturing against a server, which is a deliberate act, not a find
+// and replace. `CAPTURE_FIXTURE` at the bottom is the directory those bytes
+// name, and host/verify_loop39.mjs recreates it before running.
+
 ///|
 /// Regenerate with: python host/gen_sftp_vectors.py --capture .loop39/capture.json
 ///

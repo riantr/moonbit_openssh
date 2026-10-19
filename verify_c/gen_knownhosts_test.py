@@ -15,7 +15,10 @@ import os
 import re
 import sys
 
-ROOT = r'E:\src\moon\openssh_moonbit'
+# Loop #71: this was ROOT = r'E:\src\moon\openssh_moonbit'. A runner checks
+# out to D:\a\..., so the generator wrote its KAT header to a path that is not
+# there and reported nothing about it. Derived from __file__.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KAT_PATH = os.path.join(ROOT, 'verify_c', '_knownhosts_ref_out.txt')
 MBT_OUT = os.path.join(ROOT, 'src', 'knownhosts', 'knownhosts_test.mbt')
 H_OUT = os.path.join(ROOT, 'verify_c', '_knownhosts_kat.h')

@@ -14,10 +14,16 @@ send2_wrapped / read_poll2)。
   MoonBit src/bpacket/bpacket_test.mbt (T18 硬编码本文件产出的 hex)
   C      verify_c/bpacket_harness.c   (独立转写 packet.c framing,比对同一批向量)
 """
+import os
 import struct
 import sys
 
-sys.path.insert(0, r'E:\src\moon\openssh_moonbit\verify_c')
+# Loop #71: this was sys.path.insert(0, r'E:\src\moon\openssh_moonbit\verify_c').
+# On a runner the checkout is at D:\a\..., so the sibling `aead_python_ref`
+# import below resolved against a directory that is not there. Derived from
+# __file__, so it is the directory this script actually lives in -- which is
+# what it was always trying to say.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aead_python_ref import ssh_wrap_encrypt, ssh_wrap_decrypt, poly1305
 
 MAX_PACKET_SIZE = 256 * 1024          # packet.c:99
@@ -404,7 +410,11 @@ def emit_kats():
                  f'expect=AuthFailed note=padded+32zeros')
 
     out = '\n'.join(lines) + '\n'
-    with open(r'E:\src\moon\openssh_moonbit\verify_c\_bpacket_ref_out.txt',
+    # Loop #71: was r'E:\src\moon\openssh_moonbit\verify_c\_bpacket_ref_out.txt'.
+    # The KAT landed beside the script, which is the only relationship it ever
+    # needed, and that relationship travels.
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           '_bpacket_ref_out.txt'),
               'w', encoding='utf-8') as fh:
         fh.write(out)
     print('KAT written to _bpacket_ref_out.txt')

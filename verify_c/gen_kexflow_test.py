@@ -15,7 +15,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kexflow_python_ref as ref  # noqa: E402  (import 副作用受 __main__ 保护)
 
-ROOT = r'E:\src\moon\openssh_moonbit'
+# Loop #71: this was ROOT = r'E:\src\moon\openssh_moonbit'. A runner checks
+# out to D:\a\..., so the generator wrote its KAT header to a path that is not
+# there and reported nothing about it. Derived from __file__.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KAT_PATH = os.path.join(ROOT, 'verify_c', '_kexflow_ref_out.txt')
 
 

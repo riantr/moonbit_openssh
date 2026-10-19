@@ -11,6 +11,7 @@ RSA:手工构造良构 mpint(parse-only 用途,非真实密钥——如实注明
 """
 import base64
 import hashlib
+import os
 import struct
 import sys
 
@@ -244,7 +245,11 @@ def emit_kats():
     L.append('fp_b_text=' + fingerprint_text(BLOB_B))
 
     out = '\n'.join(L) + '\n'
-    with open(r'E:\src\moon\openssh_moonbit\verify_c\_hostkey_ref_out.txt',
+    # Loop #71: was r'E:\src\moon\openssh_moonbit\verify_c\_hostkey_ref_out.txt'.
+    # The KAT lands beside the script that produces it, which is the only
+    # relationship it ever needed.
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           '_hostkey_ref_out.txt'),
               'w', encoding='utf-8') as fh:
         fh.write(out)
     print('KAT written to _hostkey_ref_out.txt')

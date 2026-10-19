@@ -52,6 +52,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // So: probe the known locations, in order, and take the first pair that
 // exists. A location list rather than a PATH lookup because the OpenSSH
 // binaries are not on PATH by default and `where sshd` finds neither.
+// machine-path-exempt: each entry below is a CANDIDATE, probed in order until
+// one exists. None is asserted to exist, and when none does the script names
+// all three and exits 3. verify_loop71.mjs flags any drive-letter path it finds
+// in code; this marker is how a file declares that its paths are a probe rather
+// than a claim, and it is an obligation to say why, not a mute button.
 const SSHD_DIRS = [
   'C:\\Program Files\\OpenSSH-Win64',
   'C:\\Windows\\System32\\OpenSSH',

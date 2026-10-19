@@ -12,19 +12,43 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+// Loop #71: this was a two-element list of
+//   'C:\\Users\\hp\\AppData\\Local\\ms-playwright\\chromium-1217\\chrome-win64\\chrome.exe'
+//   'C:\\Users\\hp\\AppData\\Local\\ms-playwright\\chromium-1208\\chrome-win64\\chrome.exe'
+// Two machine claims per line: one developer's home directory, and a
+// Playwright browser revision. The revision is the worse of the two -- it
+// changes every time Playwright is upgraded, and when it does, this function
+// returns null and the e2e gate reports "no browser" on a machine that has
+// one. Exactly the shape Loop #69 found in sshd_setup.mjs.
+//
+// So: read LOCALAPPDATA, list whatever chromium-* directories are actually
+// there, newest first, and try the three layouts Playwright has shipped.
+// Nothing here names a user, a revision, or a drive.
 function findChromium() {
-  const candidates = [
-    'C:\\Users\\hp\\AppData\\Local\\ms-playwright\\chromium-1217\\chrome-win64\\chrome.exe',
-    'C:\\Users\\hp\\AppData\\Local\\ms-playwright\\chromium-1208\\chrome-win64\\chrome.exe',
-  ];
-  for (const path of candidates) {
-    if (existsSync(path)) return path;
+  const roots = [
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ms-playwright'),
+    process.env.PLAYWRIGHT_BROWSERS_PATH,
+  ].filter(Boolean);
+  for (const root of roots) {
+    let entries;
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue; // not installed here; try the next root
+    }
+    const dirs = entries.filter((e) => e.startsWith('chromium-')).sort().reverse();
+    for (const d of dirs) {
+      for (const leaf of ['chrome-win64', 'chrome-win', 'chrome-win32']) {
+        const p = join(root, d, leaf, 'chrome.exe');
+        if (existsSync(p)) return p;
+      }
+    }
   }
   return null;
 }

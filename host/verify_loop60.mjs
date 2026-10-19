@@ -469,6 +469,11 @@ function parseProposals(out) {
   return blocks;
 }
 
+// machine-path-exempt: this was `[process.env.OPENSSH_C, "E:/src/moon/openssh-C"]`
+// with the second entry having no idea whether it existed. It is a probe, in
+// that order, and the env var is the part that travels: set OPENSSH_C and the
+// fallback is never consulted. The fallback stays because the value it was
+// written from was, once, a real location on a real machine.
 function findOpenSSHC(file) {
   const bases = [process.env.OPENSSH_C, "E:/src/moon/openssh-C"].filter(Boolean);
   for (const b of bases) {

@@ -1566,6 +1566,163 @@ No mutation was added for either of these two, for the reason Loop #70 already
 set out: there is no injection point that makes `knownhosts_python_ref.py` fail
 on demand, and a mutation that cannot be relied on to fail is worse than none.
 
+### Loop #71: nine copies of one path, and a rule I wrote down without measuring it
+
+Loop #69 fixed `SSHD_BIN`, one hardcoded machine path. It could not claim that
+fixed the class, because the class is "a path that exists on one machine and
+is asserted as if it existed on all of them". This loop finds the rest, and
+then tries to make the question stop needing to be asked.
+
+#### Nine `build_*.bat`, all with one developer's gcc
+
+```bat
+set GCC=D:\llvm-mingw\llvm-mingw-20260602-ucrt-x86_64\bin\gcc.exe
+```
+
+On the runner that expands to a path that is not there, and the only line the
+gate could show was the batch's own echo:
+
+```
+BUILD FAILED
+The system cannot find the path specified.
+```
+
+All nine now resolve the way `build_poly1305.bat` **already did** -- `where
+gcc`, then `where clang`, then fail by name. Which is the point: this was not a
+new convention being invented, it was a convention that had been in the
+repository the whole time in one file out of nine, and the other eight had not
+heard of it.
+
+Measured: `cmd /c build_aead.bat` prints `using gcc`, builds, runs, exits 0.
+
+#### The rule I wrote down without measuring it
+
+Loop #70 added this to `.gitattributes`:
+
+```
+*.bat text eol=crlf
+```
+
+justified by "cmd.exe label resolution is not reliable in an LF-only batch
+file". That claim was assumed. The repository contradicted it immediately:
+all nine `.bat` files were already stored as LF, `build_poly1305.bat` already
+contained `goto :check`, and it worked.
+
+Loop #71 put a `goto :cc_ready` block into eight more of them, which forced
+the question to be asked, and the answer was: **it works**. So the exception
+was removed.
+
+Leaving it would have been worse than having been wrong in the first place.
+**An exception list is a place the CRLF guard stops looking.** A `.bat` entry
+with a false reason is nine files with a permanent blind spot, justified by a
+sentence nobody re-reads. That is the same habit this loop exists to end:
+writing an assumption down and then treating the writing-down as the proof.
+
+#### `verify_loop71.mjs`: is there another one?
+
+The question Loop #69 could not answer. It does not keep a list of what has
+been fixed -- a list goes stale, and a stale list is worse than none. It
+**derives** the set of tracked files still containing a machine-specific
+absolute path and refuses to pass while that set is non-empty.
+
+Result when it first ran: **45 hits in 16 files.** Loop #71 fixed all sixteen.
+
+| what | files | how |
+|---|---|---|
+| hardcoded repo root `E:\src\moon\openssh_moonbit` | 9 | derived from `__file__` |
+| `verify_e2e.mjs` chromium: user **and** browser revision | 1 | read `LOCALAPPDATA`, list `chromium-*`, newest first |
+| `verify_loop60.mjs` OpenSSH-C: already a probe | 1 | declared, not changed |
+| `verify_loop39.mjs` realpath `/C:/Users/hp` | 1 | compared against this machine's `USERPROFILE` |
+| `sftp_fault_oracle.py` synthesised `/C:/Users/hp` | 1 | declared: synthesised payload, chosen for its shape |
+| `cmd/sftp_test/vectors.mbt`, 26 captured paths | 1 | declared: captured wire bytes, byte-compared against an oracle |
+| `setup-moonbit/action.yml` `C:\Users\runneradmin\.moon\bin` | 1 | `$env:USERPROFILE\.moon\bin` |
+
+The last one deserves a line of its own. It worked because GitHub's Windows
+runner account happens to be named `runneradmin` -- the single most
+implementation-detail thing about a runner, and exactly the kind of fact that
+changes without warning.
+
+**`verify_loop39` got stronger, not just portable.** The old assertion was
+"the realpath equals this developer's home". paramiko's `normalize('.')`
+resolves the *process's own* home, so the honest expectation is not a literal
+at all. It is now "whatever this machine's home is, in the shape sftp converts
+it to" -- and an unset `USERPROFILE` shows up as a mismatch with both sides
+printed, rather than as a silent pass on someone else's computer.
+
+**The two exemptions are not laziness.** `vectors.mbt` holds request bytes
+captured from a live OpenSSH 8.0p1 `internal-sftp` session, compared
+byte-for-byte against an independently written oracle. Rewriting those paths
+would not make the vectors portable; it would make the comparison
+meaningless. And `sftp_fault_oracle.py`'s value is *synthesised* -- the client
+receives it and echoes it back, both sides in one file, so it cannot drift. It
+is a placeholder exactly like `does-not-exist.bin` next to it.
+
+Exemptions are declared in the file that needs them, with a reason, and a bare
+marker with no reason **fails**.
+
+#### The gate's own bugs, all found by its own tests
+
+Four, and every one of them would have made the gate worse than useless:
+
+1. `https://example.com` contains `s:/`, which matched `[A-Za-z]:[\\/]`
+   exactly -- so the gate flagged a machine path in front of **every URL in the
+   repository**. Fixed with a lookbehind.
+2. `'/C:/' + home` is a *prefix*, not a path, and matched because zero
+   characters after the separator were acceptable. Fixed by requiring one.
+3. `stripComments` deleted multi-line block comments, so line indices drifted
+   and the "refusing to guess" guard fired on **622 of 765 files**. Fixed by
+   blanking comment characters and keeping their newlines.
+4. The first exemption heuristic tried to *infer* "probe list" from the text
+   ("is this an array element?", "does the file mention `where`?") and its own
+   exclusion test failed on the very case it was written to allow. Replaced
+   with a marker that has to state its reason.
+
+A gate that cries wolf on its own header is a gate that gets switched off, and
+a heuristic that misclassifies a file that is already correct makes its
+silence untrustworthy. The exclusion tests exist for that, and they are the
+only reason these were caught before CI.
+
+The exemption window is not a taste decision either. It was 4, then 8, and
+each time the gate complained about a file Loop #69 had already fixed. It is
+now **measured against the tree** and asserted: "the widest legitimate
+exemption needs 10 lines, the window is 12."
+
+**Verified:** `9/9`, 768 files scanned, 0 hits. `loop71_mutations.py`,
+**3 CAUGHT / 0 MISSED**:
+
+- **M1** a hardcoded gcc path returns to `build_aead.bat` -- must go red and
+  name the file. This is the exact shape that made loop55 fail on CI, put back
+  where it was found.
+- **M2** a bare `machine-path-exempt` with no reason -- must go red. The
+  escape hatch used as a mute button.
+- **M3** a justified probe list -- must stay **green**. Without it, "passes
+  everything" is equally consistent with "flags everything", and M1 and M2
+  would prove nothing about the steady state.
+
+M2 reported MISSED the first time, and the reason was in the harness rather
+than the rule: the scratch file was never `git add --intent-to-add`ed, so
+`git ls-files` did not list it and the gate was never asked. **A mutation that
+fails to set up its own preconditions is not evidence about the thing under
+test.**
+
+#### Two findings this loop did not fix
+
+- **`gen_hostkey_test.py` and `gen_kexflow_test.py` no longer reproduce their
+  committed outputs.** Running them and then `moon fmt` -- exactly what
+  loop56's drift check does -- produces a diff that *deletes a hand-written
+  comment* explaining that a peer may offer MAC names the client cannot run,
+  which is Loop #60's invariant in prose. The generated output also drops the
+  `@kexflow.` qualification. The files were restored rather than committed.
+  `gen_knownhosts_test.py` is honest: byte-identical after formatting.
+  So the drift check exists for one of three generators. **This is worth its
+  own loop**: the fix is to teach the generators to emit what the hand-edits
+  added, or to move those comments somewhere a generator cannot eat.
+- **loop41, 53, 56, 65 are still unfixed on CI.** `.loop70/` reached the
+  runner this time (`include-hidden-files: true`; before that,
+  `upload-artifact@v4` skips dot-prefixed paths by default and
+  `if-no-files-found: warn` stayed quiet because `ci/artifacts/` matched), so
+  the next run should finally carry the transcripts.
+
 ### Loop #68: the last red row was two untrue declarations, and a third failure that was this repository's own build cache
 
 `test-coverage` had been red for about a dozen loops. Loop #67 pinned the

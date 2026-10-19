@@ -34,7 +34,13 @@ runs:
         MOONBIT_INSTALL_VERSION: ${{ inputs.version }}
       run: |
         Set-ExecutionPolicy RemoteSigned -Scope CurrentUser; irm https://cli.moonbitlang.com/install/powershell.ps1 | iex
-        "C:\Users\runneradmin\.moon\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        # Loop #71: this was the literal "C:\Users\runneradmin\.moon\bin".
+        # It works today because GitHub's Windows runner account happens to be
+        # named `runneradmin` -- the one thing about a runner that is an
+        # implementation detail and can change. $env:USERPROFILE is what the
+        # install script above actually used, so this now names the same
+        # directory instead of predicting it.
+        "$env:USERPROFILE\.moon\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
     # The native target links against a C runtime, so on Windows the MSVC
     # environment has to be present before `moon build --target native` can

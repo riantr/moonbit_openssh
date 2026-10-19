@@ -1,4 +1,11 @@
-path = r'E:\src\moon\openssh_moonbit\src\kexflow\flow.mbt'
+import os
+
+# Loop #71: this was
+#   path = r'E:\src\moon\openssh_moonbit\src\kexflow\flow.mbt'
+# One developer's checkout location, asserted as the only one. This script is
+# at the repository root, so the file is one directory below __file__.
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    'src', 'kexflow', 'flow.mbt')
 with open(path, 'r', encoding='utf-8') as f:
     content = f.read()
 

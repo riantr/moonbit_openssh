@@ -495,7 +495,14 @@ SCENARIOS = [
         "feeds": [
             r_status(1, FX_NO_SUCH_FILE, "too early"),
             r_version(),
-            r_name(1, [("/C:/Users/hp", "", attrs_none())]),
+            # machine-path-exempt: SYNTHESISED payload, not a recorded one. This
+        # scenario feeds the fault console a NAME reply and expects the same
+        # string back, so both sides of the pair live in this file and cannot
+        # drift apart. The value is chosen for its SHAPE -- a Windows realpath
+        # in the /C:/Users/<name> form the client has to convert -- not to name
+        # anyone. The `hp` is a placeholder, exactly like `does-not-exist.bin`
+        # is a placeholder in the cases below; nothing ever opens it.
+        r_name(1, [("/C:/Users/hp", "", attrs_none())]),
         ],
         "requests": [q_init(), q_realpath(1, ".")],
         "results": [("realpath", "/C:/Users/hp")],

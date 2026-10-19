@@ -355,7 +355,22 @@ async function main() {
   const rpText = /^[0-9a-fA-F]*$/.test(rpHex) && rpHex.length % 2 === 0
     ? Buffer.from(rpHex, 'hex').toString('utf8')
     : rpHex;
-  check('the realpath is the one paramiko reported', /^\/C:\/Users\/hp$/i.test(rpText), rpText);
+  // Loop #71: this was /^\/C:\/Users\/hp$/i -- one developer's home directory,
+  // asserted as if paramiko would report it on every machine. paramiko's
+  // normalize('.') resolves the process's OWN home, so the expectation is not
+  // a literal at all: it is whatever this machine's home is, in the
+  // /C:/Users/<name> shape sftp converts it to.
+  //
+  // That makes the check STRICTER as well as portable: before, a machine with
+  // a different home passed or failed for reasons unrelated to the code; now
+  // the only way to pass is for the client's realpath to match this machine's,
+  // and an unset USERPROFILE shows up as a mismatch with both sides printed
+  // rather than as a silent pass.
+  const homeFwd = (process.env.USERPROFILE || '').replace(/\\/g, '/');
+  const expectedRp = '/C:/' + homeFwd.replace(/^[A-Za-z]:\//, '');
+  check('the realpath is the one paramiko reported',
+    homeFwd !== '' && rpText.toLowerCase() === expectedRp.toLowerCase(),
+    `${rpText} vs ${expectedRp}`);
 
   check('LISTING answered', /^op1: LISTING$/m.test(natText));
   check('the directory has the three entries we created', grabInt(natText, 'op1_count') === 3,
