@@ -52,6 +52,7 @@ import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { keep } from './keep_output.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 18783;
@@ -104,13 +105,29 @@ const inner = spawn('cmd', ['/c', 'node', 'host/probe_sshd_starter.mjs',
                             '--port', String(PORT), '--pid-file', pidFile],
                    { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
 let innerOut = '';
+let innerErr = '';
 inner.stdout.on('data', d => { innerOut += d.toString(); });
-inner.stderr.on('data', () => {});
+// This used to be `inner.stderr.on('data', () => {})` -- the stream was
+// consumed and thrown away. On GitHub run 39200128854 the probe exited 3 with
+// `the sshd never came up, so there is nothing to leak. Not a pass.` and no
+// way to tell a missing binary from a rejected sshd_config from a taken port.
+// The gate was careful to refuse to call "no sshd" a pass, and then withheld
+// the one fact that would say why there was no sshd.
+inner.stderr.on('data', d => { innerErr += d.toString(); });
 const innerCode = await new Promise((r) => inner.on('exit', r));
 
 console.log(`  inner exited ${innerCode}: ${innerOut.trim() || '(no output)'}`);
+if (innerErr.trim()) {
+  console.log(`  inner stderr: ${innerErr.trim().split(/\r?\n/).slice(-8).join(' | ')}`);
+}
 if (innerCode !== 0) {
+  // Kept BEFORE the exit: this process is about to end, and an exit(3) with
+  // the reason on disk and none on screen teaches the next reader nothing.
+  keep('probe-sshd-leak-inner',
+       `exit ${innerCode}\n--- stdout ---\n${innerOut}\n--- stderr ---\n${innerErr}`,
+       200);
   console.log('  the sshd never came up, so there is nothing to leak. Not a pass.');
+  console.log("  (the starter's own output is in .loop70/probe-sshd-leak-inner.log)");
   reap();
   process.exit(3);
 }

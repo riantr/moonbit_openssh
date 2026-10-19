@@ -40,6 +40,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { keep } from "./keep_output.mjs";
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VC = join(root, "verify_c");
@@ -300,7 +301,15 @@ function main() {
     const r = runCmd([join(VC, script)], { cwd: VC, shell: true });
     const failed = (r.text.match(/^\s*FAIL\b/gm) || []).length;
     if (r.error || r.status === null) bad(`c harness ${label}`, `did not run: ${r.error || `exit ${r.status}`}`);
-    else if (/BUILD FAILED/.test(r.text)) bad(`c harness ${label}`, r.text.trim().split("\n").slice(0, 8).join("\n      "));
+    else if (/BUILD FAILED/.test(r.text)) {
+      // `Building ed25519_kat.exe ...` / `BUILD FAILED` / `The system cannot
+      // find the path specified.` is what the first EIGHT lines of this batch
+      // gave on GitHub run 39200128854 -- and the middle line is the batch's
+      // own echo, not the compiler's error. Three harnesses, the same one
+      // useful line each, and the reason was only findable by reading
+      // build_ed25519.bat by hand. The transcript keeps the compiler's words.
+      bad(`c harness ${label}`, keep(`loop55-${label}`, r.text, 240));
+    }
     else if (failed > 0) bad(`c harness ${label}`, `${failed} FAIL line(s)`);
     else ok(`c harness ${label}`, "built and reported no failures");
   }

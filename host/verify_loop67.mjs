@@ -75,15 +75,67 @@ check("no source file is CRLF where the formatter emits LF", () => {
   // byte-identical content and differed only in line endings, which renders as
   // a whole-file delete-and-readd diff -- a diff that looks catastrophic and
   // contains no change at all. The formatter emits LF, so this asserts it.
-  const listed = run(["git", "ls-files", "*.mbt", "*.pkg", "*.moon"]);
-  const files = listed.out.split("\n").map((s) => s.trim()).filter(Boolean);
+  //
+  // Loop #70 widened it, and the widening is the point. The original guard
+  // looked only at `*.mbt *.pkg *.moon` -- the files the FORMATTER owns. But
+  // run 39200128854 checked the whole tree out as CRLF and broke six gates,
+  // and the ones this guard could not see were the interesting ones:
+  //
+  //   loop56  the SHA-1 vectors, `.txt`
+  //   loop62  verify_c/kexflow/flow_vectors.txt -- and the generator REWROTE
+  //           the committed file while asserting it was reproducible
+  //   loop66  the accept table, `.json`
+  //   loop67  this gate, reporting the tree as CRLF
+  //
+  // So the guard was narrower than the failure it exists to prevent, and it
+  // stayed green through all of it. **A guard has to be at least as wide as
+  // the thing it guards.**
+  //
+  // The file list now comes from `git ls-files` with no extension filter, and
+  // the exceptions are DERIVED from .gitattributes rather than restated here,
+  // so the two cannot drift: add `*.foo text eol=crlf` and this guard learns
+  // about it by reading, not by being edited.
+  const attr = read(".gitattributes");
+  const crlfOk = [];
+  const binary = [];
+  let sawTextEolLf = false;
+  for (const raw of attr.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = /^(\S+)\s+(.*)$/.exec(line);
+    if (!m) continue;
+    const attrs = new Set(m[2].split(/\s+/));
+    if (attrs.has("binary")) binary.push(...m[1].split(/\s+/));
+    else if (/eol=crlf/.test(m[2])) crlfOk.push(...m[1].split(/\s+/));
+    if (/eol=lf/.test(m[2])) sawTextEolLf = true;
+  }
+  assert(sawTextEolLf, ".gitattributes does not pin eol=lf for text at all");
+
+  // Git attribute patterns are globs, and the one that matters here is a
+  // LEADING star: `*.wasm` matches by suffix. Reading that as a trailing
+  // wildcard (`p.endsWith("*")`) matches nothing at all, which is how the
+  // first version of this check ended up reporting a file it had just been
+  // told to ignore.
+  const attrMatches = (pattern, file, ext) => {
+    if (pattern.startsWith("*")) return file.endsWith(pattern.slice(1));
+    if (pattern.includes("/")) return file === pattern || file.endsWith("/" + pattern);
+    return ext === pattern;
+  };
+
+  const listed = run(["git", "ls-files"]);
+  const files = listed.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const crlf = [];
   for (const f of files) {
+    const ext = path.extname(f);
+    // A declared binary file is not a line-ending question.
+    if (binary.some((p) => attrMatches(p, f, ext))) continue;
+    // A declared CRLF exception is checked out CRLF ON PURPOSE.
+    if (crlfOk.some((p) => attrMatches(p, f, ext))) continue;
     const b = readFileSync(path.join(ROOT, f));
     if (b.includes(Buffer.from("\r\n"))) crlf.push(f);
   }
   assert(crlf.length === 0, `CRLF files remain: ${crlf.join(", ")}`);
-  return `${files.length} source files, all LF`;
+  return `${files.length} tracked files, ${crlfOk.length} CRLF exception(s), ${binary.length} binary, all else LF`;
 });
 
 // ---------------------------------------------------------------- CJK guard

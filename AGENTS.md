@@ -1395,6 +1395,145 @@ instead of `/cli/key`. All three pass locally against
 resolving a *different config* than the gate wrote. Not yet understood; the full
 per-step output from defect 1 is what will settle it on the next run.
 
+### Loop #70: the rule that was never in the repository, and the guard that was narrower than the failure
+
+Run `39200128854` failed 10 of 47. Six of the ten had one cause, and the cause
+was a rule this repository believed it had.
+
+#### The finding: `core.autocrlf` lived in one developer's home directory
+
+`verify_loop67` has guarded line endings since it was written. Its verdict on
+the runner was:
+
+```
+FAIL  no source file is CRLF where the formatter emits LF
+      CRLF files remain: cmd/aes_test/main.mbt, cmd/aes_test/moon.pkg,
+      cmd/bench_cached/main.mbt, ... (essentially the whole tree)
+```
+
+The rule that should have prevented it was never in the repository. It was:
+
+```
+git config --global core.autocrlf false
+git config --global core.eol lf
+```
+
+**A global git config does not travel with a clone.** Git for Windows defaults
+to `autocrlf=true`, so `actions/checkout` on `windows-latest` wrote CRLF over
+the entire tree while the developer got LF from the same commit. The gate that
+exists to prevent this watched the whole time.
+
+This is Loop #69's `SSHD_BIN` lesson one layer over, and the general form is
+worth stating once: **a claim about the machine that is not written down in
+the repository is not a rule -- it is a coincidence that happens to hold on
+yours.**
+
+#### Six gates, one line ending
+
+| gate | what the run showed | why |
+|---|---|---|
+| loop67 | whole tree CRLF | the guard, reporting |
+| loop57 | `values match ssh -G 0 keyword(s)`, all 8 cases | `src/sshconfig/parser.mbt` has **no `\r` handling anywhere**, so `Host *.example.com\r` matches nothing and the MoonBit side resolved **zero** keywords |
+| loop58 | same, 8 of 13 cases | same resolver |
+| loop56 | `SHA-1(b'')` failed, `b'abc'` passed | the empty input vector was the one carrying a stray `\r` |
+| loop62 | `[7713 vs 7621 bytes]` | 92 bytes = 92 lines' worth of `\r` |
+| loop66 | `only 0 entries carry a reason string` | the accept table broke on its reason field |
+
+The loop57/58 shape is the one worth remembering: **the MoonBit side resolved
+nothing while `ssh -G` -- C, and therefore tolerant -- answered everything.**
+One side all-correct and one side all-empty is a shape only a line ending
+produces, and it is worth naming that shape before spending an hour on config
+precedence.
+
+loop62 had a second-order effect worth recording: the generator writes in Python
+text mode, so on Windows it **rewrote the committed file while asserting the
+file was byte-for-byte reproducible**. The gate was modifying the thing it was
+measuring.
+
+#### What the fix is, and why it is not `text=auto`
+
+`.gitattributes` pins `eol=lf` rather than relying on `text=auto`. `text=auto`
+alone leaves the *checkout* conversion to `core.autocrlf` -- which is exactly
+the setting that was wrong. Pinning `eol=lf` makes the working tree LF whatever
+the machine's git believes.
+
+`*.bat` is the deliberate exception, and not for looks:
+`verify_c/build_poly1305.bat` contains `goto :check`, and cmd.exe label
+resolution is not reliable in an LF-only batch file. Normalising those to LF
+would have traded a class of CI failures for a class of local ones.
+
+Renormalising then rewrote **9 blobs that were stored as CRLF** -- which is how
+they got that way: they were never covered by loop67's guard, because that guard
+only looked at `*.mbt, *.pkg, *.moon`. The diff is 4349 insertions and 4349
+deletions and is **empty under `--ignore-cr-at-eol`**: the catastrophic-looking
+whole-file rewrite that contains no change, which is precisely what loop67's own
+comment describes.
+
+#### A guard has to be at least as wide as the thing it guards
+
+loop67's CRLF check was 342 files wide and the failure it exists to prevent
+involved 765. It stayed green through all six gates it should have caught,
+because every file that actually broke was a file it did not look at.
+
+It now walks `git ls-files` with no extension filter, and **derives its
+exceptions from `.gitattributes` rather than restating them**, so the two
+cannot drift: add `*.foo text eol=crlf` and the guard learns by reading rather
+than by being edited. 765 tracked files, 1 CRLF exception, 3 binary.
+
+The first version of that matcher was wrong in an instructive way: it treated
+the `*` in `*.wasm` as a **trailing** wildcard (`p.endsWith("*")`), which matches
+nothing, so the check reported a `.wasm` file it had just been told to ignore.
+Git attribute globs match by a **leading** star.
+
+**Verified:** `loop70_mutations.py`, 2 CAUGHT / 0 MISSED.
+
+- **M1** -- CRLF in `verify_c/ed25519_ref.c`. Must go red and name the file.
+  This is the mutation that *justifies the widening*: the old guard was blind
+  to it by construction.
+- **M2** -- LF in `verify_c/build_poly1305.bat`. Must stay **green**. Without
+  it, an exception list that matches everything would pass a test that only
+  proves the guard is on.
+
+#### The evidence chain has a hole at every layer that summarises a child
+
+Loop #69 fixed the engine, which keeps 12 lines. Then run `39200128854` showed
+the same disease one level down, in three places at once:
+
+```
+verify_loop41          FAIL moon build  Error: failed to run build for target Native
+                       -- and not one line of the compiler's complaint
+verify_loop55          BUILD FAILED / The system cannot find the path specified.
+                       -- the kept line is the batch's own echo, not cl's error
+probe_sshd_leak        the sshd never came up -- sshd's own stderr was discarded
+                       by `inner.stderr.on('data', () => {})`
+```
+
+`host/keep_output.mjs` makes the fix a one-call change: the summary still
+prints, the full transcript goes to `.loop70/<label>.log`. Wired into those
+three call sites.
+
+Note what loop41's failure actually was: the build died in **3.0 seconds**, so
+it could not have been a compile error. Loop #69's libuv race was real and is
+reproduced locally at ~1 in 4, but **it is not what CI hit** -- CI hit a build
+that fails immediately. Two different defects; reporting only the local one
+would have been reporting the one that could not explain the run.
+
+#### Still open, and deliberately not fixed here
+
+- **loop55** -- `The system cannot find the path specified.` Root cause found
+  and it is not CRLF: all **9** `verify_c/build_*.bat` scripts begin with
+  `set GCC=D:\llvm-mingw\llvm-mingw-20260602-ucrt-x86_64\bin\gcc.exe`. A second
+  instance of the hardcoded-machine-path defect, in nine files at once. Loop
+  #69 fixed one such path and proved nothing about the other eight.
+- **loop41** -- the native build of `cmd/proton_gui`, unexplained until the
+  transcript survives.
+- **loop65** -- sshd still will not start on the runner; now the starter's own
+  stderr survives to say why.
+- **loop53** -- `missing .loop53/ca`, a generated fixture that is not there.
+- **11 of 44 gates never run on CI at all** (`PEER_GATES`). A quarter of the
+  suite is skipped by design, and "skipped by design" is exactly the shape that
+  nobody looks at again.
+
 ### Loop #68: the last red row was two untrue declarations, and a third failure that was this repository's own build cache
 
 `test-coverage` had been red for about a dozen loops. Loop #67 pinned the

@@ -42,6 +42,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { keep } from "./keep_output.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXE = path.join(root, "_build", "native", "debug", "build", "cmd", "proton_gui", "proton_gui.exe");
@@ -262,6 +263,13 @@ const runBuild = () =>
         "moon build",
         (errLines.length ? errLines : all.slice(-12)).slice(0, 10).join("\n      "),
       );
+      // The lines above are a SELECTION -- a filter for error-shaped lines,
+      // falling back to the last 12. On GitHub run 39200128854 that produced
+      // `Error: failed to run build for target Native` and nothing else, on a
+      // build that failed in 3.0 seconds and therefore could not have been a
+      // compile error. The whole transcript is kept so the next reader gets
+      // the compiler's own words instead of this gate's guess.
+      keep("loop41-moon-build", b.stdout + b.stderr);
       return;
     }
     const st = spawnSync("node", [path.join(root, "host", "proton_stage.mjs")], {
