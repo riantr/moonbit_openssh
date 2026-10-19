@@ -28,6 +28,32 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
+# Loop #72: on a GitHub windows-latest runner this script died at check S7a --
+# after 29 self-checks had already passed -- on
+#
+#     UnicodeEncodeError: 'charmap' codec can't encode character '\u2260'
+#
+# because `print` at line 506 writes to a cp1252 stdout, and the check name
+# contains `!=` written as a not-equal sign. Nothing about the protocol was
+# wrong; the console's code page was, and it had the last word on whether a
+# self-check counts as a pass.
+#
+# So: stdout is UTF-8 with `errors='replace'`. The replace is the part that
+# matters -- with it, a stray character in a future check name degrades to
+# `?` in the log instead of turning a 29-of-29 self-check into a crash on the
+# 30th. A reference implementation that dies while REPORTING its result is
+# reporting the console, not the protocol.
+#
+# This is belt and braces on purpose. The CI workflow also sets
+# PYTHONIOENCODING=utf-8, which fixes the class for every Python a gate runs;
+# this makes the script correct on its own, including when a developer runs it
+# from a cp936 console.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:  # noqa: BLE001 -- Python <3.7, or a stream with no reconfigure
+    pass
+
 # ============================================================================
 # SHA-1 (RFC 3174) -- 独立 Python 实现,与 hashlib.sha1 字节级一致
 # ============================================================================

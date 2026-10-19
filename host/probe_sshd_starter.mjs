@@ -34,11 +34,40 @@ function portOpen(p) {
   });
 }
 
+// Loop #72: `stdio: 'ignore'` was copied from verify_loop40 to be faithful to
+// what is being reproduced, and it faithfully reproduced one more thing nobody
+// wanted: sshd_setup.mjs's own output went nowhere.
+//
+// Measured on GitHub run 39218394411, the outer probe's kept transcript was
+// 65 bytes in total:
+//
+//     exit 1
+//     --- stdout ---
+//     STARTER: port never opened
+//     --- stderr ---
+//
+// Empty. The gate under test had spent three runs refusing to call "sshd never
+// came up" a pass, and the one sentence that would have said WHY -- Loop #69's
+// "no sshd.exe in any of: <three paths>" -- was being thrown away one layer
+// further down.
+//
+// Capturing the child's streams does not change what is measured. The leak
+// depends on `detached: false` and `child.unref()` -- the owner exits and the
+// sshd does not -- and on neither of those does the sshd care what happens to
+// its parent's pipes. `stdio` decides who READS the output, not whether the
+// process survives. So this is not a deviation from the reproduction; it is the
+// reproduction, with the explanation attached.
 const child = spawn(
   'cmd',
   ['/c', 'node', 'host/sshd_setup.mjs', '--port', String(port)],
-  { cwd: ROOT, stdio: 'ignore', detached: false },
+  { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], detached: false },
 );
+// Forwarded, not buffered: sshd_setup may print a lot before it exits, and a
+// pipe nobody reads fills and blocks the child -- which would turn "sshd said
+// something" into "sshd hung", a second and much worse lie.
+child.stdout.on('data', (d) => process.stdout.write(d));
+child.stderr.on('data', (d) => process.stderr.write(d));
+child.on('error', (e) => process.stderr.write(`starter: spawn failed: ${e.message}\n`));
 child.unref();                      // <- as in verify_loop40
 // Deliberately NOT killing or awaiting `child`. Same as the gate.
 

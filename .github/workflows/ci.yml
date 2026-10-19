@@ -127,8 +127,49 @@ jobs:
       - name: Show the discovered steps
         run: python ci/ci.py --tiers env,build,gates --list
 
+      # Loop #72: `cmd/proton_gui` does not build without the shared Proton CEF
+      # runtime, and nothing on a fresh runner installs it.
+      #
+      # Measured on run 39218394411, verify_loop41.mjs failed in 2.9s with:
+      #
+      #   browser_session.h(7): fatal error C1083:
+      #     Cannot open include file: 'include/capi/cef_browser_capi.h'
+      #   cl.exe ... -IC:/Users/runneradmin/.proton/store/win32-x64/
+      #              cef-169847f3...-layout-1/sdk
+      #
+      # Note what that is: the path was COMPUTED correctly and the layout was
+      # not there. `moon update` fetches the mooncake; it does not fetch CEF.
+      # On a developer machine the CEF store exists because another project
+      # installed it -- AGENTS.md records that the prerequisites came from
+      # `moonbit_static_analysis`, not from this repository. So this is the
+      # third runner prerequisite in a row (paramiko, then Playwright, then
+      # this) that was "obviously already there" and was not.
+      #
+      # `proton_cli cef setup` is named from `proton_cli cef --help` rather than
+      # guessed. There is no --dry-run, so it runs only here, never locally.
+      # The existence check is explicit because the failure this replaces was
+      # silent: a missing tool would otherwise become a compiler error about a
+      # header, four steps later, in a different file.
+      - name: Provision the Proton CEF runtime
+        shell: pwsh
+        # Bounded on purpose. `cef setup` downloads and unpacks a CEF layout,
+        # and there is no --dry-run to rehearse it against -- so this is the one
+        # step in the job whose behaviour is being discovered rather than
+        # verified. A 20-minute cap turns "the runner hung on a prompt" into a
+        # red step with a name, instead of a 6-hour job timeout.
+        timeout-minutes: 20
+        run: |
+          $cli = "$env:USERPROFILE\.moon\bin\proton_cli.exe"
+          if (-not (Test-Path $cli)) {
+            Write-Error "proton_cli.exe not found at $cli -- it ships with the MoonBit CLI install. Without it `cmd/proton_gui` cannot build its C stub, and the failure surfaces as a missing cef_browser_capi.h several steps away."
+            exit 1
+          }
+          & $cli cef setup
+
       - name: Run gates
         run: python ci/ci.py --tiers env,build,gates --json ci/artifacts/ci.json
+        env:
+          PYTHONIOENCODING: utf-8
 
       # The whole directory, not just ci.json. ci/artifacts/steps/ holds the
       # complete stdout of every failing step, which is the only place the

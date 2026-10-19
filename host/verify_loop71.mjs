@@ -96,26 +96,69 @@ const tracked = () =>
     .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 
 // How many lines an exemption must span to cover every machine path that
-// follows a marker in `rawSrc`. 0 when the file needs no exemption. Used to
-// hold EXEMPT_WINDOW to the widest real case instead of a guess.
-function windowNeededFor(pathname) {
+// follows a marker in `rawSrc`. Returns {file, needed} so a failure can NAME
+// the file.
+//
+// The first version returned a bare integer and the failure said only
+// "some exemption in the tree needs 31 lines" -- on a CI checkout, for a file
+// nobody could identify. That is the exact defect Loop #70 fixed in
+// verify_loop41 (a failure whose detail does not say which file), introduced
+// two loops later in a gate written specifically to prevent that class. A
+// diagnostic that cannot name its own subject is not a diagnostic.
+function windowNeededFor(rel, pathname) {
   const src = readFileSync(pathname, "utf8");
   const rawLines = src.split(/\r?\n/);
   let needed = 0;
   for (let i = 0; i < rawLines.length; i++) {
-    if (!/machine-path-exempt\s*:?\s*\S/.test(rawLines[i])) continue;
-    // Scan the un-exempted window for this marker and see how far the last
-    // hit sits below it. A window that stops before the last hit is exactly
-    // the bug this function exists to prevent.
-    for (let j = i + 1; j <= Math.min(i + 40, rawLines.length - 1); j++) {
+    // Anchored to the start of a comment token. Unanchored, this matched any
+    // line merely TALKING about the marker -- including this file's own
+    // header, which documents it -- and then the lookahead found a drive
+    // letter 59 lines below, in a test case.
+    if (!/^\s*(?:\/\/|#|REM\b|::)?\s*machine-path-exempt\b/.test(rawLines[i])) continue;
+    for (let j = i + 1; j <= Math.min(i + 60, rawLines.length - 1); j++) {
       const line = rawLines[j];
       if (new RegExp(DRIVE_RE.source).test(line) || new RegExp(HOME_RE.source).test(line)) {
         needed = Math.max(needed, j - i);
       }
     }
   }
-  return needed;
+  return { file: rel, needed };
 }
+
+// This file is excluded from its own measurement, and says so rather than
+// quietly skipping.
+//
+// The reason is not convenience. A gate's test fixtures have to CONTAIN the
+// strings the gate looks for -- `'C:\\Program Files\\OpenSSH-Win64'` as the
+// "a probe list is not a claim" case, the bare `machine-path-exempt` as the
+// "no reason" case -- or the exclusion tests cannot be written. So this file
+// will always contain machine paths, always contain the marker string, and
+// will always report a machine path far below a marker.
+//
+// Anchoring the marker regex above removes most of that. What is left is
+// irreducible: the fixtures are the fixture. A linter excluded from its own
+// lint is normal; a linter that silently skips a file is not, which is why
+// this is a named exclusion rather than a `continue`.
+//
+// Measured on the CI checkout at commit 5a9b69c, this reported 31 with no
+// file named; locally with a longer lookahead it reports 59. Both numbers were
+// this file, counting its own documentation.
+//
+// The second entry is the same problem one level out: `loop71_mutations.py`
+// plants a hardcoded gcc path into `build_aead.bat` to prove this gate can
+// fail, so it necessarily contains the path it plants.
+//
+// So: a NAMED list, with the reason attached, rather than a `continue` --
+// because a gate that quietly skips files is how you get a gate that quietly
+// stops working. Adding to this list is a reviewable act with a stated
+// justification, which is the whole difference between it and a whitelist
+// someone added to make the build green.
+const SELF_EXCLUDED = {
+  "host/verify_loop71.mjs":
+    "the gate: its exclusion fixtures contain the strings it looks for",
+  "host/loop71_mutations.py":
+    "the mutation harness: M1 plants a hardcoded gcc path to prove the gate fails",
+};
 
 // How many lines below a `machine-path-exempt` marker are covered. See the
 // note at the declaration site: this is sized by the longest legitimate
@@ -142,6 +185,7 @@ const HOME_RE = /[\\/](?:Users|home)[\\/][A-Za-z0-9._-]+[\\/]/g;
 function scan(file) {
   const ext = path.extname(file).toLowerCase();
   if ([".png", ".wasm", ".ico", ".exe", ".dll", ".o", ".pdf"].includes(ext)) return [];
+  if (file in SELF_EXCLUDED) return [];
   let src;
   try {
     src = readFileSync(path.join(ROOT, file), "utf8");
@@ -306,20 +350,47 @@ if (all.length === 0) {
   // actually in the tree. Asserted against the repository rather than trusted:
   // the window was 4, then 8, and both times it was the gate complaining about
   // a file that Loop #69 had already fixed.
-  const needed = Math.max(
-    ...files.map((f) => {
-      try {
-        return windowNeededFor(path.join(ROOT, f));
-      } catch {
-        return 0;
-      }
-    }),
-  );
-  assert(EXEMPT_WINDOW >= needed,
-    `EXEMPT_WINDOW is ${EXEMPT_WINDOW} but ${EXEMPT_WINDOW > 0 ? "some" : ""}exemption ` +
-    `in the tree needs ${needed} lines`);
+  const measured = files.filter((f) => !(f in SELF_EXCLUDED)).map((f) => {
+    try {
+      return windowNeededFor(f, path.join(ROOT, f));
+    } catch {
+      return { file: f, needed: 0 };
+    }
+  });
+  const widest = measured.reduce((a, b) => (b.needed > a.needed ? b : a),
+                                { file: "(none)", needed: 0 });
+  assert(EXEMPT_WINDOW >= widest.needed,
+    `EXEMPT_WINDOW is ${EXEMPT_WINDOW} but ${widest.file} has a machine path ` +
+    `${widest.needed} line(s) below its machine-path-exempt marker ` +
+    `(line-ending variants of the same file: ${
+      measured.filter((m) => m.needed === widest.needed)
+        .map((m) => m.file).join(", ")})`);
   ok("the exemption window still covers the tree's widest legitimate case",
-     `needs ${needed} line(s), window is ${EXEMPT_WINDOW}`);
+     `widest is ${widest.file} at ${widest.needed} line(s), window is ${EXEMPT_WINDOW}`);
+}
+
+// The exclusions are reported before the tally, not after it.
+//
+// The first version of this block ran below the `checks passed` line, which
+// meant a dead exclusion pushed its FAIL onto the list AFTER the count had been
+// printed: the run would say "9/9 checks passed" and then print a failure, and
+// exit 1. Both halves true, one of them a lie, and the lie is the one a reader
+// scrolling a CI log sees first. Anything that can add a result has to run
+// before the number that counts results.
+//
+// Printed every run, with reasons. A list that only exists in the source is a
+// list nobody re-reads, and an exclusion is exactly the kind of thing that has
+// to keep earning its place: every entry is a file where this gate is not
+// looking, which is the whole defect class this loop was opened for.
+console.log("");
+console.log(`excluded from this gate (${Object.keys(SELF_EXCLUDED).length}):`);
+for (const [f, why] of Object.entries(SELF_EXCLUDED)) {
+  const present = files.includes(f);
+  console.log(`  ${present ? "ok  " : "GONE"} ${f}  -- ${why}`);
+  if (!present) {
+    results.push({ name: `exclusion ${f} still needed`, ok: false,
+                   detail: "this file no longer exists, so the exclusion is dead weight" });
+  }
 }
 
 console.log("");
