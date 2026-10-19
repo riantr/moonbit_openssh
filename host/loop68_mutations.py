@@ -44,6 +44,30 @@ actually wrong here".
   * **M7** removes one that it can. The failure mode is the one Loop #66 hit on
     its accept table: a gate that only notices new problems is a gate whose
     evidence has stopped being checked.
+  * **M8** puts the reason-extraction back to the tail of the output. This one
+    mutates the gate rather than the tree it measures, and it is here because
+    the gate CAN see it: with the tail, the two packages that legitimately
+    cannot be covered report the reporter's own `main` frame
+    (`Called from Moon_cove_report ... line 223726`) instead of a reason, and
+    the "every non-reportable package has a readable reason" check goes red.
+    Loop #71 measured the general rule -- a gate excluded from its own scan
+    only where it must be -- and this is the case where excluding is not
+    available: the defect is in the scanning code.
+
+**What is deliberately NOT mutated here, and why.** The retry that Loop #73
+added to both `host/cov_report.py` and section C cannot be mutation-tested
+honestly: the failure it defends against is rare enough that a sandbox run
+would come back clean with the retry deleted, which is a MISSED by definition.
+A MISSED that only appears when the machine is busy teaches the reader that
+the harness is measuring something. The retry is instead defended by the
+readable-reason check (M8), which is deterministic, and by the fact that the
+two packages it re-confirms are named in the committed evidence file -- if the
+retry had stopped working, the reported set would change in a way section C's
+comparison already catches. `host/cov_report.py` carries the same extraction and
+the same retry and has no mutation of its own, for a reason worth stating:
+its default target list is the committed reportable set, every one of which
+reports, so it never prints a not-reportable reason for anything to be wrong
+about.
 
 **Two mutations were written, run, and deleted, and the record of why matters
 more than the two that stayed.** The first draft deleted the per-package
@@ -121,6 +145,13 @@ MUTATIONS = [
         "M7", "drop src/kexflow from the committed reportable set",
         "replace", "host/cov_reportable.json",
         old='    "src/kexflow",\n',
+        new='',
+    ),
+    Mutation(
+        "M8", "read a failure's reason off the end of the OCaml backtrace again",
+        "replace", "host/verify_loop68.mjs",
+        old='  const m = out.match(/Fatal error: exception \\w+\\("([^"]*)"/s);\n'
+            '  if (m) return m[1].replace(/\\\\n/g, " ").split(/\\s+/).join(" ").trim();\n',
         new='',
     ),
 ]

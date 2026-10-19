@@ -1723,6 +1723,161 @@ test.**
   `if-no-files-found: warn` stayed quiet because `ci/artifacts/` matched), so
   the next run should finally carry the transcripts.
 
+### Loop #72: three runner prerequisites, and a gate that was measuring its own documentation
+
+Run `39218394411` failed 5 of 48. One of the five was
+`verify_loop71.mjs` -- the gate Loop #71 shipped, written specifically to
+prevent a class of defect, failing at a class of defect. That is the headline.
+
+#### What the evidence finally said
+
+Loop #71 made `.loop70/` reachable (`include-hidden-files: true`), so for the
+first time the transcripts survived the runner. Every one of the remaining
+failures became a specific fact instead of a shape:
+
+| gate | the fact |
+|---|---|
+| loop55 | **green** -- the nine `where gcc` fixes work |
+| loop41 | `cl.exe ... -IC:/Users/runneradmin/.proton/store/win32-x64/cef-169847f3...-layout-1/sdk` then `fatal error C1083: Cannot open include file: 'include/capi/cef_browser_capi.h'` |
+| loop56 | `UnicodeEncodeError: 'charmap' codec can't encode character '\u2260'` at `knownhosts_python_ref.py:605` |
+| loop65 | the inner transcript was 65 bytes: `STARTER: port never opened`, stderr empty |
+| loop71 | `EXEMPT_WINDOW is 12 but someexemption in the tree needs 31 lines` -- no file named |
+
+#### 1. loop56 died printing `!=`
+
+Twenty-nine self-checks passed, then the thirtieth took the process down: the
+check name contains a not-equal sign, stdout is cp1252 on a Windows runner,
+and cp1252 has no U+2260. Nothing about known_hosts was wrong. **The console's
+code page had the last word on whether a self-check counted as a pass.**
+
+Fixed in two places, deliberately:
+
+- `verify_c/knownhosts_python_ref.py` reconfigures its own stdout to UTF-8
+  with `errors='replace'`. The `replace` is the load-bearing half: with it, a
+  stray character in a future check name degrades to `?` in the log instead of
+  turning 29-of-29 into a crash on the 30th. **A reference implementation that
+  dies while REPORTING its result is reporting the console, not the protocol.**
+- the workflow sets `PYTHONIOENCODING=utf-8` for the whole tier, which covers
+  the other eight Python references rather than the one that was observed.
+
+Proven by running it with `PYTHONIOENCODING=cp1252` forced: exit 0. The
+reconfigure overrides the hostile console rather than trusting the caller.
+
+This is the third time this Windows console-encoding trap has appeared in this
+project, in three different layers. The first two are recorded in Loop #42.
+
+#### 2. `verify_loop71` was measuring itself
+
+The failure said an exemption needed 31 lines and named no file. Two defects,
+and the first is the reason the second took a run to find.
+
+**The message could not name its own subject.** That is the exact defect
+Loop #70 fixed in `verify_loop41` -- a failure whose detail does not say which
+file -- reintroduced two loops later, in a gate written to prevent it.
+`windowNeededFor` now returns `{file, needed}` and the assert names both the
+file and the distance.
+
+**Once it could name itself, it named itself.** The gate contains the strings
+it looks for: its exclusion fixtures hold `'C:\\Program Files\\OpenSSH-Win64'`
+and a bare `machine-path-exempt`, so the marker regex matched the gate's own
+header comment and the lookahead then found a drive letter 59 lines below, in a
+test case. On the CI checkout the same arithmetic read 31; locally it read 10
+earlier in the loop and 59 later, purely because I had added test cases in
+between. **Two numbers, same bug, and the difference was my own editing.**
+
+Fixed three ways, each of which was necessary:
+
+1. the marker regex is anchored to the start of a comment token, so prose that
+   merely *mentions* the marker is not a marker;
+2. `SELF_EXCLUDED` is a **named** list with a reason attached -- the gate
+   itself, and `loop71_mutations.py`, whose M1 plants a hardcoded gcc path in
+   order to prove the gate can fail. A gate's fixtures must contain what the
+   gate hunts for, or the exclusion tests cannot be written;
+3. **the exclusions are printed on every run, with their reasons, and a
+   listed-but-absent file fails the gate.** A silently-skipped file is how a
+   gate quietly stops working; adding to this list is a reviewable act with a
+   stated justification, which is the entire difference between it and a
+   whitelist someone added to turn the build green.
+
+Anchoring alone did not fix it: the next run immediately flagged
+`host/loop71_mutations.py`, which is the same problem one level out.
+
+#### 3. The third "obviously already installed" prerequisite
+
+`moon update` fetches the mooncake. It does not fetch CEF. On this machine the
+CEF store exists because **another project** put it there -- AGENTS.md records
+that the prerequisites came from `moonbit_static_analysis`, not from this
+repository -- so the workflow step was written from a machine that had been
+pre-provisioned by something outside it.
+
+paramiko, then Playwright, then CEF: three runner prerequisites in three loops,
+each one "obviously already there" and each one not there. The CI environment
+is a machine nobody has set up, and the only reliable way to know what it needs
+is to let a run fail and read what it said.
+
+The command is `proton_cli cef setup`, read from `proton_cli cef --help` rather
+than guessed. There is no `--dry-run`, so it runs only in CI, never locally,
+and the workflow fails loudly if `proton_cli.exe` is absent rather than letting
+it surface later as a missing C header in an unrelated file.
+
+#### 4. The evidence chain had a fourth hole
+
+`sshd_setup.mjs` prints exactly why it could not start. The transcript held:
+
+```
+exit 1
+--- stdout ---
+STARTER: port never opened
+--- stderr ---
+```
+
+Empty. The culprit was `stdio: 'ignore'` in `probe_sshd_starter.mjs`, copied
+from `verify_loop40` "to be faithful". It was faithful to one thing nobody
+wanted: Loop #69's `no sshd.exe in any of: ...` was being discarded one layer
+further down, by a file whose entire job is to explain why.
+
+Capturing the child's streams does not change what is measured. The leak
+depends on `detached: false` and `child.unref()`; `stdio` decides who READS the
+output, not whether the sshd survives its parent. So this is not a deviation
+from the reproduction -- it is the reproduction, with the explanation attached.
+
+Forwarded rather than buffered, deliberately: a pipe nobody reads fills and
+blocks the child, which would turn "sshd said something" into "sshd hung", a
+second and much worse lie.
+
+**Four loops, four layers, one habit.** Loop #69 (engine keeps 12 lines), #70
+(`.loop70/` outside the upload path), #71 (dotfiles skipped by the uploader),
+#72 (`stdio: 'ignore'` in the probe). Each time the fix was correct and the
+plumbing ate it, and each time the failure was invisible because the thing
+doing the hiding was the thing reporting the symptom.
+
+**Verified locally:** loop56 41/41, loop65 25/25, loop71 9/9.
+`loop71_mutations.py` re-run after the exclusion changes: **3 CAUGHT / 0
+MISSED** -- M1 plants into `build_aead.bat`, which is not excluded, so the new
+exclusion list did not accidentally blind the mutation that proves the gate
+works.
+
+#### And two defects this loop's own change introduced, found while committing it
+
+Neither was caught by a gate, which is the point of writing them down.
+
+**The tally was printed before the thing it tallies.** The exclusion block --
+the one that pushes a FAIL when an excluded file has stopped existing -- sat
+*below* the `loop71: 9/9 checks passed` line. On the day an excluded file is
+deleted, the run prints the count, then prints the exclusion list with `GONE`
+next to it, then prints a FAIL, then exits 1. Every line is true and the first
+one is the lie a reader sees first. Anything that can add a result has to run
+before the number that counts results; the block moved above it.
+
+**A helper written for behaviour that was implemented somewhere else.**
+`excludedFilesIn()` was added alongside the exclusion change with a comment
+describing exactly what the block below it already did, and nothing called it.
+Dead code carrying a comment that explains live code is worse than no comment:
+the next reader has two places to look and no way to tell which one runs.
+
+Both of these are the same species as the four above them -- a report that is
+accurate about itself being wrong about something else.
+
 ### Loop #68: the last red row was two untrue declarations, and a third failure that was this repository's own build cache
 
 `test-coverage` had been red for about a dozen loops. Loop #67 pinned the
@@ -2009,6 +2164,123 @@ writes its reason to **stderr**, because the CI engine keeps only the last 12
 lines of output and a coverage table is longer than that, which is exactly how an
 earlier run of this loop showed a table of successes and the bare words
 "exit 1" with no indication of what had gone wrong.
+
+### Loop #73: a failure that named its own source file, and the two situations it could not tell apart
+
+Loop #72's four fixes verified green one by one. The full local CI then came
+back 47/48 with the single failure in `verify_loop68.mjs` -- a gate from four
+loops earlier, on a code path Loop #72 never touches. It is worth separating
+that off from #72 and looking at on its own, because it is the same shape of
+defect this project has now hit three times: **a catch-all that cannot say
+which of two very different things happened.**
+
+#### What the run said
+
+```
+reportable: 14/17
+  not reportable: src/aead  --  Called from Moon_cove_report in file "moon_cove_report.ml", line 223726, characters 2-9
+FAIL  committed reportable set matches what the toolchain does now
+      -- no longer reportable: src/aead
+```
+
+and then, in the very next section, on the very same tree:
+
+```
+D. PASS  host/cov_report.py -- the qa command -- exits 0  --  15/15 packages reported
+```
+
+Both cannot be right about `src/aead`. Standalone it passed 36/36, and so did
+`--only loop66,loop67,loop68`. It needs the full 22-65 warm-up and a loaded
+machine, which is to say it is not reproducible on demand -- the hardest kind
+of failure to argue about and the easiest kind to write down wrongly.
+
+#### The reason on that line was the reporter's own `main` frame
+
+`moon coverage analyze -p src/khfile`, on a clean `_build`, prints:
+
+```
+Fatal error: exception Failure("Error: No coverage source data found, maybe you
+forgot to run `moon test` with `--enable-coverage`, or the package name
+`src/khfile` is incorrect?\n")
+Raised at Stdlib.failwith in file "stdlib.ml", line 29, characters 17-33
+Called from Moon_cove_report.Coverage_collection.combine_coverages in file "moon_cove_report.ml", line 223261, ...
+Called from Moon_cove_report.main in file "moon_cove_report.ml", line 223617, ...
+Called from Moon_cove_report in file "moon_cove_report.ml", line 223726, characters 2-9
+```
+
+Both `host/cov_report.py` and section C of the gate took the **last non-blank
+line** as the reason. That line is `moon_cove_report` calling itself. It is the
+same string for every failure the reporter can raise, so it carried exactly
+zero information, and it was printed next to a package whose failure is a real,
+permanent property of the repository.
+
+That matters here specifically because **the transient failure has the same
+shape as the permanent one.** The committed evidence records
+`src/khfile` and `src/test_nested` as un-coverable for a real reason -- their
+only test drivers are gated to `native`, and `coverage analyze` has no
+`--target`, so there is nothing to instrument. On the failing run `src/aead`
+reported no coverage source data too. Same message. Different cause: one is a
+fact about a package, the other is an instrumented build that did not
+complete on that particular pass.
+
+So a signature test would not have separated them, and a "retry" that
+classified by signature would have been worse than nothing. **The
+discriminator is persistence, not wording.**
+
+#### Two changes, in both places the derivation is written
+
+There are two copies of this logic -- `host/cov_report.py` (the qa command) and
+section C of `verify_loop68.mjs` (which re-derives independently, on purpose,
+so the gate is not just re-reading the script's own answer). Both got the same
+two changes.
+
+1. **The reason is read from the failure payload**, not the tail of the
+   output. `src/khfile` now prints `Error: No coverage source data found, ...`
+   instead of a line number in the toolchain's own source. Fallback is still
+   the tail, so an unrecognised failure shape stays visible rather than
+   swallowed.
+2. **One retry before concluding.** ~3s for the two packages that fail for
+   real, and a one-off build failure goes back to being the transient it was.
+   A package that only reports on the second attempt is *named in the output*
+   (`recovered on retry: ...`), not healed silently -- the fact that made the
+   gate red belongs in the log one level up as well.
+
+#### And an assertion, because the fix was otherwise untested
+
+Both edits are invisible to a green run: on a good day the gate passes either
+way. So section C now asserts **the reason is readable** -- no not-reportable
+package may report a line starting with `Called from ` or `Raised at `. That
+is a deterministic property of the two packages that legitimately cannot be
+covered, and it is the mutation target.
+
+`host/loop68_mutations.py` **M8** deletes the extraction lines from the gate
+and must come back CAUGHT. It mutates the gate rather than the tree, which is
+normally off limits -- the rule from Loop #71 is that a gate is excluded from
+its own scan, because it contains the strings it looks for. This is the case
+where exclusion is not available: the defect is *in the scanning code*, so a
+check that the scanning code is doing its job is the only thing that can catch
+it.
+
+#### What was not mutated, and why
+
+The retry cannot be mutation-tested honestly. The failure it defends against
+is rare enough that a sandbox run with the retry deleted would come back
+clean -- a MISSED by definition, and a MISSED that only shows up on a busy
+machine is worse than no mutation, because it trains the reader to trust a
+number that means nothing. `host/cov_report.py` carries the same two changes
+and has no mutation of its own for a structural reason worth writing down:
+its default target list is the committed reportable set, and every package in
+that set reports, so it never prints a not-reportable reason for anything to be
+wrong about. Its `--derive` and `--all` paths are the ones section C exercises
+directly.
+
+There is also a duplication I chose not to remove. One implementation would be
+better -- `verify_loop68.mjs` re-deriving in JavaScript what `cov_report.py`
+already derives in Python is exactly the "protocol implemented twice" problem
+this repository argues against everywhere else. It survives here because
+section C's independence from the script's own answer is the whole reason the
+comparison can fail, and collapsing them would make the gate agree with itself
+by construction. That is debt with a name, not debt to hide.
 
 ### Loop #67: a twelve-loop-old warning was wrong, and the tool that measured it was wrong in a worse way
 

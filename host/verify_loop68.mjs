@@ -39,6 +39,29 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TARGETS = ["native", "js", "wasm", "wasm-gc"];
 const SKIP_LIVE = process.argv.includes("--skip-live");
 
+// One retry per package. See the section C comment: a single
+// `moon coverage analyze` is not a reproducible measurement, and the committed
+// evidence file is only trustworthy if the thing that re-derives it can
+// survive the run that happened to be unlucky.
+const ANALYZE_ATTEMPTS = 2;
+
+// The sentence that explains a failure. `moon coverage analyze` prints an
+// OCaml backtrace on failure, and its last line is the reporter's `main`
+// calling itself:
+//
+//   Called from Moon_cove_report in file "moon_cove_report.ml", line 223726
+//
+// That string is the same for every failure the reporter can raise, which
+// makes it useless as a reason. The payload of the `Failure(...)` on the first
+// line is the reason. Falling back to the tail keeps an unrecognised failure
+// shape visible instead of silent.
+const describeFailure = (out) => {
+  const m = out.match(/Fatal error: exception \w+\("([^"]*)"/s);
+  if (m) return m[1].replace(/\\n/g, " ").split(/\s+/).join(" ").trim();
+  const tail = out.trim().split("\n").filter((l) => l.trim()).pop() || "";
+  return tail.trim();
+};
+
 let failures = 0;
 let checks = 0;
 const section = (t) => console.log(`\n${t}`);
@@ -186,8 +209,23 @@ section("C. the coverage pipeline produces a real report, re-derived");
       // reporter was measured printing the same report as the wasm one
       // (src/kexflow, 73 markers against Total: 73, 15s) against a clean
       // _build. See the "What it measures" section of AGENTS.md, Loop #68.
-      const r = moonTry(["coverage", "analyze", "-p", pkg]);
-      const m = (r.out || "").match(/^Total:\s+(\d+)\s+uncovered line\(s\)\s+in\s+(\d+)\s+file\(s\)/m);
+      // Retry once before concluding anything. A single `moon coverage
+      // analyze` is not a reproducible measurement: the same command on the
+      // same clean tree reported 15/15 thirty seconds after a run that reported
+      // 14/17. Re-running costs ~3s for the two packages that fail for real
+      // (src/khfile, src/test_nested -- native-only test drivers that
+      // `coverage analyze` cannot instrument, which is why the committed set
+      // has 15 entries and not 17) and turns a one-off build failure back into
+      // the transient it was. host/cov_report.py carries the same retry for
+      // the same reason.
+      let r, m, attempts = 0;
+      for (;;) {
+        attempts += 1;
+        r = moonTry(["coverage", "analyze", "-p", pkg]);
+        m = (r.out || "").match(/^Total:\s+(\d+)\s+uncovered line\(s\)\s+in\s+(\d+)\s+file\(s\)/m);
+        if ((r.ok && m) || attempts >= ANALYZE_ATTEMPTS) break;
+        console.log(`    ${pkg}: no report on attempt ${attempts} (${describeFailure(r.out || "")}) -- retrying`);
+      }
       if (r.ok && m) {
         // Self-consistency: the marker count on the annotated source must equal
         // the number the reporter claims. If they ever diverge the report is
@@ -197,10 +235,36 @@ section("C. the coverage pipeline produces a real report, re-derived");
         expect(`${pkg} report is self-consistent`, marks === Number(m[1]),
                `${marks} markers vs Total: ${m[1]}, ${m[2]} file(s)`);
       } else {
-        const tail = (r.out || "").trim().split("\n").filter((l) => l.trim()).pop() || "";
-        notReportable.push([pkg, tail.trim().slice(0, 110)]);
+        notReportable.push([pkg, describeFailure(r.out || "")]);
       }
     }
+
+    // A reason that names what happened is worth keeping; one that names a
+    // frame in the reporter's own source is not. This is an assertion about
+    // the measurement, not about the packages: `moon coverage analyze` prints
+    // an OCaml backtrace whose LAST line is always the same string --
+    //
+    //   Called from Moon_cove_report in file "moon_cove_report.ml", line 223726
+    //
+    // regardless of why it failed. Taking the tail (which this section used to
+    // do, alongside host/cov_report.py) therefore reported that same opaque
+    // line for src/khfile, whose tests genuinely cannot be instrumented, and
+    // for src/aead, which merely lost one instrumented build to a transient.
+    // The second case then rewrote the committed reportable set, which is how
+    // a full CI run went red on a package that section D -- the next command on
+    // the next line -- reported successfully.
+    //
+    // Two packages fail here and both must keep failing: they are the reason
+    // the committed set has 15 entries and not 17. Their reasons have to be
+    // readable, or this gate is one bad day away from failing to explain
+    // itself.
+    const opaque = [];
+    for (const [pkg, why] of notReportable) {
+      if (/^(Called from |Raised at )/.test(why)) opaque.push(`${pkg}  --  ${why}`);
+    }
+    expect(`every non-reportable package has a readable reason (${notReportable.length})`,
+           opaque.length === 0,
+           opaque.length ? opaque.join(" | ") : notReportable.map(([p, w]) => `${p}: ${w.slice(0, 60)}`).join(" | "));
   }
 
   console.log(`  reportable: ${reportable.length}/${withTests.length}`);

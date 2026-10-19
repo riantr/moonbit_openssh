@@ -58,6 +58,54 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV = os.environ
 TOTAL_RE = re.compile(
     r"^Total:\s+(\d+)\s+uncovered line\(s\)\s+in\s+(\d+)\s+file\(s\)", re.M)
+# The reason a package cannot report is inside the OCaml reporter's failure
+# payload, not on the last line of its backtrace.
+#
+# This is not a stylistic point. `moon coverage analyze -p src/khfile` prints a
+# three-frame backtrace whose FINAL line is always
+#
+#   Called from Moon_cove_report in file "moon_cove_report.ml", line 223726, ...
+#
+# which says nothing at all -- it is the reporter's own `main` calling itself.
+# The sentence that actually explains the failure is the first line:
+#
+#   Fatal error: exception Failure("Error: No coverage source data found, ...")
+#
+# Taking the tail of the output (which both this script and section C of
+# host/verify_loop68.mjs used to do, independently) therefore reported the same
+# opaque string for two completely different situations: a package whose tests
+# cannot be instrumented, and a package whose instrumentation build happened to
+# fail on that particular run. That conflation is what turned a transient
+# failure into a changed verdict about the repository. See ANALYZE_ATTEMPTS.
+FAILURE_RE = re.compile(r"Fatal error: exception \w+\(\"(?P<why>[^\"]*)\"", re.S)
+
+# One retry, and the reason is that a single analyze is not deterministic.
+#
+# Measured on a full local CI run: the --derive sweep classified 14 of 17
+# packages as reportable because `src/aead` printed the no-source-data failure,
+# and section D -- the very next command on the very same tree -- reported
+# 15/15 including `src/aead`. The committed set was right all along; the
+# measurement was not reproducible.
+#
+# A retry does not paper over a package that genuinely cannot report: those
+# fail identically every time and cost ~3s each to re-confirm. What it stops is
+# a one-off build failure being written down as a fact about the package, which
+# is the failure mode this repository keeps meeting in a new costume.
+ANALYZE_ATTEMPTS = 2
+
+
+def reason_from(out):
+    """The sentence that explains a failure, not the last line that printed one.
+
+    Falls back to the tail only when there is no failure payload to find, so an
+    unexpected failure shape is still reported rather than swallowed.
+    """
+    m = FAILURE_RE.search(out)
+    if m:
+        return " ".join(m.group("why").replace("\\n", " ").split())
+    tail = [l for l in out.strip().splitlines() if l.strip()]
+    return tail[-1].strip() if tail else "no output"
+
 
 argv = sys.argv[1:]
 show_all = "--all" in argv
@@ -125,9 +173,16 @@ def main():
     # each of those two steps was deleted anyway: both were MISSED, which is
     # the correct verdict for a step nothing depends on.
     moon(["clean"])
+    healed = []
     for pkg in targets:
-        code, out = moon(["coverage", "analyze", "-p", pkg], ENV)
-        m = TOTAL_RE.search(out)
+        attempts = 0
+        while True:
+            attempts += 1
+            code, out = moon(["coverage", "analyze", "-p", pkg], ENV)
+            m = TOTAL_RE.search(out)
+            if (code == 0 and m) or attempts >= ANALYZE_ATTEMPTS:
+                break
+            healed.append(pkg)
         if code == 0 and m:
             marks = out.count("<-- UNCOVERED")
             claimed = int(m.group(1))
@@ -137,11 +192,11 @@ def main():
                                 "vs Total: %d" % (pkg, marks, claimed))
             rows.append((pkg, claimed, files, marks, "ok"))
         else:
-            tail = [l for l in out.strip().splitlines() if l.strip()]
-            why = tail[-1].strip() if tail else "no output"
+            why = reason_from(out)
             rows.append((pkg, None, None, None, why))
             if not show_all:
-                problems.append("%s: no coverage report -- %s" % (pkg, why[:100]))
+                problems.append("%s: no coverage report after %d attempt(s) -- %s"
+                                % (pkg, attempts, why[:100]))
 
     print("")
     print("  %-20s %10s %8s %10s  %s"
@@ -158,6 +213,12 @@ def main():
     print("  " + "-" * 72)
     print("  %d/%d packages reported; %d uncovered line(s) measured in total"
           % (measured, len(rows), sum(r[1] or 0 for r in rows)))
+    if healed:
+        # Printed, not hidden. A package that only reported on the second
+        # attempt is a fact about this run and belongs in the log next to the
+        # totals -- it is the same fact that made the gate red before, one
+        # level up.
+        print("  (recovered on retry: %s)" % ", ".join(healed))
     print("")
 
     for p in problems:
