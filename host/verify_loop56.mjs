@@ -49,6 +49,7 @@ import { existsSync, readFileSync, copyFileSync } from "node:fs";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { keep } from "./keep_output.mjs";
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VC = join(root, "verify_c");
@@ -142,7 +143,14 @@ function main() {
   console.log("side 1: Python reference (hashlib / hmac backed)");
   const py = runCmd(["python", join(VC, "knownhosts_python_ref.py")], { cwd: VC });
   if (py.status !== 0) {
-    bad("python reference", py.text.trim().split("\n").slice(0, 8).join("\n      "));
+    // This took `split("\n").slice(0, 8)` -- the FIRST eight lines. On GitHub
+    // run 39204915519 that is eight `pass S1 ... == hashlib` lines out of a
+    // script that then failed, so the detail named eight successes and no
+    // reason. The traceback is always at the END. Taking the head of a
+    // failing subprocess's output is the same mistake as Loop #69's 12-line
+    // tail, inverted: there the error was pushed out by volume, here it is
+    // pushed out by choosing the wrong end.
+    bad("python reference", keep("loop56-python-ref", py.text));
     return finish();
   }
   const selfcheck = /SELF-CHECK:\s*(\d+)\/(\d+)\s+passed/.exec(py.text);

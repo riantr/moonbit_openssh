@@ -133,12 +133,21 @@ jobs:
       # The whole directory, not just ci.json. ci/artifacts/steps/ holds the
       # complete stdout of every failing step, which is the only place the
       # middle of a 15-minute failure still exists once the job ends.
+      #
+      # `.loop70/` is the same idea one level down: host/keep_output.mjs makes
+      # the GATES keep their children's transcripts (verify_loop41's compiler
+      # output, verify_loop55's, the sshd probe's), and without this second
+      # path those transcripts are produced on the runner and thrown away with
+      # the VM. Measured on run 39204915519: verify_loop41's kept transcript was
+      # 990 bytes of console output plus a build log nobody could reach.
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-report
-          path: ci/artifacts/
+          path: |
+            ci/artifacts/
+            .loop70/
           if-no-files-found: warn
 
   qa-matrix:

@@ -1534,6 +1534,38 @@ would have been reporting the one that could not explain the run.
   suite is skipped by design, and "skipped by design" is exactly the shape that
   nobody looks at again.
 
+#### Run `39204915519`: 10 failures became 5, and the fix had a hole in it
+
+The CRLF half is **verified on CI, not just locally**. Of the ten failures,
+`verify_loop57`, `58`, `62`, `66` and `67` are green. Those were five of the six
+CRLF casualties; the sixth, `verify_loop56`, turned out not to be CRLF at all
+(its file was already LF; it was taking the first eight lines of a failing
+script instead of the last -- see below).
+
+What is left is `41`, `53`, `55`, `56`, `65`.
+
+**The evidence fix did not work, because of where it wrote.** `keep_output.mjs`
+put the transcripts in `.loop70/`, and the workflow uploaded `ci/artifacts/`
+only. So on the runner the transcripts were produced and then destroyed with
+the VM -- which is the exact failure Loop #69 was written to end, reintroduced
+one layer down by the layer that was supposed to fix it. The upload path now
+names `.loop70/` too.
+
+**`verify_loop56` took the HEAD of a failing subprocess's output.**
+
+```js
+bad("python reference", py.text.trim().split("\n").slice(0, 8)...)
+```
+
+On the runner that printed eight `pass S1 ... == hashlib` lines out of a script
+that then failed. The traceback is always at the end. This is Loop #69's
+12-line tail inverted -- there the error was pushed out by volume, here it is
+pushed out by choosing the wrong end -- and it now goes through `keep()`.
+
+No mutation was added for either of these two, for the reason Loop #70 already
+set out: there is no injection point that makes `knownhosts_python_ref.py` fail
+on demand, and a mutation that cannot be relied on to fail is worse than none.
+
 ### Loop #68: the last red row was two untrue declarations, and a third failure that was this repository's own build cache
 
 `test-coverage` had been red for about a dozen loops. Loop #67 pinned the
