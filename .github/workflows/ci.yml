@@ -51,6 +51,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # This step was missing, and its absence is the whole reason the first
+      # real run on GitHub failed. package.json declares `ws` and `playwright`
+      # as devDependencies, and node_modules/ is gitignored, so a fresh checkout
+      # has neither -- and host/verify_loop23.mjs and host/verify_loop41.mjs both
+      # do a bare `import WebSocket from 'ws'` at module load. Without this,
+      # those two gates die in ~0.1s with:
+      #
+      #     Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws'
+      #
+      # Measured on windows-latest at commit 64296b5: `FAIL verify_loop23.mjs
+      # exit 1 0.1s` and `FAIL verify_loop41.mjs exit 1 0.1s`. Locally both
+      # pass, because a developer's node_modules is already there -- the same
+      # "local has it, CI does not" blind spot that let a Windows-only engine
+      # sit behind an ubuntu runner.
+      #
+      # `npm ci` rather than `npm install`: package-lock.json is committed, and
+      # ci installs exactly that tree instead of resolving ranges afresh, so a
+      # green run names the dependency versions it actually used.
+      #
+      # Deliberately NOT installing Playwright browsers. The gates that drive a
+      # real browser (verify_loop32..40) are peer-gates and do not run in this
+      # tier; adding a browser download here would cost minutes per run to serve
+      # gates that are not executing.
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+
       - name: Set up MoonBit
         uses: ./.github/actions/setup-moonbit
 
