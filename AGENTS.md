@@ -5658,3 +5658,65 @@ compiler happened to land in a different stack layout, and the fix is not
 "the C harness" but **a gate that poisons the stack on purpose**. The
 general rule this loop adds: a gate that runs in one environment and passes
 there has not been shown to be correct, it has been shown to be lucky.
+
+### Pushing to GitHub when the git front door is down
+
+`github.com`'s git front door intermittently resets the connection on this
+machine. Measured on 2026-10-20, three shapes in a row:
+
+```
+fatal: unable to access 'https://github.com/riantr/moonbit_openssh.git/':
+  Connection timed out after 300002 milliseconds
+fatal: unable to access 'https://github.com/riantr/moonbit_openssh.git/':
+  Recv failure: Connection was reset
+fatal: unable to access 'https://github.com/riantr/moonbit_openssh.git/':
+  Failed to connect to github.com port 443 after 21038 ms
+```
+
+`api.github.com` stays reachable the whole time. So the two remotes need
+different treatment: **Gitee pushes straight away** (it is a different host
+and it does not have this problem), and GitHub needs a retry with backoff.
+Three attempts with a growing backoff was enough that day; the third
+succeeded.
+
+**The API cannot be used as a substitute for the push, and the reason is
+worth writing down**, because the obvious workaround is wrong in a way that
+does not show up until much later.
+
+The GitHub REST API can create a commit directly:
+`POST /repos/{owner}/{repo}/git/commits` with a tree and a message. It
+works, and it produced a commit with **the same tree SHA**
+(`111f637d4dad247de53b58d5436db7c5667f341f`) and the same parent -- so the
+content was byte-identical. But the commit SHA came out different:
+
+```
+local  5f006e24006e111a2bdac21b196eb8a092c2724e
+api    940e8cc91da8ccd4063365de9fd704f4cd189bb1
+```
+
+The cause is that **the API normalises commit timestamps to UTC**, while
+this repository's commits carry a `+0800` offset:
+
+```
+author RiantR <RiantR@local> 1792463809 +0800
+```
+
+Two commits with the same tree, the same parent and the same message but
+different timestamps are two different commits. Pushing the API's version
+would leave Gitee and GitHub holding **two different histories for one set
+of changes**, and the next ordinary `git push` to GitHub would then be
+rejected as non-fast-forward and would need `--force`. That is a much worse
+outcome than waiting for the front door to come back.
+
+So the rule is: **retry the git protocol; do not reconstruct the commit
+through the API.** If a push ever does have to be reconstructed that way,
+the local branch has to be reset to the remote's commit in the same
+operation -- never the other way round, and never with one remote left
+behind.
+
+A related trap while measuring this: `git log --format=%B` appends a
+trailing newline that the raw commit object does not have (the object's
+message ends with `\n` but `%B` adds its own), so the message the API
+stored was 6130 bytes against the local object's 6131. Reconstructing the
+commit from `%B` therefore cannot match either, for a second reason.
+`git cat-file commit HEAD` is the honest way to look at the bytes.
