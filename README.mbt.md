@@ -48,6 +48,10 @@ Also working, and proven against a real `sshd` or a man in the middle:
 - SFTP against `internal-sftp`, with window and max-packet clamping
 - host key pinning: `known_hosts`, last-match-wins, `@revoked`, TOFU
 - OpenSSH host certificates as a real trust anchor, with a genuine clock
+- port forwarding, client half: `direct-tcpip`, the protocol layer of
+  `ssh -L`, with the max-packet clamping and both failure modes. The local
+  listener that turns a connection into a request, and the `ssh -R`
+  direction that the server initiates, are not here yet.
 - two transports, one set of rules
 
 Four targets are built and compared byte for byte: `native`, `js`, `wasm`,

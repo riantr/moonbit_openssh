@@ -5720,3 +5720,141 @@ message ends with `\n` but `%B` adds its own), so the message the API
 stored was 6130 bytes against the local object's 6131. Reconstructing the
 commit from `%B` therefore cannot match either, for a second reason.
 `git cat-file commit HEAD` is the honest way to look at the bytes.
+
+---
+
+## Loop #76: direct-tcpip -- the client half of a local port forward
+
+### What was missing
+
+`ssh -L 8080:db:5432` is, at the protocol level, one thing: the client opens
+a channel of type `direct-tcpip` and asks the **server** to connect to
+`db:5432`; after that the channel carries the TCP connection's bytes
+(RFC 4254 section 7.2). This repository had none of it. `src/kexflow` and
+`src/sshclient` could not even name the channel type, and `src/channel` knew
+only about `session` channels.
+
+It is the client half of a whole OpenSSH subsystem. The other half --
+`forwarded-tcpip`, the server-initiated direction that `ssh -R` uses -- is
+still missing, and so is the local listener that turns a connection into a
+`direct-tcpip` request. What this loop adds is the protocol layer of the
+first: the request, the relay, and the two failure modes.
+
+### The bytes are the contract, so they are compared against another implementation
+
+`cmd/forward_kat` prints this client's `CHANNEL_OPEN "direct-tcpip"` payload
+for four cases; `host/gen_forward_vectors.py` prints the same payloads built
+with **paramiko's own encoder** (`paramiko.message.Message`). The gate
+requires them to be equal, byte for byte.
+
+Comparing our encoder with our encoder would prove nothing, and the server
+is *tolerant* about the fields it does not use -- an originator it cannot
+parse, for instance. A layout that is right where it matters and wrong where
+it does not would pass every end-to-end test and still be a wrong wire
+format. Pinning the whole payload is what catches that, and the four cases
+are chosen to cover the layout's edges (an IPv6 literal, the largest port, a
+long destination name) rather than to be pretty.
+
+The end-to-end evidence is layered, and each layer is a different party:
+
+| layer | who | what it proves |
+|---|---|---|
+| B | paramiko's encoder | the bytes are the protocol's bytes |
+| C | a real OpenSSH 8.0p1 server | the server read our request and connected where we asked |
+| C2 | the target itself | the bytes survived the round trip, split across four packets |
+| D | the server's log | the server decoded our destination and originator |
+| E | paramiko, live | a second implementation gets the same answer from the same server |
+| F, G | the two failure modes | the failures are told apart, and neither is reported as a success |
+
+### The failure that the protocol does not report
+
+This is the part worth remembering.
+
+OpenSSH's server connects to the target **asynchronously**. The server's own
+log, from a run against this client:
+
+```
+debug1: server_input_channel_open: ctype direct-tcpip rchan 0 win 2097152 max 32768
+debug1: server_request_direct_tcpip: originator 127.0.0.1 port 0, target 127.0.0.1 port 24099
+debug1: connect_next: host 127.0.0.1 ([127.0.0.1]:24099) in progress, fd=9
+debug1: server_input_channel_open: confirm direct-tcpip
+debug3: finish_connect - ERROR: async io completed with error: 10061, io:0000028B46AE8440
+```
+
+The confirmation goes out **first**; the failure of the connect happens
+afterwards. So there is no `CHANNEL_OPEN_FAILURE` to read: the channel opens,
+and then it closes, having moved nothing. The protocol carries no signal
+that distinguishes "the server could not reach the target" from "the target
+accepted the connection and closed it immediately".
+
+The first version of this code assumed the failure *was* reported -- the
+comment said so, and the comment was wrong. The negative test caught it
+immediately: forwarding to a port nobody was listening on printed
+`result: FORWARD_DONE` with zero bytes. That is the "failed open" shape
+this repository keeps having to undo.
+
+What OpenSSH's own client does with the same situation is worth measuring
+rather than guessing: `ssh -W 127.0.0.1:<dead port>` against the same server
+exits **0**, with empty stdout and empty stderr. It does not report the
+failure either.
+
+So this client reports a third result, `FORWARD_NO_DATA`, which describes
+the **observation** and not a guessed cause:
+
+```
+result: FORWARD_NO_DATA
+note: the channel opened and closed without one byte coming back
+note: the usual cause is that the server could not reach the
+note: target; the protocol cannot tell that apart from a target
+note: that accepted the connection and closed it immediately.
+```
+
+The word "failure" is deliberately absent from the result name, because we
+do not know the cause. It is also not `FORWARD_DONE`, because `DONE` means
+"bytes came back". The rule -- what counts as a successful forward -- lives
+in exactly one place, `src/sshclient/forward.mbt`, because the native and
+the browser path both have to agree on it.
+
+The other failure mode *is* reported by the protocol, and it arrives by a
+completely different route: a server that refuses to forward at all answers
+`CHANNEL_OPEN_FAILURE` with reason 1 (`SSH_OPEN_ADMINISTRATIVELY_PROHIBITED`).
+`host/sshd_setup.mjs` grew a `--no-forward` lever for it, for the same
+reason `--hostkey-algs` exists: a server configuration that is a *test*
+condition should be a lever, not the default.
+
+### The client half is not the whole feature
+
+What is here: the request, the relay, the window handling, the failures.
+What is not: the local listener that turns an incoming TCP connection into a
+`direct-tcpip` request (that is `ssh -L`'s other half, and it is socket
+plumbing, not protocol), and the `forwarded-tcpip` direction that `ssh -R`
+uses, which the **server** initiates. The browser path has no forwarding at
+all yet, and `src/wtlive` will need the same shared state machine -- which
+is why the protocol half went into `src/channel` and not into the native
+driver.
+
+### The gate
+
+`host/verify_loop76.mjs`, 35 checks. Two of them need an OpenSSH **server**,
+and no gate in the default CI tier has ever needed one -- every gate that
+does is in the peer-gates tier, which CI does not run -- so whether the
+runner has an `sshd` at all is unproven. The gate therefore runs the
+paramiko comparison everywhere, and **skips loudly** the parts that need a
+server when there is none. A machine that cannot run a check has not run
+it, and saying otherwise is the failure this repository keeps having to
+undo.
+
+`host/loop76_mutations.py`: six mutations, all CAUGHT. The one worth
+naming is M4 -- making `FORWARD_NO_DATA` report as a success -- because that
+is the exact defect the first version of this code shipped, and the gate
+that catches it is the one that was written after the defect was found.
+
+### Gate plumbing
+
+`host/echo_server.mjs` is a TCP echo target that also reports what it
+received (`ECHO <bytes> <sha256>`), so a payload the gate does not know by
+heart -- the 100000-byte one that needs four packets -- can still be checked
+end to end: the target says what it got, the client says what it got back,
+and the two digests have to match. The maximum-packet clamp is only
+exercised by a payload larger than one packet, which is why that case
+exists.

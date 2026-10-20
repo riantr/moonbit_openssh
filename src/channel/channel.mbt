@@ -118,6 +118,60 @@ pub fn channel_open_payload(
 }
 
 ///|
+/// CHANNEL_OPEN "direct-tcpip" 的 channel type(RFC 4254 §7.2)
+///
+/// 这是**客户端**发起的那一半端口转发(`ssh -L` 的协议层):客户端请服务端
+/// 代它连到某个 host:port,连上之后这条通道上跑的就是那个 TCP 连接的字节。
+/// 与之相对的是 "forwarded-tcpip"(RFC 4254 §7.2 的另一半),那个由**服务端**
+/// 发起,是 `ssh -R` 的协议层。
+pub const CHANNEL_TYPE_DIRECT_TCPIP : String = "direct-tcpip"
+
+///|
+/// CHANNEL_OPEN "direct-tcpip"(RFC 4254 §7.2 / channels.c channel_input_open
+/// 的 direct-tcpip 分支)
+///
+///     string  "direct-tcpip"
+///     uint32  sender channel
+///     uint32  initial window size
+///     uint32  maximum packet size
+///     string  host to connect
+///     uint32  port to connect
+///     string  originator IP address
+///     uint32  originator port
+///
+/// 最后两个字段是**发起方的地址**,只被服务端记日志用,连接目标是前两个字段。
+/// 服务端读它们只是为了跳过(channels.c 的 direct-tcpip 分支把 originator_ip
+/// 交给 logfmt 之后就不再碰),所以填错不会让连接走错地方——但**写漏**会:
+/// 少写一个字段,对端按 RFC 读端口号时会把后面的字节当成端口,
+/// 于是连到一个完全不同的目标,或者干脆报 "invalid port"。
+///
+/// 和 `channel_open_payload` 的差别只有 channel type 和多出来的这四个字段,
+/// 前三个字段的布局完全一样——分成两个函数而不是加一个可选参数,是因为
+/// 「session」和「direct-tcpip」是**两种不同的通道**,它们的 payload 长度
+/// 也因此不同,而长度不同的两个 payload 用一个带默认值参数的函数拼,
+/// 迟早会出现「session 的通道多带四个字段」这种错误。
+pub fn channel_open_direct_tcpip_payload(
+  sender : Int32,
+  window : Int32,
+  max_packet : Int32,
+  dest_host : String,
+  dest_port : Int32,
+  originator_ip : String,
+  originator_port : Int32,
+) -> FixedArray[Byte] {
+  ch_cat_all([
+    @sshwire.write_ssh_string(ch_ascii(CHANNEL_TYPE_DIRECT_TCPIP)),
+    u32be(sender),
+    u32be(window),
+    u32be(max_packet),
+    @sshwire.write_ssh_string(ch_ascii(dest_host)),
+    u32be(dest_port),
+    @sshwire.write_ssh_string(ch_ascii(originator_ip)),
+    u32be(originator_port),
+  ])
+}
+
+///|
 /// CHANNEL_REQUEST (RFC 4254 §6.1 / channels.c:1948)
 ///
 ///     uint32  recipient channel

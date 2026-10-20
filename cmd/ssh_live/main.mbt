@@ -781,6 +781,165 @@ fn run_exec(
 ///| 原始字节打进标记块,方便人看;验证脚本只读上面那几行数字。
 
 ///|
+/// 命令行里有没有 `--forward`
+fn wants_forward(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--forward" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
+/// `--forward <host>:<port>`:让**服务端**代我们连到 host:port,并把那条连接
+/// 上的字节搬过来。协议上就是 CHANNEL_OPEN "direct-tcpip"(RFC 4254 §7.2),
+/// 也就是 `ssh -L` 的协议层。
+///
+/// 只认**最后一个**冒号:IPv6 字面量里也有冒号(`[::1]:80` 写成 `::1:80`
+/// 时),按第一个冒号切会把地址切成两半,而那会连到一个完全不同的目标——
+/// 比解析失败更糟,所以这里宁可返回 None 让调用方报错。
+fn forward_target(argv : Array[String]) -> (String, Int32)? {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--forward" && i + 1 < argv.length() {
+      let spec = argv[i + 1]
+      let mut cut = -1
+      for j = 0; j < spec.length(); j = j + 1 {
+        if spec[j] == ':' {
+          cut = j
+        }
+      }
+      if cut <= 0 || cut + 1 >= spec.length() {
+        return None
+      }
+      let h = spec.unsafe_substring(start=0, end=cut)
+      let p = parse_port(
+        spec.unsafe_substring(start=cut + 1, end=spec.length()),
+        0,
+      )
+      if p <= 0 {
+        return None
+      }
+      return Some((h, p))
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// 打印一次转发的结果。
+///
+/// 验证脚本要比的是长度和摘要,不是人眼读一遍——转发的内容是二进制的。
+fn print_forward_report(r : @sshclient.ForwardReport) -> Unit {
+  println("dest_host: " + r.dest_host)
+  println("dest_port: " + r.dest_port.to_string())
+  println("remote_id: " + r.remote_id.to_string())
+  println("remote_max_packet: " + r.remote_max_packet.to_string())
+  println("stdout_len: " + r.stdout_len.to_string())
+  println("stdout_sha256: " + @ecdsa.bytes_to_hex(@sha256.sha256(r.stdout)))
+  println("stdout_hex: " + dump_prefix(r.stdout))
+  println("stdin_sent: " + r.stdin_sent.to_string())
+  println("stdin_packets: " + r.stdin_packets.to_string())
+  println("adjusts_sent: " + r.adjusts_sent.to_string())
+  println("eof_sent: " + yn(r.eof_sent))
+  println("closed: " + yn(r.closed))
+  println("kex_alg: " + r.auth.session.handshake.kex_alg)
+  println("cipher_ctos: " + r.auth.session.handshake.cipher_ctos)
+}
+
+///|
+/// direct-tcpip 转发的失败原因
+fn forward_error_name(e : @sshclient.ForwardError) -> String {
+  match e {
+    @sshclient.AuthFailed(inner) => "AuthFailed(" + auth_error_name(inner) + ")"
+    @sshclient.OpenFailed(reason, desc) =>
+      "OpenFailed(" + reason.to_string() + "," + desc + ")"
+    @sshclient.Malformed(w) => "Malformed(" + w + ")"
+    @sshclient.Closed => "Closed"
+    @sshclient.BadPacket(w) => "BadPacket(" + w + ")"
+    @sshclient.SendFailed => "SendFailed"
+    @sshclient.TooManyPackets => "TooManyPackets"
+  }
+}
+
+///|
+/// Loop #76:对真实 sshd 做一次 direct-tcpip 转发。
+///
+/// 打印的是**服务端代我们连的那个目标**回来的字节,以及转发过程本身的计数。
+/// 验证脚本要比的是长度和摘要,不是人眼读一遍——转发的内容是二进制的。
+async fn run_forward(
+  host : String,
+  port : Int32,
+  user : String,
+  kh : KhConfig,
+  dest_host : String,
+  dest_port : Int32,
+  stdin_data : FixedArray[Byte],
+) -> Unit {
+  println("=== Loop #76 direct-tcpip forward vs real sshd ===")
+  println("port: " + port.to_string())
+  println("user: " + user)
+  println("dest_host: " + dest_host)
+  println("dest_port: " + dest_port.to_string())
+  println("stdin_bytes: " + stdin_data.length().to_string())
+  match @tcp.TcpConn::connect(host, port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      return
+    }
+    Some(conn) => {
+      let outcome = @sshclient.live_forward(
+        conn,
+        fixed_x(),
+        user,
+        test_auth_key(),
+        kh.policy,
+        dest_host,
+        dest_port,
+        stdin_data,
+      )
+      conn.close()
+      match outcome {
+        @sshclient.Done(r) => {
+          println("result: FORWARD_DONE")
+          // 认证成功了就该记住主机密钥,和认证那条路径同一套逻辑。
+          kh_report_tofu(kh, r.auth)
+          print_forward_report(r)
+        }
+        @sshclient.NoData(r) => {
+          println("result: FORWARD_NO_DATA")
+          kh_report_tofu(kh, r.auth)
+          // 只描述观测,不猜原因——协议没有给任何能区分「服务端连不上目标」
+          // 和「目标接了立刻关」的信息(见 src/sshclient/forward.mbt 里
+          // ForwardOutcome::NoData 的说明,那里有服务端日志的原文)。
+          println(
+            "note: the channel opened and closed without one byte coming back",
+          )
+          println(
+            "note: the usual cause is that the server could not reach the",
+          )
+          println(
+            "note: target; the protocol cannot tell that apart from a target",
+          )
+          println(
+            "note: that accepted the connection and closed it immediately.",
+          )
+          print_forward_report(r)
+        }
+        @sshclient.Failed(e) => {
+          println("result: FORWARD_FAILED")
+          println("error: " + forward_error_name(e))
+        }
+      }
+    }
+  }
+}
+
+///|
 
 ///| 截断上限 512 而不是 128:`Loop #37 的远端 fixture 会把 stdin 的字节数、摘要、
 
@@ -1856,6 +2015,21 @@ async fn main {
       return
     }
     None => ()
+  }
+  if wants_forward(argv) {
+    match forward_target(argv) {
+      Some((dh, dp)) => {
+        run_forward(host, port, user, kh, dh, dp, stdin_bytes(argv))
+        return
+      }
+      None => {
+        // 目标写错了必须说出来。静默忽略的话,调用方会以为转发跑过了,
+        // 而实际上一个字节都没发出去。
+        println("result: BAD_FORWARD_TARGET")
+        println("usage: --forward <host>:<port>")
+        return
+      }
+    }
   }
   if auth_mode(argv) {
     println("=== Loop #34 publickey auth vs real sshd ===")

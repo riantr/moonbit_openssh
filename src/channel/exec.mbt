@@ -211,6 +211,40 @@ pub fn ChanState::open_action(self : ChanState) -> ChanAction {
 }
 
 ///|
+/// 第 1 步的另一种:CHANNEL_OPEN "direct-tcpip"。
+///
+/// 和 `open_action` 唯一的区别是通道类型和随之多出来的四个字段。分成两个
+/// 方法而不是给 `open_action` 加参数,是因为「session 通道」和
+/// 「direct-tcpip 通道」在后续的流程上**也不同**:session 通道要再发一个
+/// CHANNEL_REQUEST("exec"/"shell"/"subsystem"),direct-tcpip 通道不要——
+/// 它开出来就直接传数据。用一个带布尔开关的方法拼这两种通道,那个开关
+/// 总有一天会在某个调用点上被传反,而传反之后的症状是「服务端把通道开成了
+/// 另一种类型」,不是「参数写错了」。
+///
+/// `dest_host` / `dest_port` 是**服务端**要连的目标,不是我们要连的目标。
+/// `originator_ip` / `originator_port` 是我们自己的地址,只被服务端记日志。
+pub fn ChanState::open_direct_tcpip_action(
+  self : ChanState,
+  dest_host : String,
+  dest_port : Int32,
+  originator_ip : String,
+  originator_port : Int32,
+) -> ChanAction {
+  Send(
+    0x5a,
+    channel_open_direct_tcpip_payload(
+      self.local_channel,
+      self.window.max,
+      self.window.max_packet,
+      dest_host,
+      dest_port,
+      originator_ip,
+      originator_port,
+    ),
+  )
+}
+
+///|
 /// 第 3 步:CHANNEL_REQUEST "exec"。必须在收到 OPEN_CONFIRMATION 之后,
 /// 因为 recipient 用的是对端给的 id。
 pub fn ChanState::exec_action(

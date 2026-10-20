@@ -99,6 +99,19 @@ const NAME = (() => {
   const i = argv.indexOf('--name');
   return i >= 0 && argv[i + 1] ? argv[i + 1] : '';
 })();
+// Loop #76: a server that refuses port forwarding outright.
+//
+// The default (`yes`) is what a normal sshd does, and the *other* failure --
+// the server accepting the channel and then failing to reach the target --
+// is asynchronous and arrives as an immediate close with no data (measured;
+// see src/sshclient/forward.mbt). This lever exercises the one failure the
+// protocol does report synchronously: CHANNEL_OPEN_FAILURE with reason
+// SSH_OPEN_ADMINISTRATIVELY_PROHIBITED. Both failures have to be handled,
+// and they are handled by completely different code.
+//
+// A lever rather than a default, for the same reason `--hostkey-algs` is one:
+// a server that cannot forward is a *test* configuration, not the normal one.
+const NO_FORWARD = argv.includes('--no-forward');
 const tagged = s => (NAME ? `${s}_${NAME}` : s);
 
 function sh(cmd, args) {
@@ -249,6 +262,10 @@ writeFileSync(conf, [
   'PubkeyAcceptedKeyTypes ecdsa-sha2-nistp256,ecdsa-sha2-nistp384',
   'Ciphers aes128-ctr,aes256-ctr',
   'MACs hmac-sha2-256',
+
+  // Loop #76: forwarding is on by default (as in a normal sshd). `--no-forward`
+  // turns it off so a gate can see the server's *synchronous* refusal.
+  ...(NO_FORWARD ? ['AllowTcpForwarding no'] : []),
 
   // Auth surface for an automated test.
   'PubkeyAuthentication yes',
