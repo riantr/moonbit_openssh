@@ -5433,3 +5433,228 @@ Defect 4 only surfaced once 1-3 stopped flaking. Each fix was verified
 against the next full nested run, not against a warm single run -- a warm
 single run is what made defect 2 invisible for weeks.
 
+
+### Loop #74: three CI failures that had nothing to do with each other, and one that was not a failure at all
+
+Run `39236194074` was the first CI run carrying all three of Loop #74's fixes.
+It came back with 46/49 and three red gates: `loop53`, `loop56`, `loop71`.
+They share no code. Reading them as one story would have been wrong, and the
+useful part of this loop is that each one turned out to be a *different kind*
+of defect -- and that the third one was caused by the fix that preceded it.
+
+#### loop71: the new files broke the rule the new gate enforces
+
+`verify_loop71.mjs` checks that no tracked file asserts a machine-specific
+absolute path. Loop #74 added two files that both hardcoded
+`C:\Program Files\OpenSSH` as a probe list -- and the gate correctly
+reported them:
+
+```
+FAIL  no tracked file asserts a machine-specific absolute path
+    6 hit(s) in 2 file(s):
+        host/gen_loop53_fixtures.mjs:113  C:\\Program   (3 hit(s))
+        host/verify_loop74.mjs:89         C:\\Program   (3 hit(s))
+```
+
+The fix is the one `sshd_setup.mjs` already demonstrates: a probe list is a
+*candidate* list, and it has to say so. Both files now carry the same
+`machine-path-exempt:` marker with the same reason, and the candidate list is
+the same three entries `sshd_setup.mjs` probes. `verify_loop71.mjs` -> 9/9.
+
+Worth noting: the gate had been green for a loop and a half while the
+repository was growing files that violated it. The gate was not wrong to be
+green -- it only sees what is committed. It went red the moment the
+violating files were committed, which is exactly what a gate is for.
+
+#### loop53: the generator signed the wrong key
+
+`verify_loop53.mjs` came back 24/26, with `user-cert` failing in both
+transports:
+
+```
+FAIL  user-cert [native]  error="transport:handshake:SignatureInvalid" want leaf HostkeyCertAuthority
+```
+
+The contract says the client must refuse a USER certificate *as a host
+identity*, and name that as the reason. Instead the handshake died earlier,
+in the signature check, with a completely unrelated error. **A gate that
+fails for the wrong reason is worse than a missing gate**, because it sends
+the reader after the wrong bug.
+
+The cause was in the fixture generator added in Loop #74, not in the client.
+`host/gen_loop53_fixtures.mjs` had one `sign()` that took the CA and the
+output path, and hardcoded the *subject*:
+
+```js
+args.push(path.join(DIR, "host.pub"));   // every certificate, always
+```
+
+But the user certificate has to be issued over `userhost.pub`, because the
+MITM in `verify_loop53.mjs` signs the handshake with the `userhost` private
+key and the client verifies that signature against the certificate's **inner
+key**. With the inner key being `host.pub`, the signature check fails first
+and the certificate-type check -- the one the case exists to exercise -- is
+never reached.
+
+Measured against the original 2026-10-13 fixture set to be sure of the
+shape, with a throwaway decoder that reported each certificate's inner key
+and the public key it matched:
+
+```
+usercert-in-cert.pub     type=1(user) inner<- userhost.pub
+host-good-cert.pub       type=2(host) inner<- host.pub
+```
+
+So `sign()` now takes the subject as a parameter, and the generator **checks
+its own output**: it parses each certificate blob the way OpenSSH lays it
+out and asserts the type, the inner key, the principals and the signing CA.
+A generator that can only report "the files exist" ships a wrong fixture set
+just as happily as a right one, and the wrong one costs a CI run to discover.
+
+`host/loop53_fixture_mutations.py` swaps the USER certificate for the HOST
+one and requires the generator to notice -- and to name the file and the
+property. It does.
+
+The principals were aligned with the committed fixture set at the same time
+(`other.example.com` / `alice` rather than the `10.0.0.9` / `testuser` this
+generator had invented), and `user-cert-cert.pub` -- the
+`NON_HOST_PRINCIPAL_CERT` source that `host/cert_gen_fixture.py` reads -- is
+now generated too. Two sources of truth for the same certificates is still
+a gap, but a gap between two *generators* is smaller than a gap between a
+generator and one machine's leftovers.
+
+`verify_loop53.mjs` -> 26/26.
+
+#### loop56: the C harness was reading uninitialised stack memory
+
+`verify_loop56.mjs` came back 36/41, and the C harness reported **12 of 28**
+assertions failed. The same source passed 28/28 on the developer machine.
+
+That is the shape of a memory bug, and the interesting part is *which* memory.
+`verify_c/knownhosts_harness.c` decoded base64 like this:
+
+```c
+char padded[1024];
+memcpy(padded, s, slen);
+int r = slen % 4;
+if (r != 0) { while (strlen(padded) % 4 != 0) padded[strlen(padded)] = '='; }
+padded[strlen(padded)] = '\0';
+```
+
+Two undefined behaviours in three lines:
+
+1. `padded` is never NUL-terminated after the `memcpy`, so the first
+   `strlen(padded)` reads past `slen` into whatever the stack held.
+2. The padding loop measures the string with `strlen` *after* overwriting
+   the terminator it just measured, so each iteration can walk further into
+   the uninitialised region.
+
+The trigger is precise. An ed25519 public key blob is exactly 68 base64
+characters, and `68 % 4 == 0`, so the `if` branch was skipped and the
+decoder went straight to the unterminated `strlen`. Every ed25519-key
+assertion in the harness was reading uninitialised memory. The vectors whose
+length is not a multiple of four went down the padding branch, where
+`strlen` hit a copied-in zero within `slen`, and they were green all along
+-- which is why the failure looked selective.
+
+**This was never a compiler difference.** It was undefined behaviour, and
+the two compilers simply left different bytes on the stack. The way to prove
+that, rather than argue about it, is to make the compiler poison the stack
+on purpose:
+
+```
+clang -O2 -ftrivial-auto-var-init=pattern -o kh_poison.exe knownhosts_harness.c -lm
+```
+
+Before the fix that build gives **12/28**, and the 12 that fail are exactly
+the 12 that failed on CI. The reproduction does not depend on any particular
+compiler, which is the point: it is a measurement of the defect rather than
+of the environment.
+
+The fix terminates the buffer right after the `memcpy`, and computes the
+padding count arithmetically instead of re-measuring it:
+
+```c
+padded[slen] = '\0';
+int r = slen % 4;
+if (r != 0) {
+    int pad = 4 - r;
+    if (slen + pad >= (int)sizeof(padded)) return -1;
+    for (int k = 0; k < pad; k++) padded[slen + k] = '=';
+    padded[slen + pad] = '\0';
+}
+```
+
+The overflow guard is new too: the old `slen >= sizeof(padded)` check
+protected the `memcpy` but not the padding, which could write three bytes
+past the end.
+
+A second instance of the same class was hiding behind the first: the hashed
+host vector (V4) has a 27-character salt, which is `27 % 4 == 3`, so it took
+the padding branch -- and that branch was the one that overwrote its own
+terminator. With the terminator fixed but the padding still measured by
+`strlen`, the poisoned build still failed V4, with the 27-byte input inflated
+to 1024 bytes. Both halves had to be fixed.
+
+**And a third defect, found by asking a question the gate was not asking.**
+The boundary check that came with the fix -- "does the decoder still agree
+with Python's `base64.b64decode` for every input length?" -- turned up that
+the decoder emits **three bytes for every group of four sextets**, whatever
+the group's real content was. OpenSSH's `b64_pton` emits `sextets * 6 / 8`
+bytes, so a 27-character nopad string is 20 bytes there and 21 bytes here.
+
+One call site compensated for that (`if (salt_n == 21) salt_n = 20;` in
+`match_hashed_host`). The other did **not**: `parse_kh_line` took the
+decoder's length verbatim as `key_blob_len`, so a public key blob whose
+base64 length is not a multiple of four would make this harness believe the
+peer presented a different key -- a Mismatch where the correct answer is Ok.
+Every current fixture happens to be 68 characters (51 bytes, exact), so the
+latent defect had never fired.
+
+That is the worst shape a defect can have in a *reference implementation*: it
+is wrong only on inputs the fixtures do not contain, and when it does fire it
+reports the **tested** code as broken. The decoder now emits
+`sextets * 6 / 8` bytes, the truncation patch is gone (the length is
+asserted instead), and the C harness has its own assertion for the byte
+count of every residue modulo four -- `""`, 1, 2, 3, 4, 5, 6, 7, the 27-char
+salt and the 68-char key blob.
+
+`host/verify_loop75.mjs` is the permanent guard. It rebuilds the harness
+with `-ftrivial-auto-var-init=pattern` and requires the *same* number of
+passing assertions as the normal build, plus five source-level assertions
+that the buffer is terminated, the padding is computed, the byte count
+follows the sextets, and the truncation patch is gone. A build that only
+ever runs on a stack that happens to be zero cannot tell a correct decoder
+from a lucky one.
+
+`host/loop75_mutations.py` proves the guard is not vacuous: it reverts each
+of the three halves of the fix in turn and requires the poisoned build to go
+red. All three are **CAUGHT**:
+
+```
+CAUGHT  M1  (the original decoder, unterminated buffer and strlen-measured padding) -- poisoned build gave 12/29
+CAUGHT  M2  (the buffer is never NUL-terminated after the memcpy)                 -- poisoned build gave 12/29
+CAUGHT  M3  (the decoder always emits three bytes per quad)                        -- poisoned build gave 27/29
+```
+
+M1 and M2 reproduce the same 12/29 that CI saw. M3 fails the new base64
+length assertion instead, which is the point of that assertion.
+
+#### The pattern across all three
+
+Three failures, three different kinds, and one shared property: **each one
+was invisible to the environment it was born in.**
+
+- loop71's violation was committed by a fix that landed in the same loop.
+- loop53's bug was in the generator that fix added, and the original
+  fixture set that the generator was supposed to reproduce had the right
+  shape -- the generator was checked against nothing.
+- loop56's bug had been in the C harness since Loop #13, green on every
+  developer machine, red on every CI runner, and the reason was a byte of
+  stack memory.
+
+The last one is the expensive kind. It took until a runner with a different
+compiler happened to land in a different stack layout, and the fix is not
+"the C harness" but **a gate that poisons the stack on purpose**. The
+general rule this loop adds: a gate that runs in one environment and passes
+there has not been shown to be correct, it has been shown to be lucky.

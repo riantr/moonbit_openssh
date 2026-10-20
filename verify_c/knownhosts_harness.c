@@ -193,11 +193,51 @@ static int b64_decode(const char *s, uint8_t *out, size_t out_max) {
     char padded[1024];
     if (slen >= (int)sizeof(padded)) return -1;
     memcpy(padded, s, slen);
+    /* Loop #75: **必须在这里补 NUL。**
+     *
+     * 原来这行是 `padded[strlen(padded)] = '\0';`，它把终止符写在了
+     * `strlen(padded)` 找到的位置——而 `strlen` 读的是 `memcpy` 之后、
+     * `slen` 之外的**未初始化栈内存**。栈上恰好是 0 时它看起来是对的，
+     * 栈上不是 0 时它就在垃圾数据里找终止符，然后把 base64 解码喂了
+     * 一串垃圾。
+     *
+     * 这不是"编译器差异"，是**未定义行为**：同一份源码，clang 的栈上
+     * 恰好是 0（28/28 通过），CI runner 上的 MinGW gcc 栈上不是 0
+     * （12/28 通过，12 条断言红）。**本地绿、CI 红**的根因就在这里，
+     * 而且它一直都在——只是取决于栈上那块内存当时是什么。
+     *
+     * 触发条件很精确：ed25519 的公钥 blob 恰好 68 个 base64 字符，
+     * 68 % 4 == 0，于是 `if (r != 0)` 那个补 `=` 的分支**被跳过**，
+     * 紧接着的 `strlen` 就必然读到未初始化的内存。长度不是 4 的倍数的
+     * 夹具（`V4a` 的 HMAC 向量等）走的是补 `=` 分支，`strlen` 在
+     * `slen` 之内就撞到了拷贝进来的 0，所以它们一直是绿的。
+     *
+     * 复现方式（不依赖任何特定编译器）：给未初始化的栈内存下毒。
+     *     clang -O2 -ftrivial-auto-var-init=pattern -o kh_poison.exe \
+     *           knownhosts_harness.c -lm
+     * 修复前这条命令得到 12/28，红的正是 CI 上红的那 12 条。
+     */
+    padded[slen] = '\0';
     int r = slen % 4;
     if (r != 0) {
-        while ((int)strlen(padded) % 4 != 0) padded[strlen(padded)] = '=';
+        /* 补 '=' 最多 3 个字符，所以 `slen` 必须留出至少 3 字节 + 1 个
+         * 终止符的位置。原来的 `if (slen >= sizeof(padded))` 只保证
+         * memcpy 不越界，补 `=` 那一步却能写到 `padded[slen+3]`——
+         * 那是另一个越界写，只是夹具从来没把 blob 撑到那么大而已。
+         *
+         * 而且补的个数必须是**算出来的**，不能靠再读一次 strlen：
+         * 原来那行 `while (strlen(padded) % 4 != 0) padded[strlen(padded)] = '=';`
+         * 在写下第一个 `=` 的同时把刚补上的 NUL 覆盖掉了，于是下一次
+         * strlen 就跑进了未初始化的栈内存里。栈上恰好是 0 时它继续，
+         * 不是 0 时它一路跑到缓冲区的尽头——在 `-ftrivial-auto-var-init=pattern`
+         * 下这直接把 27 字节的输入撑成了 1024 字节，b64_decode 全部失败。
+         * 这也是 V4（哈希主机）在毒化构建里仍然红的原因：它的 salt/hash
+         * 是 27 字符，走的正是这个补 `=` 分支。 */
+        int pad = 4 - r;
+        if (slen + pad >= (int)sizeof(padded)) return -1;
+        for (int k = 0; k < pad; k++) padded[slen + k] = '=';
+        padded[slen + pad] = '\0';
     }
-    padded[strlen(padded)] = '\0';
     s = padded;
     slen = (int)strlen(s);
 
@@ -207,23 +247,36 @@ static int b64_decode(const char *s, uint8_t *out, size_t out_max) {
         while (got < 4 && i < slen) {
             char c = s[i];
             if (c == '=') {
-                while (got < 4) v[got++] = 0;
                 i++;
                 while (i < slen && s[i] == '=') i++;
-                goto commit;
+                break;
             }
             int x = b64_val((unsigned char)c);
             if (x < 0) return -1;
             v[got++] = x;
             i++;
         }
-        /* truncated trailing quad: fill with 0 (compatible nopad) */
+        /* Loop #75: 这一组里**有效**的 sextet 有几个，决定它产出几个字节。
+         *
+         * 原来这里无条件写 3 个字节，只在调用方（`match_hashed_host`）用
+         * `if (salt_n == 21) salt_n = 20;` 截掉多出来的那一个。那是给
+         * 20 字节的 salt/hash 打的补丁，而 `parse_kh_line` 那个调用点
+         * **没有**补丁：`e->key_blob_len = n` 直接用解码器返回的长度。
+         *
+         * 所以长度不是 4 的倍数的公钥 blob 会让 C harness 认为自己解出了
+         * 比 Python 多 1~2 个字节，key_blob_len 对不上 presented_len，
+         * 比较失败 → 报 Mismatch。而正确答案是 Ok。**C harness 是独立
+         * 参照物，它错了就会把 MoonBit 的对行为报成 bug。**
+         *
+         * OpenSSH 的 b64_pton 规则就是 `有效 sextet 数 * 6 / 8`：
+         *   4 个 → 3 字节   3 个 → 2 字节   2 个 → 1 字节   1 个 → 0 字节
+         */
+        int nbytes = (got * 6) / 8;
         while (got < 4) v[got++] = 0;
-        commit:
-        if ((size_t)n_out + 3 > out_max) return -1;
-        out[n_out++] = (v[0] << 2) | (v[1] >> 4);
-        out[n_out++] = (v[1] << 4) | (v[2] >> 2);
-        out[n_out++] = (v[2] << 6) | v[3];
+        if ((size_t)n_out + nbytes > out_max) return -1;
+        if (nbytes > 0) out[n_out++] = (uint8_t)((v[0] << 2) | (v[1] >> 4));
+        if (nbytes > 1) out[n_out++] = (uint8_t)((v[1] << 4) | (v[2] >> 2));
+        if (nbytes > 2) out[n_out++] = (uint8_t)((v[2] << 6) | v[3]);
     }
     return n_out;
 }
@@ -309,10 +362,21 @@ static int match_hashed_host(const char *host, const char *pattern) {
     int salt_n = b64_decode(salt_b64, salt, sizeof(salt));
     int hash_n = b64_decode(hash_b64, exp_hash, sizeof(exp_hash));
     if (salt_n < 0 || hash_n < 0) return 0;
-    /* nopad base64 解码 20 字节时会给出 21 字节(最后一字节是 trailing bits)。
-     * OpenSSH b64_pton 行为:截断到 20 字节(salt/hash 都是 SHA-1 = 20 字节固定长度)。 */
-    if (salt_n == 21) salt_n = 20;
-    if (hash_n == 21) hash_n = 20;
+    /* Loop #75: 这里的 `21 → 20` 截断**删掉了**。
+     *
+     * 它是给解码器的一个补丁，而解码器本身是错的：解码器无条件按每组 3 个
+     * 字节产出，于是 20 字节的 salt 解出 21 个字节（多出来的那一个只装着
+     * trailing bits），调用方只好把多出来的那个截掉。
+     *
+     * 那个补丁只加在这个调用点，`parse_kh_line` 那个调用点没有——所以
+     * 一个长度不是 4 的倍数的公钥 blob 会被 C harness 解长，然后 key_blob_len
+     * 对不上，报 Mismatch，而正确答案是 Ok。**参照物错了，就会把被测物的
+     * 对行为报成 bug。**
+     *
+     * 解码器改成按 `有效 sextet 数 * 6 / 8` 产出之后，20 字节就是 20 字节，
+     * 这里不需要任何截断。下面的 `!= 20` 断言保留：salt 和 hash 都是
+     * SHA-1，固定 20 字节，长度不对就该拒绝而不是凑合。 */
+    if ((size_t)salt_n != 20) return 0;
     /* actual = HMAC-SHA1(salt, host) */
     hmac_sha1(salt, (size_t)salt_n, (const uint8_t *)host, strlen(host), actual);
     if ((size_t)hash_n != 20) return 0;
@@ -588,6 +652,52 @@ int main(void) {
     uint8_t hmac2[20];
     hmac_sha1((const uint8_t *)"Jefe", 4, (const uint8_t *)"what do ya want for nothing?", 28, hmac2);
     ASSERT_BYTES_EQ(hmac2, V0B_HMAC_CASE2, 20, "V0e HMAC-SHA1 Case2");
+
+    /* === Loop #75: the base64 decoder's LENGTH must match b64_pton ===
+     *
+     * The decoder used to emit three bytes for every group of four sextets,
+     * whatever the group's real content was. OpenSSH's `b64_pton` emits
+     * `sextets * 6 / 8` bytes, so a 27-character nopad string decodes to 20
+     * bytes there and 21 bytes here.
+     *
+     * Two call sites, and only one of them compensated. `match_hashed_host`
+     * truncated 21 back to 20 with `if (salt_n == 21) salt_n = 20;`.
+     * `parse_kh_line` did NOT: it took the decoder's length verbatim as
+     * `key_blob_len`, so a public key blob whose base64 length is not a
+     * multiple of four made this harness believe the peer presented a
+     * different key -- a Mismatch where the correct answer is Ok.
+     *
+     * The lengths below are the ones that matter: 27 is the salt/hash
+     * length (20 bytes, 27 nopad characters), 68 is the ed25519 public key
+     * blob (51 bytes), and the rest are the other residues modulo four.
+     * Python's `base64.b64decode` is the oracle for all of them.
+     */
+    {
+        struct { const char *b64; int want_bytes; } cases[] = {
+            {"", 0},
+            {"AA", 1},                  /* 2 sextets -> 1 byte  */
+            {"AAA", 2},                 /* 3 sextets -> 2 bytes */
+            {"AAAA", 3},                /* 4 sextets -> 3 bytes */
+            {"AAAAA", 3},               /* 5 sextets -> 3 bytes */
+            {"AAAAAA", 4},              /* 6 sextets -> 4 bytes */
+            {"AAAAAAA", 5},             /* 7 sextets -> 5 bytes */
+            {"aGFzaGVkX3NhbHRfMDEyMwAAAAA", 20},  /* the V4 salt: 27 chars */
+            {"AAAAC3NzaC1lZDI1NTE5AAAAIHm1Vi6P5lT5QHixEuipi6eQH4U65pW+1+DjkQutBJZk", 51},
+        };
+        int n = (int)(sizeof(cases) / sizeof(cases[0]));
+        int bad = 0;
+        for (int k = 0; k < n; k++) {
+            uint8_t buf[128];
+            memset(buf, 0, sizeof(buf));
+            int got = b64_decode(cases[k].b64, buf, sizeof(buf));
+            if (got != cases[k].want_bytes) {
+                printf("FAIL b64 length for %u-char input: got %d, want %d\n",
+                       (unsigned)strlen(cases[k].b64), got, cases[k].want_bytes);
+                bad++;
+            }
+        }
+        ok("b64_decode returns b64_pton's byte count for every residue mod 4", bad == 0);
+    }
 
     /* === V4 unit: HMAC-SHA1(salt, host) matches reference hash === */
     uint8_t actual_hash[20];
