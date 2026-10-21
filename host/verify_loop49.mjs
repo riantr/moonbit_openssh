@@ -50,6 +50,7 @@ import {
 // the filter, `verify_loop50` had another, and Loop #52 broke both at once by
 // adding two status lines. See `host/tofu_transcript.mjs`.
 import { hasAcceptedUnpinned, tofuEntry } from "./tofu_transcript.mjs";
+import { sshUser } from "./ssh_user.mjs";
 
 let chromium = null;
 try {
@@ -171,7 +172,8 @@ async function startBridge(tcpPort) {
 
 async function runWorkerAuth(browser, httpPort, wsPort, tag, extraCfg) {
   const base = `http://127.0.0.1:${httpPort}`;
-  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", ...extraCfg });
+  // The account to authenticate as: derived, never written down (Loop #76).
+  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: sshUser(), auth: "1", ...extraCfg });
   const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {
@@ -317,7 +319,18 @@ async function main() {
   });
   const tOut = norm(`${t.stdout || ""}${t.stderr || ""}`);
   if (t.status !== 0 || !/passed: \d+, failed: 0/.test(tOut)) {
-    bad("known_hosts round trip", tOut.trim().split("\n").slice(-8).join("\n      "));
+    // **Say why.** This check used to report the failure with an empty
+    // detail, because it only printed the captured output -- and a spawn that
+    // failed outright (a timeout, a killed process) captures nothing at all.
+    // A red gate with no reason is a rumour, and the reader has no way to
+    // tell "the round trip broke" from "the toolchain did not run".
+    const why = t.error
+      ? `spawn failed: ${t.error.message} (code=${t.error.code})`
+      : `exit status ${t.status}${t.signal ? `, signal ${t.signal}` : ""}`;
+    bad(
+      "known_hosts round trip",
+      `${why}\n      ${tOut.trim().split("\n").slice(-8).join("\n      ")}`.trimEnd()
+    );
   } else {
     const m = tOut.match(/Total tests: (\d+), passed: (\d+), failed: 0/);
     ok("known_hosts round trip", `${m ? m[2] : "?"} unit tests, read-back byte identical`);

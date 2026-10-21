@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import struct
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -52,6 +53,50 @@ from sftp_oracle import (  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "cmd", "sftp_test", "vectors.mbt")
+
+
+def _digest(path):
+    """A cheap content digest, for noticing that the formatter did nothing."""
+    import hashlib
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def format_in_place(path):
+    """Put the generated file through the formatter.
+
+    The generated file is a SOURCE file in the repository, and the repository
+    is formatter-clean -- `moon fmt --check` over the whole tree is a gate
+    (Loop #67). So the generator has to produce what the formatter produces.
+
+    That is not a cosmetic difference. Loop #39's gate regenerates this file
+    and requires the committed copy to be unchanged, and the two used to
+    differ by exactly the formatter's line wrapping -- so the check could
+    never pass, and the regenerated copy was left in the working tree, where
+    it made every later `git diff` non-empty.
+
+    `moon fmt` is run through `cmd /c` because that is how every other
+    harness in this repository invokes the toolchain on Windows.
+
+    **The formatter only touches files that belong to a package of the
+    current module.** For a file anywhere else it exits 0, prints nothing,
+    and changes nothing -- so a `--out` path outside a package comes out
+    unformatted. That is reported rather than swallowed: a caller that
+    compares such a file with the committed one would be comparing two
+    formatting conventions, and the difference (1290 bytes here) has nothing
+    to do with the vectors.
+    """
+    res = subprocess.run(
+        ["cmd", "/c", "moon", "fmt", path],
+        capture_output=True,
+    )
+    if res.returncode != 0:
+        sys.stderr.write("moon fmt failed on the file %s\n%s\n%s\n"
+                         % (path,
+                            res.stdout.decode("utf-8", "replace"),
+                            res.stderr.decode("utf-8", "replace")))
+        raise SystemExit(res.returncode)
+    return res.stdout.decode("utf-8", "replace")
 
 
 class SelfCheck(Exception):
@@ -764,8 +809,33 @@ def emit(cases, cap):
     out = []
     a = out.append
     a("///| GENERATED FILE -- do not edit by hand.")
-    a("///| Regenerate with: python host/gen_sftp_vectors.py "
-      "--capture .loop39/capture.json")
+    a("")
+    # The machine-path exemption (Loop #69/#71) is a repository-wide
+    # convention: a file that legitimately contains a machine-specific
+    # absolute path has to say so, and say why, *in the file*. The captured
+    # bytes below are exactly that -- `host/sftp_capture.py` recorded them
+    # from a live internal-sftp session, so the client's request strings name
+    # the directory that machine used.
+    #
+    # This block has to be emitted by the GENERATOR, not added by hand after
+    # the fact: the generator overwrites the whole file, so a hand-written
+    # header is lost the first time anybody regenerates -- and then
+    # `host/verify_loop71.mjs` flags the file as an unexplained machine path,
+    # and Loop #39's "committed vectors still match the oracle" check can never
+    # pass, because the regenerated copy is missing the block.
+    a("// machine-path-exempt-file: every `E:/...` below is a CAPTURED WIRE BYTE, not")
+    a("// a path this code reads. host/sftp_capture.py recorded these frames from a")
+    a("// live OpenSSH 8.0p1 internal-sftp session on the machine that ran the")
+    a("// capture, so the client's request strings contain that machine's absolute")
+    a("// paths. They are compared byte-for-byte against host/sftp_oracle.py, which")
+    a("// frames the same bytes independently -- rewriting them would not make the")
+    a("// vectors portable, it would make the comparison meaningless. Regenerating")
+    a("// means re-capturing against a server, which is a deliberate act, not a find")
+    a("// and replace. `CAPTURE_FIXTURE` at the bottom is the directory those bytes")
+    a("// name, and host/verify_loop39.mjs recreates it before running.")
+    a("")
+    a("///|")
+    a("/// Regenerate with: python host/gen_sftp_vectors.py --capture .loop39/capture.json")
     a("///")
     a("/// Every inbound payload here is a real OpenSSH 8.0p1 `internal-sftp`")
     a("/// reply recorded by `host/sftp_capture.py`, with one exception stated")
@@ -924,6 +994,16 @@ def main():
 
     with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(emit(cases, cap))
+    before = _digest(args.out)
+    format_in_place(args.out)
+    if _digest(args.out) == before:
+        # The formatter is a no-op for a file that is not in a package. Say so,
+        # because the next step of this script (or a gate that compares this
+        # file with the committed one) is about bytes, and bytes formatted
+        # one way and bytes formatted another way are not the same bytes.
+        sys.stderr.write(
+            "note: moon fmt did not touch %s -- it is not inside a MoonBit "
+            "package, so the formatter does not apply to it\n" % args.out)
     print("wrote %s (%d cases)" % (args.out, len(cases)))
     return 0
 

@@ -24,8 +24,14 @@ FILES = [
 # (label, original, mutated, a check name that must go FAIL)
 MUTATIONS = [
     (
+        # The trailing comma after `w` is the formatter's (Loop #67 ran `moon fmt`
+        # over the tree), and the anchor without it stopped matching then. A
+        # mutation whose anchor has drifted is not a mutation: it is reported
+        # as SKIP and counted as "not caught", which points at the KAT instead
+        # of at the thing that actually moved. The anchor has to be the text
+        # that is in the file now.
         "drop the window when no adjust is due",
-        "    None => ({ ..st, window: w }, [])",
+        "    None => ({ ..st, window: w, }, [])",
         "    None => (st, [])",
         "chan_sessions",
     ),
@@ -44,6 +50,11 @@ MUTATIONS = [
         "chan_sessions",
     ),
     (
+        # Same story as the anchor above: the formatter split the one-line
+        # `if` across four lines, so the anchor stopped matching in Loop #67.
+        # The mutated text keeps the same shape, because a mutation that
+        # changes the *layout* as well as the behaviour would be measuring
+        # two things at once.
         "make exit-status report 0 instead of the SSH 255 fallback",
         "pub fn ChanState::report(self : ChanState) -> ExecReport {\n"
         "  {\n"
@@ -51,14 +62,22 @@ MUTATIONS = [
         "    local_channel: self.local_channel,\n"
         "    stdout: ch_cat_all(self.stdout),\n"
         "    stderr: ch_cat_all(self.stderr),\n"
-        "    exit_status: if self.exit_status < 0 { 255 } else { self.exit_status },",
+        "    exit_status: if self.exit_status < 0 {\n"
+        "      255\n"
+        "    } else {\n"
+        "      self.exit_status\n"
+        "    },",
         "pub fn ChanState::report(self : ChanState) -> ExecReport {\n"
         "  {\n"
         "    remote_id: self.remote_id,\n"
         "    local_channel: self.local_channel,\n"
         "    stdout: ch_cat_all(self.stdout),\n"
         "    stderr: ch_cat_all(self.stderr),\n"
-        "    exit_status: if self.exit_status < 0 { 0 } else { self.exit_status },",
+        "    exit_status: if self.exit_status < 0 {\n"
+        "      0\n"
+        "    } else {\n"
+        "      self.exit_status\n"
+        "    },",
         "chan_sessions",
     ),
     # ---- Loop #36 --------------------------------------------------------

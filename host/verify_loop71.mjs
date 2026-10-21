@@ -148,6 +148,22 @@ function windowNeededFor(rel, pathname) {
 // plants a hardcoded gcc path into `build_aead.bat` to prove this gate can
 // fail, so it necessarily contains the path it plants.
 //
+// The third entry is the same problem two levels out. `gen_sftp_vectors.py`
+// writes `cmd/sftp_test/vectors.mbt`, and that generated file has to carry
+// the whole-file exemption -- it contains the absolute paths of the machine
+// whose `internal-sftp` session was recorded. So the generator necessarily
+// contains the marker text, and the marker regex here matches a file
+// ANYWHERE, including inside a string literal: the generator inherited the
+// exemption by accident.
+//
+// An accident is not an entry. It is invisible, it has no reason, and the
+// next person to touch the generator would not know that the file they are
+// editing is not being scanned. So it is named here, with the reason
+// attached, and the reason is the one that has to keep being true: the
+// generator's exemption is for the marker text it EMITS, and it contains no
+// machine path of its own. If a machine path is ever added to the generator
+// itself, this entry has stopped earning its place.
+//
 // So: a NAMED list, with the reason attached, rather than a `continue` --
 // because a gate that quietly skips files is how you get a gate that quietly
 // stops working. Adding to this list is a reviewable act with a stated
@@ -158,6 +174,10 @@ const SELF_EXCLUDED = {
     "the gate: its exclusion fixtures contain the strings it looks for",
   "host/loop71_mutations.py":
     "the mutation harness: M1 plants a hardcoded gcc path to prove the gate fails",
+  "host/gen_sftp_vectors.py":
+    "the vector generator: it emits the whole-file exemption header that the " +
+    "generated vectors need, so it contains the marker text (and no machine " +
+    "path of its own)",
 };
 
 // How many lines below a `machine-path-exempt` marker are covered. See the

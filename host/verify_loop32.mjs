@@ -371,6 +371,17 @@ async function main() {
       moduleUrl: '/_build/js/debug/build/cmd/wt_ssh/wt_ssh.js',
       url: `ws://127.0.0.1:${WS_PORT + 1}/ssh`,
       nonce: 'g3',
+      // Loop #50 made refusing an unpinned host the default, so a client that
+      // reaches a real server without a pin is turned away before it can do
+      // anything. This gate was written before that default existed and was
+      // never updated, so it has been failing with `HostkeyUnknown` since -- a
+      // failure about pinning, reported as a failure about byte streams.
+      //
+      // `kh_tofu` is the browser's spelling of "accept this key explicitly".
+      // The pin itself lands in the IndexedDB store the Worker owns; nothing
+      // here touches the developer's own known_hosts.
+      kh_tofu: '1',
+      kh_host: '127.0.0.1',
     },
     70000
   );

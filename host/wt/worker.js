@@ -71,14 +71,24 @@ self.onmessage = function (e) {
     }
   }
 
-  // Loop #52: the known-hosts store shim. Optional on purpose -- the byte-stream
-  // shim above is enough for every mode that does not pin, and making this one
-  // mandatory would mean a storage failure showed up as "the harness is
-  // misconfigured" rather than as the client reporting that it could not store a
-  // pin, which is the answer that actually helps.
-  if (cfg.khsShimUrl) {
+  // Loop #52: the known-hosts store shim.
+  //
+  // The comment here used to say this was "optional on purpose", and it was --
+  // and that was wrong. `cmd/wt_ssh` reads the store on *every* connection when
+  // no `known_hosts` text was given (`cfg_kh_policy` calls `@khstore.load`),
+  // so a Worker without this shim has no `__moonbit_khs` to talk to, and the
+  // client died with a TypeError instead of saying "nothing is pinned here".
+  // The gates in this tier were written before `cfg_kh_policy` grew the store
+  // read, so none of them passed the shim, and every browser run failed for a
+  // reason that had nothing to do with what it was testing.
+  //
+  // So the default is now the shim that sits next to this script: a gate that
+  // wants to measure "no store at all" passes an explicit empty string, which
+  // is a different thing from "I did not think about it".
+  const khsShimUrl = cfg.khsShimUrl === undefined ? './moonbit_khs.js' : cfg.khsShimUrl;
+  if (khsShimUrl) {
     try {
-      importScripts(cfg.khsShimUrl);
+      importScripts(khsShimUrl);
     } catch (err) {
       finish({ ok: false, error: 'khs shim import failed: ' + describe(err) });
       return;

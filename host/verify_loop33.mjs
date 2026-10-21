@@ -33,11 +33,30 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sshUser } from './ssh_user.mjs';
 import { chromium } from 'playwright';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HEADED = process.argv.includes('--headed');
 const SKIP_REGRESSION = process.argv.includes('--skip-regression');
+
+// The account this gate authenticates as: the one this machine runs as.
+//
+// See host/ssh_user.mjs. Writing one developer's account name here made every
+// gate that opens a real OpenSSH server pass on that machine and fail on every
+// other one.
+const USER = sshUser();
+
+// The host key pin, for both drivers.
+//
+// Loop #50 made refusing an unpinned host the default, so a client that reaches
+// a real server without a pin is turned away before it can authenticate. This
+// gate was written before that default existed and was never updated.
+//
+// `--known-hosts-text ''` is the explicit "do not pin this time": the key is
+// accepted, nothing is stored, and the developer's own known_hosts is never
+// touched. The browser side says the same thing with `kh_tofu`.
+const PIN_ARGS = ['--kh-tofu', '--kh-host', '127.0.0.1', '--known-hosts-text', ''];
 
 const HTTP_PORT = 18771;
 const WS_PORT = 8771;
@@ -315,7 +334,8 @@ async function main() {
   });
   check('private sshd up', await waitForLog(sshd, 'sshd listening'));
 
-  const nat = moon(['run', 'cmd/ssh_live', '--target', 'native', '--', '--session', String(SSHD_PORT)]);
+  const nat = moon(['run', 'cmd/ssh_live', '--target', 'native', '--', '--session', String(SSHD_PORT),
+    '--user', USER, ...PIN_ARGS]);
   const natText = norm(`${nat.stdout || ''}${nat.stderr || ''}`);
   for (const l of natText.split('\n')) if (/^(result|service|accepted|we_need|cipher_ctos|mac_ctos|total_|handshake_)/.test(l)) console.log(`      ${l.trim()}`);
   check('result: SERVICE_ACCEPTED', natText.includes('result: SERVICE_ACCEPTED'));
@@ -374,6 +394,13 @@ async function main() {
       url: `ws://127.0.0.1:${WS_PORT}/ssh`,
       nonce: 'loop33',
       session: '1',
+      // The browser side of the same two things: the account to authenticate
+      // as, and the pin. Loop #50 made refusing an unpinned host the default,
+      // and the account has to be the one this machine runs as -- a literal
+      // here would pass on one machine and fail on every other.
+      user: USER,
+      kh_tofu: '1',
+      kh_host: '127.0.0.1',
     },
     90000
   );

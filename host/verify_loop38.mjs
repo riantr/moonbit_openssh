@@ -63,6 +63,21 @@ const BASE_PORT = 22275;
 // public key it does not accept is "no", and the client reports that as an
 // authentication rejection. See host/ssh_user.mjs.
 const USER = sshUser();
+
+// The host key pin, for both drivers.
+//
+// Loop #50 made REFUSING an unpinned host the default, so a client that
+// reaches a real server without a pin is turned away before it can
+// authenticate. The gates in this tier were written before that default
+// existed and were never updated, so every one of them has been failing
+// with `HostkeyUnknown` since -- a failure about pinning, reported as a
+// failure about the thing each gate is here to test.
+//
+// `--known-hosts-text ''` is the explicit "do not pin this time": the key is
+// accepted, nothing is stored, and the developer's own known_hosts is never
+// touched. The browser side says the same thing with `kh_tofu`, and keeps
+// its pin in the IndexedDB store the Worker owns.
+const PIN_ARGS = ['--kh-tofu', '--kh-host', '127.0.0.1', '--known-hosts-text', ''];
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
 // The algorithms the client advertises, in the order it advertises them.
@@ -164,7 +179,7 @@ function stopSshd(name) {
 /// One client run against a real server, authenticating with the test key.
 function clientRun(port, extra = []) {
   const r = moon(['run', 'cmd/ssh_live', '--target', 'native', '--',
-    '--port', String(port), '--user', USER, '--session', '--auth', ...extra]);
+    '--port', String(port), '--user', USER, ...PIN_ARGS, '--session', '--auth', ...extra]);
   return norm(`${r.stdout || ''}${r.stderr || ''}`);
 }
 
@@ -340,6 +355,11 @@ async function main() {
     url: `ws://127.0.0.1:${WS_PORT}/ssh`,
     nonce: 'loop38',
     user: USER,
+    // Loop #50: the same default, on the browser side. The Worker
+    // has to be told to accept a key explicitly, exactly like the native
+    // driver above.
+    kh_tofu: '1',
+    kh_host: '127.0.0.1',
     // `auth: 1` is what takes the Worker past the handshake to
     // USERAUTH_SUCCESS, and the host key fields are printed on that path.
     // Without it the Worker stops at ESTABLISHED and there is nothing to

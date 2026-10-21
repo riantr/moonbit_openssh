@@ -60,6 +60,7 @@ import {
   hasStored,
   tofuEntry,
 } from "./tofu_transcript.mjs";
+import { sshUser } from "./ssh_user.mjs";
 
 let chromium = null;
 try {
@@ -180,7 +181,11 @@ async function connect(browser, httpPort, tag, mitm, extraCfg = {}) {
     };
   }
   const base = `http://127.0.0.1:${httpPort}`;
-  const cfg = wtCfg(base, httpPort, br.wsPort, { nonce: tag, user: "hp", auth: "1", ...extraCfg });
+  // The account to authenticate as: derived, never written down (Loop #76).
+  // The man in the middle accepts any name, so this is not about the gate
+  // passing -- it is about a gate that says one developer's account name
+  // being a fact about the protocol.
+  const cfg = wtCfg(base, httpPort, br.wsPort, { nonce: tag, user: sshUser(), auth: "1", ...extraCfg });
   const { page, state } = await openPage(browser, httpPort);
   let got;
   try {
@@ -461,6 +466,52 @@ mkdirSync(WORK, { recursive: true });
   await stopMitm(m4);
   if (judge("after forgetting", g4, false, "HostkeyUnknown", readJson(m4.json))) {
     ok("after forgetting", "refused with HostkeyUnknown -- 'not pinned', not 'the key changed'");
+  }
+
+  // ---- step 5: no store installed at all ---------------------------------
+  // The case that used to crash the client.
+  //
+  // `src/khstore` says "never throw; every failure is a value", and it meant it
+  // for a store that *fails*. It did not mean it for a store that is not
+  // *there*: the extern bodies went straight to `globalThis.__moonbit_khs`, so a
+  // Worker with no store installed raised a TypeError on the very first
+  // property access -- synchronously, outside any promise chain. And
+  // `cmd/wt_ssh` reads the store on *every* connection, so "no store" was not an
+  // edge case; it was every browser run that forgot to load the shim.
+  //
+  // So this step removes the store (`khsShimUrl: ''` -- an explicit "there is
+  // none", which is a different thing from "I did not think about it") and
+  // connects. Two things must hold:
+  //
+  //   * the connection still succeeds. A missing pin store is not a broken
+  //     connection, and treating it as one would let a private-mode browser
+  //     masquerade as a man in the middle;
+  //   * the client *says* the pin was not stored, because the next connection
+  //     will need `kh_tofu` again. A client that said "stored" here would be
+  //     lying, and the user would find out on the next connection.
+  console.log("");
+  console.log("step 5: with no store installed at all");
+  let m5 = await startMitm("s5");
+  const g5 = await connect(browser, httpPort, "s5", m5, {
+    khsShimUrl: "",
+    kh_tofu: "1",
+    kh_host: HOST,
+  });
+  await stopMitm(m5);
+  const s5 = [];
+  if (!g5.authed) {
+    s5.push("the connection failed: " + JSON.stringify(g5.error).slice(0, 160));
+  }
+  if (!g5.tofuAccepted) s5.push("no `tofu: accepted-unpinned` line");
+  if (!g5.notStored) s5.push("no `tofu: NOT stored` line");
+  if (g5.stored) s5.push("the client said `tofu: stored` with no store installed");
+  if (g5.pageErrors && g5.pageErrors.length) {
+    s5.push("page errors: " + g5.pageErrors.slice(0, 2).join(" | "));
+  }
+  if (s5.length) {
+    bad("no store installed", s5.join("\n      "));
+  } else {
+    ok("no store installed", "connected anyway, and said the pin was not stored");
   }
 
   if (browser) await browser.close();

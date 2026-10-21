@@ -46,31 +46,35 @@ FILES = [
 MUTATIONS = [
     # ---- the wire numbers ------------------------------------------------
     (
+        # `Int` -> `Int32` in the constants, and a trailing comma inside the
+        # struct literal.  Both anchors had drifted, and a drifted anchor is
+        # reported as SKIP and then counted as "not caught" -- a verdict about
+        # the KAT that is really a verdict about a text file.
         "swap DATA and ATTRS: the draft's by-name order, not the wire order",
-        "pub const FXP_DATA : Int = 103",
-        "pub const FXP_DATA : Int = 104",
+        "pub const FXP_DATA : Int32 = 103",
+        "pub const FXP_DATA : Int32 = 104",
         "live_readfile_eof_status",
     ),
     (
         "swap NAME and ATTRS",
-        "pub const FXP_ATTRS : Int = 105",
-        "pub const FXP_ATTRS : Int = 103",
+        "pub const FXP_ATTRS : Int32 = 105",
+        "pub const FXP_ATTRS : Int32 = 103",
         "live_realpath_stat",
     ),
     (
         "swap STATUS and HANDLE",
-        "pub const FXP_STATUS : Int = 101",
-        "pub const FXP_STATUS : Int = 102",
+        "pub const FXP_STATUS : Int32 = 101",
+        "pub const FXP_STATUS : Int32 = 102",
         "negative_missing_stat",
     ),
 
     # ---- VERSION ---------------------------------------------------------
     (
         "demand end-of-packet right after the version number",
-        "  Parsed(SftpReply::Version({ version: v, extensions: n, ext_names: names }))",
+        "  Parsed(SftpReply::Version({ version: v, extensions: n, ext_names: names, }))",
         "  match c.err {\n    Some(_) => return Rejected(SftpError::TrailingData)\n"
         "    None => ()\n  }\n"
-        "  Parsed(SftpReply::Version({ version: v, extensions: 0, ext_names: names }))",
+        "  Parsed(SftpReply::Version({ version: v, extensions: 0, ext_names: names, }))",
         "live_realpath_stat",
     ),
 
@@ -246,24 +250,32 @@ MUTATIONS = [
         "negative_write_failure_still_closes",
     ),
     (
+        # The constant's type moved from `Int` to `Int32` and the formatter
+        # split the `put_type`/`put_u32i` pair onto two lines.  An anchor that
+        # has drifted is not a mutation: the harness reports SKIP and counts it
+        # as "not caught", which points at the KAT instead of at the anchor.
+        # The mutated text keeps the same shape, because a mutation that
+        # changes the layout as well as the behaviour measures two things.
         "swap REMOVE and RMDIR, which are 13 and 15",
-        "pub const FXP_REMOVE : Int = 13",
-        "pub const FXP_REMOVE : Int = 15",
+        "pub const FXP_REMOVE : Int32 = 13",
+        "pub const FXP_REMOVE : Int32 = 15",
         "live_mkdir_then_remove",
     ),
     (
         "send MKDIR without the attribute block the server requires",
-        "    put_type(FXP_MKDIR), put_u32i(id),\n"
+        "    put_type(FXP_MKDIR),\n"
+        "    put_u32i(id),\n"
         "    @sshwire.write_ssh_string(sftp_ascii(path)),\n"
         "    attrs.encode(),",
-        "    put_type(FXP_MKDIR), put_u32i(id),\n"
+        "    put_type(FXP_MKDIR),\n"
+        "    put_u32i(id),\n"
         "    @sshwire.write_ssh_string(sftp_ascii(path)),",
         "live_mkdir_then_remove",
     ),
     (
         "swap the reply numbers the other way: STATUS where HANDLE belongs",
-        "pub const FXP_HANDLE : Int = 102",
-        "pub const FXP_HANDLE : Int = 101",
+        "pub const FXP_HANDLE : Int32 = 102",
+        "pub const FXP_HANDLE : Int32 = 101",
         "live_writefile_single_chunk",
     ),
 ]

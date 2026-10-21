@@ -47,6 +47,7 @@ import net from "node:net";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sshUser } from './ssh_user.mjs';
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = join(root, ".loop59");
@@ -231,7 +232,7 @@ async function main() {
     console.log("step 3: no --config, the old behaviour is unchanged");
     const p3 = await startPeer("s3");
     const KH3 = join(WORK, "kh3");
-    const r3 = run([String(p3.port), "--auth", "--user", "hp", "--kh-tofu", "--kh-file", KH3]);
+    const r3 = run([String(p3.port), "--auth", "--user", sshUser(), "--kh-tofu", "--kh-file", KH3]);
     await stopPeer(p3);
     if (authed(r3)) ok("no config -> dials 127.0.0.1:<argv port>", `authenticated as ${lineOf(r3, "user")}`);
     else bad("no config -> dials 127.0.0.1:<argv port>", r3.trim().split("\n").slice(-4).join(" | "));

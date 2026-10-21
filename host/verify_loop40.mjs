@@ -59,6 +59,21 @@ const SSHD_PORT = 18783;
 // public key it does not accept is "no", and the client reports that as an
 // authentication rejection. See host/ssh_user.mjs.
 const USER = sshUser();
+
+// The host key pin, for both drivers.
+//
+// Loop #50 made REFUSING an unpinned host the default, so a client that
+// reaches a real server without a pin is turned away before it can
+// authenticate. The gates in this tier were written before that default
+// existed and were never updated, so every one of them has been failing
+// with `HostkeyUnknown` since -- a failure about pinning, reported as a
+// failure about the thing each gate is here to test.
+//
+// `--known-hosts-text ''` is the explicit "do not pin this time": the key is
+// accepted, nothing is stored, and the developer's own known_hosts is never
+// touched. The browser side says the same thing with `kh_tofu`, and keeps
+// its pin in the IndexedDB store the Worker owns.
+const PIN_ARGS = ['--kh-tofu', '--kh-host', '127.0.0.1', '--known-hosts-text', ''];
 const LIVE_DIR = join(ROOT, '.loop40', 'live');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
@@ -290,46 +305,62 @@ async function main() {
     genText.split('\n').slice(-12).join('\n'));
   // The generator's own claim that it wrote the same file it would have
   // written last time is the only thing standing between the KAT and a slow
-  // drift away from the capture.  Generate to a scratch path and compare
-  // bytes: asking `git diff` for this only works once the file is committed,
-  // and on the very first run of a new loop it is by definition not.
-  const scratch = join(ROOT, '.loop40', 'vectors_regen.mbt');
+  // drift away from the capture.
+  //
+  // **The regeneration happens in place, at the package's own path, and the
+  // original bytes are restored afterwards.** The first version of this
+  // generated to a scratch path and compared the two files byte for byte --
+  // and that comparison could never succeed, because of a fact about the
+  // toolchain rather than about the generator:
+  //
+  //   `moon fmt` only formats files that belong to a package of the current
+  //   module. For a file anywhere else it exits 0, prints nothing, and
+  //   changes nothing. So the committed file (inside `cmd/sftp_test`, a
+  //   package) is formatted, and the scratch file (in `.loop40`, which is in
+  //   no package at all) is not -- and the two differed by exactly the
+  //   formatter's line wrapping, 1290 bytes' worth.
+  //
+  // Regenerating at the package path means the formatter applies to both
+  // sides, so the comparison is about the vectors rather than about the
+  // formatting convention. The committed bytes are restored in a `finally`,
+  // so the gate never leaves the tree dirty -- including when it fails,
+  // which is when leaving it dirty would be least welcome.
+  //
+  // `git diff` would answer the same question, but only once the file is
+  // committed, and on the very first run of a new loop it is by definition
+  // not.
+  const committedPath = join(ROOT, 'cmd', 'sftp_test', 'vectors.mbt');
+  const committedBytes = await readFile(committedPath, 'utf8');
   const gen2 = spawnSync('python', [
     'host/gen_sftp_vectors.py',
     '--capture', capturePath,
     '--write-capture', writeCapture,
-    '--out', scratch,
   ], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   check('the generator is deterministic', gen2.status === 0,
     `${gen2.stdout || ''}${gen2.stderr || ''}`.split('\n').slice(-8).join('\n'));
-  if (gen2.status === 0) {
-    // One retry, and say where they diverge.
-    //
-    // The retry is not papering over a real drift: the two generations are
-    // deterministic given the captures, and running them twice in a row
-    // produces identical bytes. What this guards is a read that lands while
-    // something else is rewriting the file -- `verify_loop39.mjs`, which the
-    // regression section runs, regenerates `cmd/sftp_test/vectors.mbt` itself
-    // with `cwd: ROOT` and no `--write-capture`. That is two writers of one
-    // generated file, and the fix belongs there; until then a byte comparison
-    // that reports *where* it differs is worth more than one that reports only
-    // that it did.
-    const readBoth = async () => [
-      await readFile(join(ROOT, 'cmd', 'sftp_test', 'vectors.mbt'), 'utf8'),
-      await readFile(scratch, 'utf8'),
-    ];
-    let [va, vb] = await readBoth();
-    if (va !== vb) {
-      await new Promise(r => setTimeout(r, 500));
-      [va, vb] = await readBoth();
+  let regenerated = null;
+  try {
+    if (gen2.status === 0) {
+      regenerated = await readFile(committedPath, 'utf8');
     }
+    // Say where they differ, not only that they did.
     let where = '';
-    if (va !== vb) {
+    if (regenerated !== null && regenerated !== committedBytes) {
       let i = 0;
-      while (i < va.length && i < vb.length && va[i] === vb[i]) i += 1;
-      where = `diverge at char ${i} (committed ${va.length} bytes, regenerated ${vb.length})`;
+      const a = committedBytes;
+      const b = regenerated;
+      while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+      where = `diverge at char ${i} (committed ${a.length} bytes, regenerated ${b.length})`;
     }
-    check('committed vectors still match the oracle', va === vb, where);
+    check(
+      'committed vectors still match the oracle',
+      regenerated !== null && regenerated === committedBytes,
+      where
+    );
+  } finally {
+    // Put the file back exactly as it was. A gate that leaves a generated
+    // source file rewritten is a gate that can turn a later run green.
+    await writeFile(committedPath, committedBytes, 'utf8');
   }
 
   const TARGETS = ['native', 'js', 'wasm', 'wasm-gc'];
@@ -405,7 +436,7 @@ async function main() {
   const d = `${liveAbs}/d`;
   const native = moon([
     'run', 'cmd/ssh_live', '--target', 'native', String(SSHD_PORT),
-    '--user', USER,
+    '--user', USER, ...PIN_ARGS,
     // Command-line order is the script order: the driver builds the op list
     // while scanning argv.  Get this wrong and the write below runs before
     // the mkdir that creates its directory.
@@ -504,6 +535,11 @@ async function main() {
         url: `ws://127.0.0.1:${WS_PORT}/ssh`,
         nonce: 'loop40',
         user: USER,
+        // Loop #50: the same default, on the browser side. The Worker
+        // has to be told to accept a key explicitly, exactly like the native
+        // driver above.
+        kh_tofu: '1',
+        kh_host: '127.0.0.1',
         sftp_mkdir: wd,
         sftp_write: `${wd}/f.bin`,
         sftp_write_size: String(big.length),

@@ -8,6 +8,7 @@ formats its output as MoonBit.  Nothing here is hand-transcribed.
 """
 
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +19,35 @@ OUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "cmd", "channel_test", "vectors.mbt",
 )
+
+
+def format_in_place(path):
+    """Put the generated file through the formatter.
+
+    The generated file is a SOURCE file in the repository, and the repository
+    is formatter-clean -- `moon fmt --check` over the whole tree is a gate
+    (Loop #67). So the generator has to produce what the formatter produces.
+
+    That is not a cosmetic difference. Loop #35's gate regenerates this file
+    and requires the committed copy to be unchanged, and the two used to
+    differ by exactly the formatter's line wrapping -- so the check could
+    never pass, and the regenerated copy was left in the working tree, where
+    it made every later `git diff` non-empty.
+
+    `moon fmt` is run through `cmd /c` because that is how every other
+    harness in this repository invokes the toolchain on Windows.
+    """
+    res = subprocess.run(
+        ["cmd", "/c", "moon", "fmt", path],
+        capture_output=True,
+    )
+    if res.returncode != 0:
+        sys.stderr.write("moon fmt failed on the file %s\n%s\n%s\n"
+                         % (path,
+                            res.stdout.decode("utf-8", "replace"),
+                            res.stderr.decode("utf-8", "replace")))
+        raise SystemExit(res.returncode)
+    return res.stdout.decode("utf-8", "replace")
 
 HEADER = '''///| GENERATED FILE -- do not edit by hand.
 ///| Regenerate with: python host/gen_channel_vectors.py
@@ -777,8 +807,9 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
-    print("wrote %s (%d bytes, %d session vectors)"
-          % (OUT, len(text.encode("utf-8")), len(doc["sessions"])))
+    format_in_place(OUT)
+    print("wrote %s (%d bytes on disk, %d session vectors)"
+          % (OUT, os.path.getsize(OUT), len(doc["sessions"])))
 
 
 if __name__ == "__main__":

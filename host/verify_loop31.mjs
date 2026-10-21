@@ -17,7 +17,7 @@
 
 import { execSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createConnection } from 'node:net';
@@ -69,6 +69,22 @@ function artifact(rel) {
   return `"${join(ROOT, rel)}"`;
 }
 
+// Run the client with an argv array.
+//
+// `run()` builds a shell command string, and a shell cannot carry an empty
+// argument (see the PIN_ARGS comment above). The exit status is kept as well
+// as the output, because "the client said ESTABLISHED" and "the client exited
+// 0" are different claims and the gate wants both.
+function runClient(args) {
+  const res = spawnSync(exeArg, args, {
+    cwd: ROOT,
+    encoding: 'utf-8',
+    timeout: 300000,
+  });
+  if (res.error) return `ERROR: ${res.error.message}`;
+  return `${res.stdout || ''}${res.stderr || ''}`;
+}
+
 // `moon check` prints its "N errors" summary on stderr and exits 0 even with
 // warnings, so a stdout-only capture sees an empty string. Fold both streams
 // together and read the error count out of the summary line.
@@ -104,6 +120,13 @@ function hashOut(out) {
     .update(out.replace(/\r\n/g, '\n'))
     .digest('hex')
     .substring(0, 16);
+}
+
+// moon's diagnostics and the program's output both arrive with CRLF on
+// Windows, and every anchored regex below assumes LF. Normalize once at the
+// edge rather than writing \r?$ five times.
+function norm(s) {
+  return String(s || '').replace(/\r\n/g, '\n');
 }
 
 function portOpen(port, timeoutMs = 15000) {
@@ -169,10 +192,44 @@ console.log(`  sshd listening on 127.0.0.1:${PORT}\n`);
 
 // ------------------------------------------------------------- build client
 console.log('=== build cmd/ssh_live on 4 targets ===');
+//
+// Loop #68 made this driver native-only (`supported_targets: "+native"` in
+// `cmd/ssh_live/moon.pkg`), because the browser path has its own driver
+// (`cmd/wt_ssh`, js-only) and the two must not pretend to be one thing.
+//
+// So the expectation here is **inverted** for the three non-native backends:
+// they must be REFUSED, loudly, by the toolchain. A driver that cannot run
+// where it is not supported is the honest outcome; a driver that builds
+// everywhere and then has no socket is the dishonest one.
+//
+// The first version of this check looked for the string "error" in the build
+// output. moon says "Error: failed to run build for target Js" -- capital E --
+// and a case-sensitive search for "error" does not match it, so a build that
+// FAILED was reported as a build that succeeded. The three checks below it
+// then read a `.wasm` left over from before Loop #68 and measured that.
+// A gate that cannot fail is worse than a gate that fails, and this one had
+// been unable to fail for a long time without anyone noticing.
 for (const target of TARGETS) {
-  const out = run(`moon build cmd/ssh_live --target ${target}`);
-  const ok = !out.includes('error') || /0 errors/.test(out);
-  check(`build ${target}`, ok);
+  const res = spawnSync('moon', ['build', 'cmd/ssh_live', '--target', target], {
+    cwd: ROOT,
+    encoding: 'utf-8',
+  });
+  const text = norm(`${res.stdout || ''}${res.stderr || ''}`);
+  if (target === 'native') {
+    check('build native', res.status === 0, text.trim().split('\n').slice(-2).join(' | '));
+  } else {
+    // The refusal has to *name* the backend. "failed" alone is a rumour; a
+    // message that says which backend is unsupported and which ones are
+    // supported is a measurement.
+    const refused = res.status !== 0 &&
+      /does not support target backend/i.test(text) &&
+      text.includes(`'${target}'`);
+    check(
+      `build ${target} is refused, and says why`,
+      refused,
+      text.trim().split('\n').filter(l => /backend|Error/i.test(l)).slice(0, 2).join(' | ')
+    );
+  }
 }
 
 // ------------------------------------------------------- direct handshake
@@ -182,7 +239,29 @@ const exe = artifact(exeRel);
 // Python's Popen takes a list, so it wants the bare path, not a cmd-quoted one.
 const exeArg = join(ROOT, exeRel);
 run(`Get-Process ssh_live -ErrorAction SilentlyContinue | Stop-Process -Force`);
-const live = run(`${exe} ${PORT}`);
+
+// The host key pin.
+//
+// Loop #50 made REFUSING an unpinned host the default, so a client that
+// reaches a real server without a pin is turned away before the handshake can
+// be judged. This gate was written before that default existed and was never
+// updated, so it has been failing with `HostkeyUnknown` since -- a failure
+// about pinning, reported as a failure about the handshake.
+//
+// `--kh-tofu` is the explicit "accept this key" (= `accept-new`). Nothing is
+// written to disk: the write-back only happens when `--kh-file` is given, and
+// this driver is given neither, so the developer's own known_hosts is never
+// touched.
+//
+// The arguments travel as an argv array, not as a command string. `run()`
+// hands its argument to a shell, and a Windows shell has no empty-string
+// argument: `--known-hosts-text ''` arrives as the two characters `''`, which
+// is a *non-empty* known_hosts text that parses to zero entries -- and the
+// client refuses that with "known_hosts parsed to nothing". A gate that
+// quotes its own arguments wrongly fails in a way that reads like a client
+// bug, so the array form is used wherever an argument can be empty.
+const PIN_ARGS = ['--kh-tofu', '--kh-host', '127.0.0.1'];
+const live = runClient([String(PORT), ...PIN_ARGS]);
 const liveOk = live.includes('result: ESTABLISHED');
 check('result: ESTABLISHED', liveOk, liveOk ? '' : live.trim().split('\n').slice(0, 6).join(' | '));
 for (const field of [
@@ -211,8 +290,14 @@ check('layout variant is V1I1E1K1', (variant || '').includes('V1I1E1K1'), varian
 // ------------------------------------------- oracle 2: MITM transcript diff
 console.log('\n=== oracle 2: wire transcript vs MoonBit H ===');
 run(`Get-Process ssh_live -ErrorAction SilentlyContinue | Stop-Process -Force`);
+// `--client-arg=<value>`, not `--client-arg <value>`: the values are switches
+// that begin with a dash, and argparse would read `--kh-tofu` as an option
+// name rather than as a value. The first version of this line used the space
+// form and the oracle died with "expected one argument" -- a failure that
+// reads like the transcript tool being broken.
 const tc = run(
-  `python host/transcript_check.py --port ${PORT} --proxy-port ${PROXY_PORT} --exe ${exeArg}`
+  `python host/transcript_check.py --port ${PORT} --proxy-port ${PROXY_PORT} --exe ${exeArg} ` +
+  PIN_ARGS.map(a => `--client-arg=${a}`).join(' ')
 );
 check('MoonBit reached ESTABLISHED via tee', tc.includes('result: ESTABLISHED'));
 check('MoonBit H == Python H from wire bytes', tc.includes('H_match:     True'));
@@ -235,49 +320,82 @@ for (const target of TARGETS) {
   }
 }
 
-// The browser backends have no socket, so `mb_tcp_connect` is a pure-MoonBit
-// stub there. What Loop #31 must guarantee is that nothing from the transport
-// leaks into those modules as a foreign import: the only imports allowed are
-// the host shims (`__moonbit_fs_unstable` for @env.args, spectest.print_char,
-// wasi fd_write) that Loop #32's browser host will supply.
-for (const target of ['wasm', 'wasm-gc']) {
-  const rel = `_build/${target}/debug/build/cmd/ssh_live/ssh_live.wasm`;
-  const imports = run(
-    `node -e "const fs=require('fs');const m=new WebAssembly.Module(fs.readFileSync(process.argv[1]));` +
-      `console.log(WebAssembly.Module.imports(m).map(i=>i.module+'.'+i.name).join(' '))" ${artifact(rel)}`
-  );
-  const names = (imports.match(/[A-Za-z0-9_.]+/g) || []).filter(n => n.includes('.'));
-  const leaked = names.filter(
-    n => /^mb_tcp_/.test(n) || /socket|winsock|recv|sendall/i.test(n)
-  );
-  check(`${target} imports no transport symbols`, leaked.length === 0, leaked.join(' '));
-  check(
-    `${target} imports only host shims`,
-    names.every(n => /^(spectest|wasi_snapshot_preview1|__moonbit_fs_unstable)\./.test(n)),
-    names.join(' ')
-  );
-  // Running these needs Loop #32's browser host (it supplies the fs shims and
-  // the WebTransport transport). Until then the honest state is "instantiation
-  // needs a host that does not exist yet", not a silent pass.
-  const out = run(`node host/node_host.mjs ${artifact(rel)}`);
-  check(
-    `${target} does not pretend to run`,
-    !out.includes('ESTABLISHED'),
-    out.includes('__moonbit_fs_unstable') ? 'needs Loop #32 host shim (expected)' : out.trim().slice(0, 80)
-  );
+// The browser path has no socket. What Loop #31 must guarantee is that
+// nothing from the native transport leaks into it -- and that is now measured
+// on the artifact that actually runs in a browser.
+//
+// This used to inspect `_build/wasm/.../cmd/ssh_live/ssh_live.wasm` and
+// compare its import list against an allowlist of host shims. Two things
+// broke it, and neither was visible from the failure:
+//
+//   1. `cmd/ssh_live` has been native-only since Loop #68, so `moon build` for
+//      wasm/wasm-gc/js **fails** -- and the check above that was supposed to
+//      notice could not fail (it searched for a lowercase "error" in a message
+//      that starts with a capital "Error"). The `.wasm` it then read was
+//      left over from before Loop #68. It was a stale artifact being measured
+//      as if it were the current one.
+//   2. the driver that runs in a browser is not `cmd/ssh_live` at all. It is
+//      `cmd/wt_ssh`, and it is js-only.
+//
+// So the property is now stated where it is true: the browser driver's own
+// bundle must not contain the native socket, and must contain the browser
+// transport instead. `mb_tcp_connect` is the native entry point (`extern "c"`
+// into `src/tcp/winsock.c`); `__moonbit_wt` is the byte-stream shim the
+// browser side talks to.
+{
+  const b = spawnSync('moon', ['build', 'cmd/wt_ssh', '--target', 'js'], {
+    cwd: ROOT,
+    encoding: 'utf-8',
+  });
+  const bText = norm(`${b.stdout || ''}${b.stderr || ''}`);
+  check('build cmd/wt_ssh (js)', b.status === 0, bText.trim().split('\n').slice(-2).join(' | '));
+
+  const bundleRel = '_build/js/debug/build/cmd/wt_ssh/wt_ssh.js';
+  const bundlePath = join(ROOT, bundleRel);
+  if (!existsSync(bundlePath)) {
+    check('browser driver bundle exists', false, bundleRel);
+  } else {
+    const bundle = readFileSync(bundlePath, 'utf-8');
+    check('browser driver bundle exists', true, `${bundle.length} bytes`);
+    const nativeSymbols = ['mb_tcp_connect', 'mb_tcp_send', 'mb_tcp_recv', 'winsock']
+      .filter(sym => bundle.includes(sym));
+    check(
+      'browser driver links no native socket',
+      nativeSymbols.length === 0,
+      nativeSymbols.join(' ')
+    );
+    check(
+      'browser driver uses the browser transport',
+      bundle.includes('__moonbit_wt'),
+      '__moonbit_wt'
+    );
+  }
 }
 
-// js has a real host, so it must run and fail *loudly* rather than fake success.
-const jsOut = run(`moon run cmd/ssh_live --target js -- ${PROXY_PORT}`);
-check(
-  'js runs and reports CONNECT_FAILED',
-  jsOut.includes('result: CONNECT_FAILED') && !jsOut.includes('ESTABLISHED'),
-  jsOut.trim().split('\n').slice(0, 4).join(' | ')
-);
-// On the js backend @env.args() is process.argv, so argv[1] is the script path.
-// Reaching the connect attempt with the caller's port proves the driver
-// handled that offset instead of silently falling back to the default.
-check('js parsed the caller port', jsOut.includes(`port: ${PROXY_PORT}`));
+// The driver that has no browser backend must say so rather than run
+// something else.
+//
+// This used to ask `cmd/ssh_live` to run under js and to report
+// `CONNECT_FAILED` -- a real check at the time, when the driver built for
+// every backend and the js one had no socket to reach. Since Loop #68 the
+// driver is native-only, so the honest question is the other way round: the
+// toolchain must refuse it, and name the backend it refused.
+{
+  const jsRun = spawnSync('moon', ['run', 'cmd/ssh_live', '--target', 'js', '--', String(PROXY_PORT)], {
+    cwd: ROOT,
+    encoding: 'utf-8',
+    timeout: 300000,
+  });
+  const jsText = norm(`${jsRun.stdout || ''}${jsRun.stderr || ''}`);
+  check(
+    'js is refused by the toolchain, and says why',
+    jsRun.status !== 0 &&
+      /does not support target backend/i.test(jsText) &&
+      jsText.includes("'js'") &&
+      !jsText.includes('ESTABLISHED'),
+    jsText.trim().split('\n').filter(l => /backend|Error/i.test(l)).slice(0, 2).join(' | ')
+  );
+}
 
 // ---------------------------------------------------------------- regression
 console.log('\n=== regression: Loop #30 crypto suites, 4 target x 2 mode ===');

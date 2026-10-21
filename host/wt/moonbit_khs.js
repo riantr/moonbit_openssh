@@ -91,20 +91,39 @@
 
   globalThis.__moonbit_khs = {
     /// Store `value` under `key`, replacing any previous entry.
+    ///
+    /// Resolves with whether the write landed. A refused write (private mode,
+    /// quota, enterprise policy) resolves **false** rather than rejecting: the
+    /// client asked "did this land", and "no" is an answer. Rejecting here
+    /// would have surfaced as an unhandled rejection inside the MoonBit
+    /// runtime -- a crash, for what is really a "the browser would not let me"
+    /// -- and the driver's "tofu: NOT stored" line could then never be reached.
     save: function (key, value) {
       return withStore('readwrite', (store, done) => {
         store.put(value, key);
         done(true);
-      });
+      }).then(
+        (r) => r === true,
+        () => false,
+      );
     },
 
     /// Resolve with the stored value, or `null` when there is no entry.
+    ///
+    /// A storage that refuses to open also resolves `null`: the caller cannot
+    /// tell "no pin here" from "no storage here", and both mean the same
+    /// thing to the policy -- there is no pin, so an unpinned host is refused
+    /// (fail closed). Turning a storage failure into a *missing* pin is safe;
+    /// turning it into an *accepted* pin would not be.
     load: function (key) {
       return withStore('readonly', (store, done) => {
         const req = store.get(key);
         req.onsuccess = function () { done(req.result === undefined ? null : req.result); };
         req.onerror = function () { done(null); };
-      });
+      }).then(
+        (r) => r,
+        () => null,
+      );
     },
 
     /// Remove `key`. Resolves either way -- a key that was not there is already
@@ -113,7 +132,10 @@
       return withStore('readwrite', (store, done) => {
         store.delete(key);
         done(true);
-      });
+      }).then(
+        (r) => r,
+        () => false,
+      );
     },
 
     /// Whether storage works at all. Worth one call at startup: a browser can

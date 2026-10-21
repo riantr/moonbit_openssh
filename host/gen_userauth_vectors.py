@@ -17,6 +17,36 @@ ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "cmd", "userauth_test", "vectors.mbt")
 
 
+def format_in_place(path):
+    """Put the generated file through the formatter.
+
+    The generated file is a SOURCE file in the repository, and the repository
+    is formatter-clean -- `moon fmt --check` over the whole tree is a gate
+    (Loop #67). So the generator has to produce what the formatter produces,
+    or the file it writes is not the file the repository is supposed to hold.
+
+    That is not a cosmetic difference. Loop #34's gate regenerates this file
+    and requires the committed copy to be unchanged, and the two used to
+    differ by exactly the formatter's line wrapping -- so the check could
+    never pass, and the regenerated copy was left in the working tree, where
+    it made every later `git diff` non-empty.
+
+    `moon fmt` is run through `cmd /c` because that is how every other
+    harness in this repository invokes the toolchain on Windows.
+    """
+    res = subprocess.run(
+        ["cmd", "/c", "moon", "fmt", path],
+        capture_output=True,
+    )
+    if res.returncode != 0:
+        sys.stderr.write("moon fmt failed on the file %s\n%s\n%s\n"
+                         % (path,
+                            res.stdout.decode("utf-8", "replace"),
+                            res.stderr.decode("utf-8", "replace")))
+        raise SystemExit(res.returncode)
+    return res.stdout.decode("utf-8", "replace")
+
+
 def main():
     raw = subprocess.run(
         [sys.executable, os.path.join(HERE, "ecdsa_auth_oracle.py"), "--json"],
@@ -89,6 +119,7 @@ def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(L))
+    format_in_place(OUT)
     print("wrote %s (%d cases, %d bytes)"
           % (os.path.relpath(OUT, ROOT), len(doc["cases"]), os.path.getsize(OUT)))
     return 0

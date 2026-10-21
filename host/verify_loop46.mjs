@@ -51,6 +51,7 @@ import {
   sleep,
   wtCfg,
 } from "./wt_browser.mjs";
+import { sshUser } from "./ssh_user.mjs";
 
 let chromium = null;
 try {
@@ -203,7 +204,7 @@ async function runScenario(browser, httpPort, vector, chop) {
   const base = `http://127.0.0.1:${httpPort}`;
   const cfg = wtCfg(base, httpPort, wsPort, {
     nonce: "loop46",
-    user: "hp",
+    user: sshUser(),
     sftp_fault: vector.name,
     // Loop #50: the default is now to refuse an unpinned host, so this gate says
     // so explicitly. It is asking about the SFTP layer's reaction to malformed

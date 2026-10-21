@@ -79,22 +79,41 @@
 /// "the browser is in private mode" into a failed connection -- the wrong failure
 /// for the wrong reason: the connection is fine, and the user loses the ability to
 /// pin for a session rather than losing the session.
+///
+/// **And never throw when there is no backend at all.** That was the hole in the
+/// rule: the bodies below used `globalThis.__moonbit_khs.save(...)` directly, so a
+/// Worker (or any embedding) that simply did not install a store raised a
+/// TypeError on the *first property access*, synchronously, outside any promise
+/// chain -- so the "every failure is a value" promise did not hold for the one
+/// case that is actually common. `cmd/wt_ssh` reads the store on every
+/// connection, which meant "no store installed" was not an edge case at all: it
+/// was every browser run that forgot to load the shim.
+///
+/// So each body asks whether the backend exists, and if it does not, resolves
+/// with the answer that means "there is no pin here" -- which is the same answer
+/// a working store gives for an unknown host, and which the policy path already
+/// knows how to handle.
+///
+/// `String()` with no argument is the empty string. The rule above about string
+/// literals in extern bodies still holds: `""` would have to be written `\"`,
+/// which the compiler emits as a literal backslash-quote pair and the browser
+/// reads as a SyntaxError. `String()` needs no literal at all.
 extern "js" fn khs_save_raw(
   key : String,
   value : String,
-) -> @js_async.Promise[Unit] = "((k, v) => globalThis.__moonbit_khs.save(k, v).then((r) => r))"
+) -> @js_async.Promise[Bool] = "((k, v) => globalThis.__moonbit_khs ? globalThis.__moonbit_khs.save(k, v).then((r) => r === true) : Promise.resolve(false))"
 
 ///|
-extern "js" fn khs_load_raw(key : String) -> @js_async.Promise[Bool] = "((k) => globalThis.__moonbit_khs.load(k).then((v) => v !== null))"
+extern "js" fn khs_load_raw(key : String) -> @js_async.Promise[Bool] = "((k) => globalThis.__moonbit_khs ? globalThis.__moonbit_khs.load(k).then((v) => v !== null) : Promise.resolve(false))"
 
 ///|
-extern "js" fn khs_get_raw(key : String) -> @js_async.Promise[String] = "((k) => globalThis.__moonbit_khs.load(k).then((v) => v === null ? String() : v))"
+extern "js" fn khs_get_raw(key : String) -> @js_async.Promise[String] = "((k) => globalThis.__moonbit_khs ? globalThis.__moonbit_khs.load(k).then((v) => v === null ? String() : v) : Promise.resolve(String()))"
 
 ///|
-extern "js" fn khs_forget_raw(key : String) -> @js_async.Promise[Unit] = "((k) => globalThis.__moonbit_khs.forget(k).then((r) => r))"
+extern "js" fn khs_forget_raw(key : String) -> @js_async.Promise[Unit] = "((k) => globalThis.__moonbit_khs ? globalThis.__moonbit_khs.forget(k).then((r) => r) : Promise.resolve())"
 
 ///|
-extern "js" fn khs_probe_raw() -> @js_async.Promise[Bool] = "(() => globalThis.__moonbit_khs.probe().then((r) => r))"
+extern "js" fn khs_probe_raw() -> @js_async.Promise[Bool] = "(() => globalThis.__moonbit_khs ? globalThis.__moonbit_khs.probe().then((r) => r === true) : Promise.resolve(false))"
 
 ///| The storage key one host's entry lives under.
 ///
@@ -157,13 +176,18 @@ pub async fn load(host : String) -> String {
 /// the connection succeeded either way, and the only cost is that the next one
 /// needs `--kh-tofu` again. It is returned so the driver can *say* so instead of
 /// leaving a user believing they are pinned.
+///
+
+///|
+///
+/// **The answer used to be hardcoded to `true`.** The shim resolves with whether
+/// the write landed, and the MoonBit side threw that away and returned `true`
+/// anyway -- which made `cmd/wt_ssh`'s "tofu: NOT stored" line unreachable. A
+/// store that refused the write (private mode, quota, policy) was reported to
+/// the user as a store that took it, and the whole point of Loop #52's message
+/// was to say the difference.
 pub async fn save(host : String, line : String) -> Bool {
-  // The shim swallows its own errors and resolves, so this cannot fail. The
-  // boolean is the MoonBit side's answer to "did this land", and it is currently
-  // always true -- which is honest, because `probe` is the way to find out whether
-  // storage works before relying on it.
-  let _ = @js_async.Promise::wait(khs_save_raw(storage_key(host), line))
-  true
+  @js_async.Promise::wait(khs_save_raw(storage_key(host), line))
 }
 
 ///| Forget `host`.

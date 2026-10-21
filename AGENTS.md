@@ -5721,6 +5721,48 @@ stored was 6130 bytes against the local object's 6131. Reconstructing the
 commit from `%B` therefore cannot match either, for a second reason.
 `git cat-file commit HEAD` is the honest way to look at the bytes.
 
+**Re-confirmed on 2026-10-21, and this time as a script that refuses to
+lie.** The front door was down again (four attempts, ~21 seconds each, all
+"Failed to connect to github.com port 443"), so the API route was tried
+again -- but with the comparison built in as a *gate*, not a hope: every
+changed blob is uploaded and the SHA the API returns is compared with the
+one the local git already computed for that content; the tree is created
+and compared with the local tree SHA; the commit is created and compared
+with the local commit SHA. The ref is moved **only if all three match**.
+
+The result is a cleaner version of the same finding:
+
+```
+20 file(s) differ
+  have  AGENTS.md
+  upload host/channel_oracle.py (sha verified)
+  ... 18 more, every blob SHA verified
+api tree sha   d3cf6a9db66e39586bdcbe6c656eaf0d12d95814
+tree matches the local tree
+api commit sha 35564c3a8dbadf1b33b3f87943e2ee1176761a17
+COMMIT SHA MISMATCH: api=35564c3a... local=4da747cc... -- ref not touched
+```
+
+Every blob and the whole tree matched, and the commit still did not, and
+the reason is the same one as before, visible in the commit the API
+returned:
+
+```
+author    RiantR <RiantR@local> 2026-10-20T09:17:33Z     <- API: normalised to UTC
+author    RiantR <RiantR@local> 1792545453 +0800          <- local
+```
+
+So the API route is closed for this repository, now with a measurement
+rather than an argument. The script is worth keeping for the shape of it:
+**compare the SHAs at every level, and refuse the final step unless they
+all match.** A tool that reconstructs a commit and then hopes it is
+equivalent is the thing this rule exists to prevent.
+
+And the push itself, once the front door came back, was an ordinary
+`git push` -- the fifth attempt, with a growing backoff. No `--force`, no
+API, no divergent history: both remotes ended on the same commit, with
+`git ls-remote` reporting identical `refs/heads` and `refs/tags`.
+
 ---
 
 ## Loop #76: direct-tcpip -- the client half of a local port forward
@@ -5947,3 +5989,322 @@ user-key algorithm option was renamed in OpenSSH 8.5
 configuration and validates it with `sshd -t` on the binary that is
 actually going to run, and tries the next spelling if the server refuses
 this one. The gate then reports which spelling the server accepted.
+The authorized_keys path is listed in both spellings for the same reason --
+sshd tries each entry in turn, and a path one Windows build reads as a path
+the other does not would fail the whole gate with a rejection that says
+nothing about the path.
+
+### The generated vectors, and a check that could not pass
+
+Running the peer-gates tier for the first time in a while turned up a check
+that had never been able to pass, in two gates that are not in the CI tier
+(loop34 and loop35). Both of them regenerate their known-answer vectors and
+require the committed copy to be unchanged:
+
+    const gen = spawnSync('python', ['host/gen_userauth_vectors.py'], ...);
+    const diff = spawnSync('git', ['diff', '--stat', '--', 'cmd/userauth_test/vectors.mbt'], ...);
+    check('committed vectors still match the oracle', (diff.stdout || '').trim() === '', ...);
+
+The intent is right -- a hand-edited vector would otherwise turn the KAT into
+a tautology. The comparison is what could not work. The committed file has
+been through the formatter (the repository is formatter-clean; `moon fmt
+--check` over the whole tree is a gate), while the generator's output had
+not, and the two differ by exactly the formatter's line wrapping:
+
+    -      "sid0", "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    +      "sid0",
+    +      "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+
+Every constant in both files is identical -- only the layout differs -- so
+the check was comparing a formatted file with an unformatted one and
+reporting the difference as "the vectors are stale". Worse, the gate
+regenerates **in place**, so the unformatted copy was left in the working
+tree, and every later `git diff` in the repository was non-empty because of
+it.
+
+The fix is in the generator, because the generator is what is wrong: the
+file it writes is a source file in a formatter-clean repository, so it has
+to produce what the formatter produces. `host/gen_userauth_vectors.py` and
+`host/gen_channel_vectors.py` now run `moon fmt` on their own output
+before reporting it, and the header's "Regenerate with: ..." becomes true
+of the file's formatting as well as of its contents.
+
+Measured after the change:
+
+    python host/gen_userauth_vectors.py
+    wrote cmd\userauth_test\vectors.mbt (6 cases, 9798 bytes)
+    git diff --stat cmd/userauth_test/vectors.mbt   ->   (empty)
+
+    python host/gen_channel_vectors.py
+    wrote ...\cmd\channel_test\vectors.mbt (55332 bytes on disk, 9 session vectors)
+    git diff --stat cmd/channel_test/vectors.mbt    ->   (empty)
+
+The byte comparison the gate wanted now holds, and the working tree stays
+clean when the gate regenerates.
+
+One more pre-existing defect in the same area, found in the same run:
+`verify_loop31.mjs` read the error count out of `moon check`'s "N warnings,
+M errors" summary and treated the summary's **absence** as an error. A
+package whose check is already up to date prints "no work to do" instead, so
+a successfully checked package was reported as failing -- a false red that
+appears only on a machine with a warm build cache, and a green that appears
+on a fresh checkout. The exit status is the reliable signal in both cases;
+verify_loop32 and verify_loop33 already work that way, and this copy had not
+been brought along.
+
+## The peer tier, run again for the first time since Loop #50
+
+`ci/ci.py` keeps a measured list of gates that need something this repository
+cannot provide for itself -- a live SSH peer and/or a browser Worker:
+
+    PEER_GATES = frozenset("verify_loop%d.mjs" % n
+                            for n in (31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 49))
+
+They are excluded from the default tier **by design** (they take hours), which
+is exactly why they rot: between Loop #50 and this pass, six loops changed
+something every one of those gates depends on -- the host-key default (#50),
+the account the gates authenticate as (#76), the known-hosts store (#52/#54),
+the target-specific drivers (#63/#64/#68), and the formatter (#67). A gate
+that has not been run since the thing it measures changed is not a green
+gate. It is a gate that has not been run.
+
+Running them one at a time (never two at once -- they fight over ports and
+over the build directory) turned up six classes of defect. Not one of them was
+in the protocol.
+
+### A default changed underneath the gates
+
+Loop #50 made **refusing an unpinned host** the default. The gates in this
+tier were written before that and were never updated, so every one of them
+that opened a real server was turned away before it could be judged:
+
+    FAIL  result: ESTABLISHED
+          | result: FAILED
+          | error: HostkeyUnknown
+
+That is a failure about pinning, reported as a failure about the thing each
+gate exists to test. The fix is the same in every gate:
+
+    // native
+    const PIN_ARGS = ['--kh-tofu', '--kh-host', '127.0.0.1'];
+    // browser
+    kh_tofu: '1',
+    kh_host: '127.0.0.1',
+
+`--kh-tofu` is the explicit "accept this key" (`accept-new`). Nothing is
+written to disk: the write-back only happens when `--kh-file` is given, and
+these drivers are given neither, so the developer's own `known_hosts` is never
+touched.
+
+**A Windows shell has no empty-string argument.** The first version of this
+passed `--known-hosts-text ''` as well, because that is how the native driver's
+own doc describes "do not pin this time". `run()` hands its argument to a
+shell, and the shell delivers the two characters `''` -- a *non-empty*
+known_hosts text, which parses to zero entries, which the client refuses with
+"known_hosts parsed to nothing". A gate that quotes its own arguments wrongly
+fails in a way that reads like a client bug. Where an argument can be empty,
+the argument list travels as an argv array (`spawnSync`), not as a command
+string.
+
+### The account, again
+
+The same rule as the machine-path rule (Loop #69) applied to an account name:
+**derive it, never write it down**. `host/ssh_user.mjs` and `host/ssh_user.py`
+are the single source. loop32 and loop33 were not even passing a user -- they
+relied on `cmd/wt_ssh`'s built-in default, which is the literal `"hp"`.
+
+### A missing store backend, and a product bug it was hiding
+
+`cmd/wt_ssh` reads the known-hosts **store** on every connection when no
+`known_hosts` text was given (`cfg_kh_policy` calls `@khstore.load`). The
+browser harness only loaded the store's backend when a gate passed
+`khsShimUrl`, and **no gate did** -- so every browser run died with
+
+    TypeError: Cannot read properties of undefined (reading 'load')
+
+before it could say anything about SSH.
+
+The fix is in one place rather than in eleven: `host/wt/worker.js` now
+defaults the store's shim to the one that sits next to it. A gate that wants to
+measure "there is no store at all" passes an explicit empty string, which is a
+different thing from "I did not think about it".
+
+**And the product was wrong underneath.** `src/khstore` says, in its own
+comment, "**Never throw.** Every failure is a value." It meant that for a
+store that *fails*. It did not mean it for a store that is not *there*: the
+extern bodies went straight to `globalThis.__moonbit_khs`, so the first
+property access raised a TypeError -- synchronously, outside any promise
+chain. And `save` returned a hardcoded `true`, which made `cmd/wt_ssh`'s
+`tofu: NOT stored` line **unreachable**: a store that refused the write
+(private mode, quota, enterprise policy) was reported to the user as a store
+that took it, and the whole point of Loop #52's message was to say the
+difference.
+
+Both are fixed in the store, and the shim now resolves rather than rejects
+when IndexedDB refuses to open -- a refused write is an answer ("no"), not an
+exception. `verify_loop52.mjs` grew a fifth step for it: with the store
+removed, the connection must still succeed, and the client must say the pin
+was not stored.
+
+### A gate that could not fail
+
+`verify_loop31.mjs` decided whether a build had succeeded by looking for the
+string `error` in moon's output. moon says:
+
+    Error: failed to run build for target Js
+    Caused by:
+      Package 'openssh/openssh_moonbit/cmd/ssh_live' does not support target
+      backend 'js'. Supported backends: [native]
+
+Capital `E`. A case-sensitive search for `error` does not match it, so **a
+build that failed was reported as a build that succeeded** -- and the three
+checks below it then read `_build/wasm/.../cmd/ssh_live/ssh_live.wasm`, a file
+left over from before Loop #68 made the driver native-only. A stale artifact
+was being measured as if it were the current one.
+
+Since Loop #68 the honest expectation is inverted: `cmd/ssh_live` must be
+**refused** by js/wasm/wasm-gc, and the refusal has to name the backend. The
+property Loop #31 wanted to state -- "the browser path has no socket" -- is
+now measured where it is true, on the artifact that actually runs in a
+browser: `cmd/wt_ssh`'s js bundle must not contain `mb_tcp_connect` (the
+native entry point into `src/tcp/winsock.c`) and must contain `__moonbit_wt`
+(the byte-stream shim the browser side talks to).
+
+### Two mutation anchors that stopped matching
+
+`host/channel_mutations.py` and `host/sftp_mutations.py` keep the text they
+mutate as a literal anchor. Loop #67 ran `moon fmt` over the tree, and the
+formatter changed some of those literals -- a trailing comma after
+`{ ..st, window: w, }`, the `if` in `ChanState::report` split across four
+lines instead of one, `Int` becoming `Int32` in the SFTP constants, and the
+`put_type`/`put_u32i` pair split onto two lines. The harness counts an anchor
+that does not resolve as **not caught**:
+
+    SKIP  drop the window when no adjust is due -- anchor count {'exec.mbt': 0, 'channel.mbt': 0}
+    SKIP  make exit-status report 0 instead of the SSH 255 fallback -- anchor count {...}
+    FAIL all three window/id bugs turn the KAT red  14 caught, 2 missed
+
+So loop35, loop36 and loop39 were red, and the red pointed at the KAT instead
+of at the anchor. A mutation whose anchor has drifted is not a mutation at all
+-- and the harness's own rule ("an anchor that appears more than once is
+NOBUILD, not MISSED") is the same instinct: a mutation that proves nothing
+must not be counted as a verdict about the code.
+
+The anchors are now the text that is in the file, and the mutated text keeps
+the same shape, because a mutation that changes the layout as well as the
+behaviour would be measuring two things at once. All sixteen channel
+mutations and all thirty SFTP mutations turn the KAT red again.
+
+**The check that makes the drift visible is worth keeping:** before running
+the mutations, resolve every anchor and require it to match **exactly one**
+file, exactly once. That turns "the KAT is not sensitive" into "this text is
+no longer in the source", which is a different question with a different fix.
+
+### `moon fmt` only formats files that are inside a package
+
+This is a toolchain fact that cost an afternoon, and it explains three
+separate symptoms.
+
+`moon fmt <file>` exits 0, prints nothing, and changes **nothing** when the
+file does not belong to a package of the current module. It does not fail and
+it does not warn. So:
+
+  * `host/gen_sftp_vectors.py --out .loop40/whatever.mbt` produces an
+    **unformatted** file, while the same generator writing
+    `cmd/sftp_test/vectors.mbt` produces a formatted one. Loop #40 compared
+    those two byte for byte and could never pass: the difference was 1290
+    bytes of the formatter's line wrapping, and nothing about the vectors.
+  * The committed `cmd/sftp_test/vectors.mbt` carries a
+    `machine-path-exempt-file` block (the repository-wide convention from
+    Loop #69/#71: a file that legitimately contains a machine-specific
+    absolute path has to say so, and say why, *in the file*). The generator
+    overwrites the whole file, so that block has to be **emitted by the
+    generator** -- a hand-written header is lost the first time anybody
+    regenerates, and then Loop #71 flags the file and Loop #39's staleness
+    check can never pass either.
+  * A scratch file placed in a package directory under a `_`-prefixed name is
+    **not** ignored by the build: it produces a duplicate-declaration error.
+    (A subdirectory with its own `moon.pkg` *is* ignored by the parent
+    package -- but `moon fmt` will not touch it either.)
+
+So the rules that follow:
+
+  * a generator that writes a source file must write it **inside a package**,
+    so the formatter applies, and must run `moon fmt` on it afterwards;
+  * a gate that compares a committed file with a regenerated one must
+    regenerate **at the package's own path** and restore the original bytes
+    afterwards, rather than generating to a scratch path outside every
+    package. Loop #40 now does that, and restores in a `finally` -- a gate
+    that leaves a generated source file rewritten is a gate that can turn a
+    later run green.
+
+### A message that reads as a path, and a gate that names its exclusions
+
+The three vector generators now report a formatter failure like this:
+
+    sys.stderr.write("moon fmt failed on %s:\n%s\n%s\n" ...
+
+`host/verify_loop71.mjs` reads the `s:` followed by a backslash as drive `s`
+and the start of a path -- so a message that contains **no path at all** was
+reported as a machine claim:
+
+    FAIL  no tracked file asserts a machine-specific absolute path
+          host/gen_channel_vectors.py:45  s:\n%s\n%s\n   (1 hit(s))
+
+The gate is right to be strict, and this repository's habit is that **code
+adapts to the linter, not the other way round** -- a gate that quietly skips
+files is how a gate quietly stops working. So the message changed ("moon fmt
+failed on the file %s\n...") and the detector was left alone.
+
+The same pass found a second thing, and it is the more interesting one.
+`host/gen_sftp_vectors.py` has to *emit* the `machine-path-exempt-file` header
+that the generated vectors need (the captured bytes name the machine that
+recorded them). The gate's whole-file form matches that marker **anywhere in
+a file**, including inside a string literal -- so the generator inherited the
+exemption by accident, invisibly, and a future machine path added to the
+generator would not have been caught.
+
+An accident is not an entry. It is now a named entry in the gate's own
+`SELF_EXCLUDED` list, with the reason attached, and the reason is the one
+that has to keep being true: the generator's exemption is for the marker text
+it *emits*, and it contains no machine path of its own.
+
+### What the peer tier looks like now
+
+Measured on this machine, one gate at a time:
+
+| gate | before | after |
+|---|---|---|
+| loop31 | 26/40 | 40/40 |
+| loop32 | 48/54 | 54/54 |
+| loop33 | 25/35 | 35/35 |
+| loop34 | 38/44 | 50/50 |
+| loop35 | 38/39 | 39/39 |
+| loop36 | 37/39 | 39/39 |
+| loop37 | 51/52 | 52/52 |
+| loop38 | 32/33 | 33/33 |
+| loop39 | 37/44 | 44/44 |
+| loop40 | 41/42 | 42/42 |
+| loop49 | 10/11 | 11/11 |
+| loop52 | 9/9 | 10/10 (step 5 added) |
+
+The rule this adds: **a gate that has not been run since the thing it
+measures changed is not a green gate.** The peer tier is excluded from CI for
+a reason -- it needs a live peer and a browser -- but "excluded" and "never
+run again" are different states, and only one of them is a decision.
+
+**Run them one at a time.** The peer gates fight over ports and over the build
+directory, and running two of them at once made one of them fourteen times
+slower and produced six node crashes that looked like gate failures. That is
+the same rule as the mutations tier running in a throwaway worktree, for the
+same reason.
+
+**The nested regression chains are exponential.** loop39's regression section
+runs loop31..loop38, and each of *those* has a regression section of its own.
+It terminates, and it is the reason a single peer gate can take an hour --
+which is also why the batch that was supposed to run three gates hit the
+one-hour ceiling in the middle of loop40's chain. `verify_loop40.mjs` has a
+`--skip-regression` flag for exactly this: the chain was already run gate by
+gate, and re-running it inside every gate is what turns "slow" into "cannot
+finish".
+

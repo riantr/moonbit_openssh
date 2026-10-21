@@ -54,6 +54,7 @@ import {
   sleep,
   wtCfg,
 } from "./wt_browser.mjs";
+import { sshUser } from "./ssh_user.mjs";
 
 let chromium = null;
 try {
@@ -175,7 +176,7 @@ async function runNative(port) {
   // self-consistent key -- which makes the forgery harder to stop, not easier:
   // with pinning effectively disabled, the only thing left between a forged
   // signature and a credential is signature verification itself.
-  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", "hp", "--kh-tofu", "--kh-host", "127.0.0.1"], {
+  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", sshUser(), "--kh-tofu", "--kh-host", "127.0.0.1"], {
     cwd: root,
     encoding: "utf-8",
     errors: "replace",
@@ -213,7 +214,7 @@ async function startBridge(tcpPort) {
 
 async function runWorker_(browser, httpPort, wsPort, tag) {
   const base = `http://127.0.0.1:${httpPort}`;
-  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", kh_tofu: "1", kh_host: "127.0.0.1" });
+  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: sshUser(), auth: "1", kh_tofu: "1", kh_host: "127.0.0.1" });
   const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {

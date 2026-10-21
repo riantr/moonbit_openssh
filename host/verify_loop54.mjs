@@ -37,6 +37,7 @@ import net from "node:net";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sshUser } from './ssh_user.mjs';
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = join(root, ".loop54");
@@ -104,7 +105,7 @@ async function stopMitm(m) {
 }
 
 function run(port, args) {
-  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", "hp", ...args], {
+  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", sshUser(), ...args], {
     cwd: root,
     encoding: "utf-8",
     errors: "replace",

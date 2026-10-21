@@ -67,6 +67,7 @@ import {
   sleep,
   wtCfg,
 } from "./wt_browser.mjs";
+import { sshUser } from "./ssh_user.mjs";
 
 let chromium = null;
 try {
@@ -138,7 +139,7 @@ function readJson(file) {
 }
 
 async function runNative(port, args) {
-  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", "hp", ...args], {
+  const r = spawnSync(SSH_LIVE, [String(port), "--auth", "--user", sshUser(), ...args], {
     cwd: root, encoding: "utf-8", errors: "replace", maxBuffer: 64 * 1024 * 1024, timeout: 90000,
   });
   return classify(`${r.stdout || ""}${r.stderr || ""}`);
@@ -166,7 +167,7 @@ async function startBridge(tcpPort) {
 
 async function runWorkerAuth(browser, httpPort, wsPort, tag, extraCfg) {
   const base = `http://127.0.0.1:${httpPort}`;
-  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: "hp", auth: "1", ...extraCfg });
+  const cfg = wtCfg(base, httpPort, wsPort, { nonce: tag, user: sshUser(), auth: "1", ...extraCfg });
   const { page, state } = await openPage(browser, httpPort, { freshStorage: true });
   let out;
   try {

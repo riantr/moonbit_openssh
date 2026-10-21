@@ -52,6 +52,21 @@ const SSHD_PORT = 22269;
 // authentication rejection. See host/ssh_user.mjs.
 const USER = sshUser();
 
+// The host key pin, for both drivers.
+//
+// Loop #50 made REFUSING an unpinned host the default, so a client that
+// reaches a real server without a pin is turned away before it can
+// authenticate. The gates in this tier were written before that default
+// existed and were never updated, so every one of them has been failing
+// with `HostkeyUnknown` since -- a failure about pinning, reported as a
+// failure about the thing each gate is here to test.
+//
+// `--known-hosts-text ''` is the explicit "do not pin this time": the key is
+// accepted, nothing is stored, and the developer's own known_hosts is never
+// touched. The browser side says the same thing with `kh_tofu`, and keeps
+// its pin in the IndexedDB store the Worker owns.
+const PIN_ARGS = ['--kh-tofu', '--kh-host', '127.0.0.1', '--known-hosts-text', ''];
+
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
 function serve(root, port) {
@@ -165,7 +180,7 @@ const CASES = [
 
 function nativeArgs(c, port) {
   const a = ['run', 'cmd/ssh_live', '--target', 'native', '--',
-    '--port', String(port), '--user', USER,
+    '--port', String(port), '--user', USER, ...PIN_ARGS,
     '--shell', c.command, '--cols', String(c.cols), '--rows', String(c.rows)];
   if (c.resize) a.push('--resize', c.resize);
   return a;
@@ -328,6 +343,11 @@ async function main() {
       nonce: 'loop36',
       shell: c.command,
       user: USER,
+      // Loop #50: the same default, on the browser side. The Worker
+      // has to be told to accept a key explicitly, exactly like the native
+      // driver above.
+      kh_tofu: '1',
+      kh_host: '127.0.0.1',
       cols: String(c.cols),
       rows: String(c.rows),
     };

@@ -229,6 +229,12 @@ def main() -> int:
     ap.add_argument("--proxy-port", type=int, default=22223)
     ap.add_argument("--exe", default="_build/native/debug/build/cmd/ssh_live/ssh_live.exe")
     ap.add_argument("--moonbit-h", default="", help="expected H hex from the client")
+    ap.add_argument(
+        "--client-arg",
+        action="append",
+        default=[],
+        help="extra argument passed to the client (repeatable)",
+    )
     args = ap.parse_args()
 
     # Ordering matters and is not interchangeable:
@@ -240,7 +246,7 @@ def main() -> int:
     # that is started before the client exists.
     listener = make_listener(args.proxy_port)
     proc = subprocess.Popen(
-        [args.exe, str(args.proxy_port)],
+        [args.exe, str(args.proxy_port), *args.client_arg],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
