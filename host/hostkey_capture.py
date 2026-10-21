@@ -31,6 +31,8 @@ import sys
 
 import paramiko
 
+from ssh_user import ssh_user
+
 CAP = {}
 _orig_verify = paramiko.Transport._verify_key
 _orig_setkh = paramiko.Transport._set_K_H
@@ -73,7 +75,11 @@ def capture(port, only=None, timeout=15):
         t.start_client(timeout=timeout)
         key = t.get_remote_server_key()
         try:
-            t.auth_none("hp")
+            # The account this machine runs as. `auth_none` is expected to
+            # fail -- the point is to make the server log the handshake -- but
+            # it still has to NAME an account that exists here, or the server
+            # rejects the connection before the host key is even logged.
+            t.auth_none(ssh_user())
         except Exception:
             pass
         t.close()

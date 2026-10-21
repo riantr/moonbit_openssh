@@ -42,6 +42,7 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sshUser } from './ssh_user.mjs';
 import { chromium } from 'playwright';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,7 +55,14 @@ const WS_PORT = 8780;
 // failure points at a specific algorithm instead of at "the sshd".
 const BASE_PORT = 22275;
 
-const USER = 'hp';
+// The account this gate authenticates as: the one this machine runs as.
+//
+// Writing one developer's account name here made every gate that opens a real
+// OpenSSH server pass on that machine and fail on every other one -- and the
+// failure looked like a protocol bug, because the server's answer to a
+// public key it does not accept is "no", and the client reports that as an
+// authentication rejection. See host/ssh_user.mjs.
+const USER = sshUser();
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
 // The algorithms the client advertises, in the order it advertises them.

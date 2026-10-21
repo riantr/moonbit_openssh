@@ -17,6 +17,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 import paramiko
 
+from ssh_user import ssh_user
+
 # RFC 6979 A.2.5 的 P-256 私钥
 D_HEX = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"
 
@@ -39,7 +41,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=22259)
-    ap.add_argument("--user", default="hp")
+    ap.add_argument("--user", default=ssh_user())
     args = ap.parse_args()
 
     captured = {}

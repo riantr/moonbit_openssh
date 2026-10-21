@@ -46,9 +46,14 @@ import paramiko
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 
-# The user key this repo has used since Loop #34.
+from ssh_user import ssh_user
+
+# The user key this repo has used since Loop #34. The ACCOUNT is not a
+# constant: it is the account this machine runs as, because the test sshd runs
+# here and an account that does not exist here cannot authenticate. See
+# host/ssh_user.py.
 D_HEX = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"
-USER = "hp"
+USER = ssh_user()
 
 SFTP_VERSION = 3
 

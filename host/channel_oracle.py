@@ -32,6 +32,12 @@ import struct
 import sys
 from collections import OrderedDict
 
+# This file is imported as a module by host/gen_channel_vectors.py, so the
+# sibling import below has to be reachable from wherever that runs.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from ssh_user import ssh_user  # noqa: E402
+
 # --------------------------------------------------------------------------
 # Constants, straight out of the C
 # --------------------------------------------------------------------------
@@ -1765,7 +1771,7 @@ def main():
     ap.add_argument("--capture", action="store_true",
                     help="also cross-check against a live paramiko session")
     ap.add_argument("--port", type=int, default=22263)
-    ap.add_argument("--user", default="hp")
+    ap.add_argument("--user", default=ssh_user())
     ap.add_argument("--key", default=None, help="test private key hex")
     args = ap.parse_args()
 

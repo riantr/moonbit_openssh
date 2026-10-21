@@ -5835,14 +5835,15 @@ driver.
 
 ### The gate
 
-`host/verify_loop76.mjs`, 35 checks. Two of them need an OpenSSH **server**,
+`host/verify_loop76.mjs`, 41 checks. Two of them need an OpenSSH **server**,
 and no gate in the default CI tier has ever needed one -- every gate that
 does is in the peer-gates tier, which CI does not run -- so whether the
-runner has an `sshd` at all is unproven. The gate therefore runs the
-paramiko comparison everywhere, and **skips loudly** the parts that need a
-server when there is none. A machine that cannot run a check has not run
-it, and saying otherwise is the failure this repository keeps having to
-undo.
+runner has an `sshd` at all was unproven until the first CI run of this
+gate answered it (it does, and the answer is in the next section). The
+gate therefore runs the paramiko comparison everywhere, and **skips
+loudly** the parts that need a server when there is none. A machine that
+cannot run a check has not run it, and saying otherwise is the failure
+this repository keeps having to undo.
 
 `host/loop76_mutations.py`: six mutations, all CAUGHT. The one worth
 naming is M4 -- making `FORWARD_NO_DATA` report as a success -- because that
@@ -5858,3 +5859,91 @@ end to end: the target says what it got, the client says what it got back,
 and the two digests have to match. The maximum-packet clamp is only
 exercised by a payload larger than one packet, which is why that case
 exists.
+
+### The gate that was green on one machine
+
+The first GitHub Actions run of this gate (39377509698) failed at 17 of 34
+checks, and every failure had the same shape: the client could not
+authenticate.
+
+    FAIL  the forward runs  -- result: FORWARD_FAILED
+    FAIL  the paramiko oracle runs  -- AuthenticationException: Authentication failed.
+
+Two different implementations, the same server, the same key, the same
+rejection. The cause was not in the forwarding code at all. The gate asked
+for a **user** -- and it asked for one specific developer's account:
+
+    [String(port), "--kh-tofu", "--kh-host", "127.0.0.1", "--user", "hp", ...extra]
+
+GitHub Actions runs as `runneradmin`. There is no `hp` account on that
+machine, so the server had no account to authenticate and said no. The
+client reports that as `AuthRejected`, and the gate's red box pointed at
+the forwarding code.
+
+Three things are worth keeping from this.
+
+**The machine is not the repository.** This is the same rule as the
+machine-path rule Loop #69 wrote `host/verify_loop71.mjs` for, applied to
+an account name instead of a path, and it needed the same treatment: the
+account is DERIVED, never written down. `host/ssh_user.mjs` and
+`host/ssh_user.py` are the single source of it -- `USERNAME`/`USER`/
+`LOGNAME`, then `os.userInfo()` / `getpass.getuser()`. Every gate that
+opens a real OpenSSH server (loop34 to loop40, and this one) and every
+tool that connects to one (`sftp_capture.py`, `sftp_write_capture.py`,
+`forward_oracle.py`, `channel_oracle.py`, `paramiko_blob_capture.py`,
+`pubkey_probe.py`, `hostkey_capture.py`) now names the account this
+machine runs as.
+
+**A gate that fails has to say why.** The client's word for "the server
+said no" is `AuthRejected`, which says nothing about *why*. The reason was
+in the server's log, one layer down:
+
+    Accepted publickey for <user> from 127.0.0.1 port 56134 ssh2: ECDSA SHA256:hfuNWmjIYvsBGZ6dpCLTTAEa5LxbZABRHHVoynAxFlo
+
+So the gate now prints the server's own account of it -- the userauth and
+publickey lines -- whenever a forward or the oracle does not complete. A
+red gate that names the reason is a measurement; a red gate that says
+"AuthRejected" is a rumour. Two of the checks added here are about that
+too: the `authorized_keys` file is read back and parsed (key type, curve
+name, and an uncompressed P-256 point, not merely "the writer exited 0"),
+and the server's own configuration is checked for accepting that key type.
+The client signs with one type, the file offers one, and the server allows
+one; when they disagree the server says "no" and the reason is invisible
+from the client's side.
+
+**A green that yesterday's file can satisfy is not a green.** The oracle
+writes its result to `.loop76/oracle.json`. When the oracle failed on one
+run, the file from the PREVIOUS run was still there, and the two checks
+that read it -- "the oracle transferred the same number of bytes" and "the
+oracle's bytes have the same digest as ours" -- passed on it. The gate
+now deletes the file before the oracle runs, and the oracle records the
+server and the target it was pointed at, so a result from another run is
+visible instead of being read as a fresh one.
+
+One more measurement, made while testing the fix with a second account on
+this machine (`USERNAME=Administrator`): the server accepted the public key
+for that account --
+
+    Accepted publickey for Administrator from 127.0.0.1 port 56134 ssh2: ECDSA SHA256:hfuNWmjIYvsBGZ6dpCLTTAEa5LxbZABRHHVoynAxFlo
+
+-- and then could not start the session:
+
+    fork of unprivileged child failed
+
+That is a property of Win32-OpenSSH running as a plain process rather than
+as a service: it can only create a session child for the account it itself
+runs as. It is not a client defect, and it does not arise on CI, where the
+server and the account are the same `runneradmin`. It is recorded here
+because it is the reason a cross-account test cannot be run to the end on
+a developer machine, and the honest form of that is "authentication is
+proved, session creation is not testable here" rather than a claim that
+the whole thing works.
+
+The configuration was made version-robust in the same pass, because the
+runner's server is the inbox one (9.x) and this machine's is 8.0p1. The
+user-key algorithm option was renamed in OpenSSH 8.5
+(`PubkeyAcceptedKeyTypes` became `PubkeyAcceptedAlgorithms`), so
+`host/sshd_setup.mjs` no longer guesses a spelling: it writes a candidate
+configuration and validates it with `sshd -t` on the binary that is
+actually going to run, and tries the next spelling if the server refuses
+this one. The gate then reports which spelling the server accepted.

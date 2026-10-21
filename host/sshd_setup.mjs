@@ -235,68 +235,118 @@ if (KEYS_ONLY) {
 const authKeys = join(DIR, 'authorized_keys');
 if (!existsSync(authKeys)) writeFileSync(authKeys, '');
 
+// The same path, spelled two ways.
+//
+// `AuthorizedKeysFile` takes a SPACE-SEPARATED LIST, and the server tries each
+// in turn until one of them holds the key. Both spellings of the same path
+// are listed because the spelling is a platform detail nobody here can check
+// for the server that CI runs: this machine's Win32-OpenSSH is 8.0p1 and the
+// runner's inbox one is 9.x, and a path that one of them reads as a path the
+// other does not would fail the whole gate with a rejection that says
+// "AuthRejected" and nothing about the path.
+//
+// Listing both costs one line and cannot change the result when the first
+// spelling works, which is the case on this machine.
+const authKeysSlashed = authKeys.replace(/\\/g, '/');
+
 const conf = join(DIR, tagged('sshd_config'));
-writeFileSync(conf, [
-  `Port ${PORT}`,
-  'AddressFamily any',
-  'ListenAddress 127.0.0.1',
-  ...KEYS.map(([_type, _bits, name]) => `HostKey ${join(DIR, name)}`),
-  `PidFile ${join(DIR, tagged('sshd.pid'))}`,
-  `LogLevel DEBUG3`,
-  `Subsystem sftp internal-sftp`,
 
-  // Deterministic negotiation surface. Note the option name: 8.0p1 predates
-  // the PubkeyAcceptedAlgorithms rename and only knows the KeyTypes spelling.
-  'KexAlgorithms diffie-hellman-group14-sha256',
-  // Loop #38: no HostKeyAlgorithms pin by default. Pinning it to ECDSA is what
-  // hid the fact that the client could not talk to anything else -- the
-  // server said "no matching host key type found" and the client said
-  // "NoAgreement", which reads like a cipher problem and is not one.
-  // `--hostkey-algs` re-enables the pin for one instance at a time so each
-  // algorithm can be forced in turn and proved independently.
-  ...(HOSTKEY_ALGS ? [`HostKeyAlgorithms ${HOSTKEY_ALGS}`] : []),
-  //
-  // `PubkeyAcceptedKeyTypes` (the 8.0p1 spelling of the user key algorithm)
-  // stays pinned: that one really is a test-harness decision, not a
-  // client limitation -- the client signs with ECDSA P-256.
-  'PubkeyAcceptedKeyTypes ecdsa-sha2-nistp256,ecdsa-sha2-nistp384',
-  'Ciphers aes128-ctr,aes256-ctr',
-  'MACs hmac-sha2-256',
+// The user-key algorithm option was renamed in OpenSSH 8.5:
+// `PubkeyAcceptedKeyTypes` became `PubkeyAcceptedAlgorithms`, with the old
+// spelling kept as a deprecated alias. Writing the old one works on 8.0p1
+// (this repository's original build) and, being deprecated rather than
+// removed, on 9.x as well -- but "deprecated" is a claim about a version
+// nobody here has measured.
+//
+// So the spelling is not guessed: a candidate configuration is written and
+// validated with the server binary that is actually going to run, and the next
+// spelling is tried if the server refuses this one. The measurement is the
+// server's own `sshd -t` -- the same command that would otherwise fail later
+// and much less legibly.
+//
+// The order only affects speed: the old spelling first, because that is the
+// one the 8.0p1 build understands.
+const KEY_ALGS = 'ecdsa-sha2-nistp256,ecdsa-sha2-nistp384';
+const KEY_ALG_SPELLINGS = [
+  `PubkeyAcceptedKeyTypes ${KEY_ALGS}`,
+  `PubkeyAcceptedAlgorithms ${KEY_ALGS}`,
+];
 
-  // Loop #76: forwarding is on by default (as in a normal sshd). `--no-forward`
-  // turns it off so a gate can see the server's *synchronous* refusal.
-  ...(NO_FORWARD ? ['AllowTcpForwarding no'] : []),
+function configLines(keyAlgLine) {
+  return [
+    `Port ${PORT}`,
+    'AddressFamily any',
+    'ListenAddress 127.0.0.1',
+    ...KEYS.map(([_type, _bits, name]) => `HostKey ${join(DIR, name)}`),
+    `PidFile ${join(DIR, tagged('sshd.pid'))}`,
+    `LogLevel DEBUG3`,
+    `Subsystem sftp internal-sftp`,
 
-  // Auth surface for an automated test.
-  'PubkeyAuthentication yes',
-  'PasswordAuthentication yes',
-  'PermitEmptyPasswords yes',
-  'KbdInteractiveAuthentication no',
-  'StrictModes no',
-  `AuthorizedKeysFile ${authKeys}`,
-  'PermitRootLogin yes',
-  'MaxStartups 10:30:60',
+    // Deterministic negotiation surface.
+    'KexAlgorithms diffie-hellman-group14-sha256',
+    // Loop #38: no HostKeyAlgorithms pin by default. Pinning it to ECDSA is what
+    // hid the fact that the client could not talk to anything else -- the
+    // server said "no matching host key type found" and the client said
+    // "NoAgreement", which reads like a cipher problem and is not one.
+    // `--hostkey-algs` re-enables the pin for one instance at a time so each
+    // algorithm can be forced in turn and proved independently.
+    ...(HOSTKEY_ALGS ? [`HostKeyAlgorithms ${HOSTKEY_ALGS}`] : []),
+    //
+    // The user key algorithm stays pinned: that one really is a test-harness
+    // decision, not a client limitation -- the client signs with ECDSA
+    // P-256. Which SPELLING of the option goes in here is decided by the
+    // probe below, not by this comment.
+    keyAlgLine,
+    'Ciphers aes128-ctr,aes256-ctr',
+    'MACs hmac-sha2-256',
 
-  // Loop #37. `AcceptEnv` is empty by default, so a `env` request is silently
-  // dropped and there is no wire-level evidence either way (RFC 4254 6.4: no
-  // response).  Naming one variable gives the test the only honest oracle:
-  // the remote command can look at its own environment and report whether the
-  // request arrived.  Two variables is deliberate -- the second name is *not*
-  // here, so the same run also covers the refusal branch.
-  'AcceptEnv LOOP37_TEST LOOP37_SECOND',
-  '',
-].join('\n'));
+    // Loop #76: forwarding is on by default (as in a normal sshd). `--no-forward`
+    // turns it off so a gate can see the server's *synchronous* refusal.
+    ...(NO_FORWARD ? ['AllowTcpForwarding no'] : []),
+
+    // Auth surface for an automated test.
+    'PubkeyAuthentication yes',
+    'PasswordAuthentication yes',
+    'PermitEmptyPasswords yes',
+    'KbdInteractiveAuthentication no',
+    'StrictModes no',
+    `AuthorizedKeysFile ${authKeys} ${authKeysSlashed}`,
+    'PermitRootLogin yes',
+    'MaxStartups 10:30:60',
+
+    // Loop #37. `AcceptEnv` is empty by default, so an `env` request is silently
+    // dropped and there is no wire-level evidence either way (RFC 4254 6.4: no
+    // response).  Naming one variable gives the test the only honest oracle:
+    // the remote command can look at its own environment and report whether the
+    // request arrived.  Two variables is deliberate -- the second name is *not*
+    // here, so the same run also covers the refusal branch.
+    'AcceptEnv LOOP37_TEST LOOP37_SECOND',
+    '',
+  ].join('\n');
+}
 
 // Validate before launching, so a bad option fails loudly here and not as a
-// mysterious connection reset later.
-try {
-  sh(SSHD_BIN, ['-t', '-f', conf]);
-  console.log('sshd_config OK');
-} catch (e) {
+// mysterious connection reset later. The spelling probe is part of that
+// validation: if every candidate is refused, the last error is reported.
+let lastError = null;
+let chosen = null;
+for (const spelling of KEY_ALG_SPELLINGS) {
+  writeFileSync(conf, configLines(spelling));
+  try {
+    sh(SSHD_BIN, ['-t', '-f', conf]);
+    chosen = spelling;
+    break;
+  } catch (e) {
+    lastError = e;
+  }
+}
+if (chosen === null) {
   console.error('sshd_config INVALID');
-  console.error(e.stderr?.toString() || e.stdout?.toString() || e.message);
+  console.error(lastError?.stderr?.toString() || lastError?.stdout?.toString() || lastError?.message);
+  console.error(`tried: ${KEY_ALG_SPELLINGS.join(' / ')}`);
   process.exit(1);
 }
+console.log(`sshd_config OK (${chosen.split(' ')[0]})`);
 
 const logPath = join(DIR, tagged('sshd.log'));
 const logFd = openSync(logPath, 'a');

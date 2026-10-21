@@ -65,9 +65,20 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { sshUser, sshUserInfo } from "./ssh_user.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = path.join(ROOT, ".loop76");
+
+// The account this gate authenticates as.
+//
+// Loop #76 wrote `hp` here -- one developer's account name -- and GitHub
+// Actions, where the account is `runneradmin`, answered every live-server
+// section with an authentication rejection that had nothing to do with the
+// forwarding code under test. The name is derived from the machine now; see
+// host/ssh_user.mjs for why, and for the same rule applied to paths.
+const USER_INFO = sshUserInfo();
+const USER = USER_INFO.name;
 
 let failures = 0;
 let checks = 0;
@@ -165,7 +176,7 @@ async function waitForEcho(child, bytes, timeoutMs = 15000) {
 function runClient(port, extra) {
   const r = spawnSync(
     path.join(ROOT, "_build", "native", "debug", "build", "cmd", "ssh_live", "ssh_live.exe"),
-    [String(port), "--kh-tofu", "--kh-host", "127.0.0.1", "--user", "hp", ...extra],
+    [String(port), "--kh-tofu", "--kh-host", "127.0.0.1", "--user", USER, ...extra],
     { cwd: ROOT, encoding: "utf8", errors: "replace", maxBuffer: 64 * 1024 * 1024, timeout: 90000 },
   );
   return { code: r.status, text: `${r.stdout || ""}${r.stderr || ""}` };
@@ -201,6 +212,77 @@ function readSshdLog(name) {
     return readFileSync(sshdLog(name), "utf8");
   } catch (e) {
     return "";
+  }
+}
+
+// The server's own account of WHY an authentication failed.
+//
+// A gate that fails has to say why. "AuthRejected" is the client's word for
+// "the server said no", and when the reason is that the account does not
+// exist on this machine, that is the whole of the information: the real
+// reason was in the sshd log, one layer down, and the layer in between said
+// nothing about it. This is what Loop #76's first CI run looked like -- a
+// red gate whose message pointed at the forwarding code and was really about
+// a username.
+function authLogLines(name, limit = 20) {
+  return readSshdLog(name)
+    .split(/\r?\n/)
+    .filter((l) =>
+      /userauth|publickey|authorized_keys|invalid user|not allowed|Accepted|Failed|refused|error/i.test(l))
+    .slice(-limit);
+}
+
+function explainAuthFailure(name) {
+  const lines = authLogLines(name);
+  if (!lines.length) {
+    console.log("      (the server's log said nothing about the authentication)");
+    return;
+  }
+  console.log("      the server's own account of it:");
+  for (const l of lines) console.log(`        ${l}`);
+}
+
+// Comments explaining a bug necessarily contain the bug's text, so a source
+// scan has to take them out before it looks for anything.
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+// The authorized_keys file, read back and parsed.
+//
+// "the writer exited 0" says the writer ran. It does not say the file holds a
+// key the server will accept: the key type, the curve name and the point
+// encoding all have to be right, and each of them has been wrong in this
+// repository before. And the server's own configuration has to accept that
+// type -- the client signs with one, the file offers one, and the server
+// allows one; when they disagree the server says "no" and the reason is
+// invisible from the client's side.
+function readAuthorizedKeys() {
+  try {
+    return readFileSync(path.join(ROOT, ".loop31", "sshd", "authorized_keys"), "utf8").trim();
+  } catch (e) {
+    return "";
+  }
+}
+
+function parseAuthorizedKey(line) {
+  const parts = line.split(/\s+/);
+  if (parts.length < 2) return null;
+  const blob = Buffer.from(parts[1], "base64");
+  try {
+    const ktLen = blob.readUInt32BE(0);
+    const keyType = blob.slice(4, 4 + ktLen).toString("ascii");
+    const cnOff = 4 + ktLen;
+    const cnLen = blob.readUInt32BE(cnOff);
+    const curve = blob.slice(cnOff + 4, cnOff + 4 + cnLen).toString("ascii");
+    const qOff = cnOff + 4 + cnLen;
+    const qLen = blob.readUInt32BE(qOff);
+    const point = blob.slice(qOff + 4, qOff + 4 + qLen);
+    return { keyType, curve, point };
+  } catch (e) {
+    return null;
   }
 }
 
@@ -264,6 +346,43 @@ async function main() {
   ok("the test key is in authorized_keys", keys.status === 0,
      (keys.stdout || keys.stderr || "").trim().split("\n")[0]);
 
+  // Three places that have to agree before a public key can be accepted: the
+  // type the client signs with, the type the file offers, and the type the
+  // server allows. The first CI run disagreed in all of them -- not in the
+  // types, but in the ACCOUNT -- and the disagreement was invisible from the
+  // client's side.
+  const ak = parseAuthorizedKey(readAuthorizedKeys());
+  ok("the authorized_keys file holds a key of the type the client signs with",
+     !!ak && ak.keyType === "ecdsa-sha2-nistp256",
+     ak ? `key_type=${ak.keyType} curve=${ak.curve}` : "no key could be parsed out of authorized_keys");
+  ok("the authorized_keys point is a well-formed uncompressed P-256 point",
+     !!ak && ak.curve === "nistp256" && ak.point.length === 65 && ak.point[0] === 0x04,
+     ak ? `curve=${ak.curve} point_len=${ak.point.length} tag=0x${ak.point[0].toString(16)}` : "no key");
+  const conf76 = readFileSync(path.join(ROOT, ".loop31", "sshd", "sshd_config_loop76"), "utf8");
+  ok("the server accepts the key type the client signs with",
+     /PubkeyAcceptedKeyTypes\s+[^\r\n]*ecdsa-sha2-nistp256/.test(conf76) ||
+     /PubkeyAcceptedAlgorithms\s+[^\r\n]*ecdsa-sha2-nistp256/.test(conf76),
+     "the server's user-key algorithm list does not include ecdsa-sha2-nistp256");
+  // The server has to be pointed at the file the gate actually wrote. A
+  // path that the server reads as something else fails the whole gate with
+  // an authentication rejection that says nothing about the path.
+  ok("the server is pointed at the authorized_keys file this gate wrote",
+     conf76.includes(path.join(ROOT, ".loop31", "sshd", "authorized_keys")),
+     "the server's AuthorizedKeysFile does not mention the file the gate wrote");
+
+  // The account itself. Two assertions, because they catch different mistakes:
+  // the first catches a gate that asks for an account this machine does not
+  // have, and the second catches one that asks for a DIFFERENT account than the
+  // one it is running as -- including the mistake this gate used to make, on
+  // the very machine where that mistake cannot be seen.
+  ok("the gate authenticates as the account this machine runs as",
+     USER === (process.env.USERNAME || process.env.USER || process.env.LOGNAME || USER),
+     `user=${USER} (${USER_INFO.source})`);
+  const ownSource = stripComments(readFileSync(path.join(ROOT, "host", "verify_loop76.mjs"), "utf8"));
+  const quoted = new RegExp(`['"]${USER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}['"]`);
+  ok("this gate does not name an account of its own", !quoted.test(ownSource),
+     `the account name appears as a literal in this file, so the gate only works on one machine`);
+
   const echoPort = await freePort();
   const echo = tap(spawn("node", ["host/echo_server.mjs", String(echoPort)], {
     cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
@@ -276,6 +395,14 @@ async function main() {
   const fwd = runClient(sshdPort, ["--forward", `127.0.0.1:${echoPort}`, "--stdin-text", payload]);
   ok("the forward runs", fwd.text.includes("result: FORWARD_DONE"),
      (fwd.text.match(/^result: .*$/m) || ["no result line"])[0]);
+  if (!fwd.text.includes("result: FORWARD_DONE")) {
+    // The client's "AuthRejected" does not say WHY the server said no. The
+    // server's log does, and without this the first CI run of this gate
+    // reported a red box that pointed at the forwarding code and was really
+    // about a username.
+    console.log("      (the forward did not complete -- the server's own log says why)");
+    explainAuthFailure("loop76");
+  }
   ok("every byte came back", numOf(fwd.text, "stdout_len") === payload.length,
      `stdout_len=${numOf(fwd.text, "stdout_len")} want=${payload.length}`);
   ok("the bytes are the same bytes", lineOf(fwd.text, "stdout_sha256") === payloadSha.toUpperCase(),
@@ -336,14 +463,31 @@ async function main() {
   section("E. paramiko does the same transfer and gets the same bytes");
   writeFileSync(path.join(WORK, "payload.bin"), payload, "utf8");
   const oracleOut = path.join(WORK, "oracle.json");
+  // Delete it first. The oracle writes its result here, and a file left over
+  // from an earlier run is a green that measures nothing: when the oracle
+  // failed on this run, the previous run's file was still there, and the
+  // checks below -- "the oracle transferred the same number of bytes", "the
+  // oracle's bytes have the same digest as ours" -- passed on it. A gate that
+  // can be satisfied by yesterday's output is not a gate.
+  rmSync(oracleOut, { force: true });
   const or = spawnSync("cmd", ["/c", "python", "host/forward_oracle.py",
-    "--port", String(sshdPort), "--dest-host", "127.0.0.1", "--dest-port", String(echoPort),
+    "--port", String(sshdPort), "--user", USER,
+    "--dest-host", "127.0.0.1", "--dest-port", String(echoPort),
     "--payload-file", ".loop76/payload.bin", "--out-json", ".loop76/oracle.json"], {
     cwd: ROOT, encoding: "utf8", errors: "replace", timeout: 90000,
   });
   ok("the paramiko oracle runs", or.status === 0, (or.stderr || "").trim().split("\n").slice(-2).join(" | "));
+  if (or.status !== 0) {
+    console.log("      (the oracle could not authenticate -- the server's own log says why)");
+    explainAuthFailure("loop76");
+  }
   let oracle = null;
   try { oracle = JSON.parse(readFileSync(oracleOut, "utf8")); } catch (e) { oracle = null; }
+  // Freshness, read out of the file itself: the oracle records the server and
+  // the target it was pointed at, so a result from another run is visible.
+  ok("the oracle's result is from THIS run",
+     !!oracle && oracle.port === sshdPort && oracle.dest_port === echoPort,
+     oracle ? `port=${oracle.port} dest_port=${oracle.dest_port}` : "no oracle json at all");
   ok("the oracle transferred the same number of bytes", oracle && oracle.received === payload.length,
      oracle ? `received=${oracle.received} want=${payload.length}` : "no oracle json");
   ok("the oracle's bytes have the same digest as ours",
@@ -398,6 +542,14 @@ async function main() {
     ok("the failure names the protocol's own reason code",
        /error: OpenFailed\(1,/.test(refused.text),
        (refused.text.match(/^error: .*$/m) || ["no error line"])[0]);
+    if (!/error: OpenFailed\(1,/.test(refused.text)) {
+      // A refusal is not the only thing that can go wrong here, and the
+      // difference matters: an authentication failure is a harness problem,
+      // not a protocol one, and it must not be reported as a finding about
+      // the client's handling of CHANNEL_OPEN_FAILURE.
+      console.log("      (this is not the protocol's refusal -- the server's own log says what happened)");
+      explainAuthFailure("loop76nf");
+    }
   }
   noFwd.kill();
   stopSshd("loop76nf");

@@ -31,6 +31,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 import paramiko
 
+from ssh_user import ssh_user
+
 # RFC 6979 A.2.5 -- NIST P-256, published in the RFC.
 D_HEX = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"
 
@@ -47,7 +49,7 @@ def test_private_key():
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True)
-    ap.add_argument("--user", default="hp")
+    ap.add_argument("--user", default=ssh_user())
     ap.add_argument("--dest-host", default="127.0.0.1")
     ap.add_argument("--dest-port", type=int, required=True)
     ap.add_argument("--payload-file", required=True)
@@ -84,6 +86,7 @@ def main() -> int:
         transport.close()
 
     doc = {
+        "port": args.port,
         "dest_host": args.dest_host,
         "dest_port": args.dest_port,
         "sent": len(payload),

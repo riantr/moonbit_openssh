@@ -38,6 +38,7 @@ import { readFile, stat, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sshUser } from './ssh_user.mjs';
 import { chromium } from 'playwright';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,7 +51,14 @@ const SKIP_WORKER = process.argv.includes('--skip-worker');
 const HTTP_PORT = 18784;
 const WS_PORT = 8784;
 const SSHD_PORT = 18783;
-const USER = 'hp';
+// The account this gate authenticates as: the one this machine runs as.
+//
+// Writing one developer's account name here made every gate that opens a real
+// OpenSSH server pass on that machine and fail on every other one -- and the
+// failure looked like a protocol bug, because the server's answer to a
+// public key it does not accept is "no", and the client reports that as an
+// authentication rejection. See host/ssh_user.mjs.
+const USER = sshUser();
 const LIVE_DIR = join(ROOT, '.loop40', 'live');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };

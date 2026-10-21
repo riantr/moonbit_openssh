@@ -78,9 +78,25 @@ function moonCheck(pkg, target) {
     encoding: 'utf-8',
   });
   const text = `${res.stdout || ''}${res.stderr || ''}`;
+  // The "N warnings, M errors" summary only appears when work actually ran; a
+  // package whose check is already up to date prints "no work to do" instead.
+  //
+  // This function used to treat a missing summary as an error (`errors: -1`),
+  // which made the check report a failure for a package that had just been
+  // checked successfully -- a false red that only appears on a machine with a
+  // warm build cache, and a green that appears on a fresh checkout. The exit
+  // status is the reliable signal in both cases; the summary is only for
+  // reporting the warning count.
+  //
+  // verify_loop32 and verify_loop33 already work this way. This copy was the
+  // one that had not been brought along.
   const m = text.match(/(\d+)\s+warnings?,\s*(\d+)\s+errors?/);
-  if (m) return { errors: Number(m[2]), warnings: Number(m[1]), text };
-  return { errors: -1, warnings: -1, text };
+  const failed = /^\s*Error:/m.test(text) || (res.status !== 0 && res.status !== null);
+  return {
+    errors: failed ? (m ? Number(m[2]) : 1) : 0,
+    warnings: m ? Number(m[1]) : -1,
+    text,
+  };
 }
 
 function hashOut(out) {
