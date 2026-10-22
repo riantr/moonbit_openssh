@@ -40,6 +40,13 @@ pub const SSH_MSG_USERAUTH_FAILURE : Byte = b'\x33'
 pub const SSH_MSG_USERAUTH_SUCCESS : Byte = b'\x34'
 
 ///|
+/// 服务端接受了这把公钥(RFC 4252 §7)
+///
+/// 这是 publickey **探针**请求的回应:客户端先问「我可以用这把钥匙吗」,
+/// 服务端回这个就说明钥匙没问题,接下来才轮到签名。
+pub const SSH_MSG_USERAUTH_PK_OK : Byte = b'\x3c'
+
+///|
 /// SSH connection protocol (RFC 4254 §5)
 pub const SSH_MSG_CHANNEL_OPEN : Byte = b'\x5a'
 

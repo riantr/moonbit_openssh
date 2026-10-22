@@ -1,0 +1,16 @@
+///| cmd/agent_kat -- Loop #80: the agent protocol, byte-exact
+///|
+///| Depends on `src/agent` rather than `src/sshclient`: the latter reaches
+///| `src/tcp`, which is native-only, and a KAT that can only run on one backend
+///| is a quarter of the coverage the rest of this repo insists on. The agent
+///| protocol is pure byte assembly -- no socket anywhere -- so it runs on
+///| every target and must come out identical on all of them.
+import {
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/ecdsa",
+  "openssh/openssh_moonbit/src/userauth",
+  "openssh/openssh_moonbit/src/agent",
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "executable")

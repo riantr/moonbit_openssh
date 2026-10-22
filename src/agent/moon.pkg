@@ -1,0 +1,16 @@
+import {
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "library")
+
+///| Loop #80: the SSH agent protocol.
+///
+///| A leaf package: it assembles and parses bytes, and it knows nothing
+///| about sockets. The transport is injected through `AgentChannel`, so the
+///| same code talks to a real agent (a unix socket or a Windows named pipe),
+///| to a mock agent over TCP, and to a mock agent inside a test.
+///
+///| It depends on `src/sshwire` only for the SSH `string` encoding -- the
+///| same `string` shape the agent protocol uses, because the agent protocol
+///| is SSH's older cousin and reuses the wire format of RFC 4251 section 5.

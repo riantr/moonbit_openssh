@@ -6871,5 +6871,212 @@ connect", the first thing to ask is whether the peer was ready yet -- and
 the answer has to come from the peer saying so, not from a number in the
 gate.
 
+---
+
+## Loop #80: the SSH agent -- a key the client never sees
+
+### What was missing
+
+Every publickey authentication in this repository so far had the private key
+**in the client**: `cmd/ssh_live`'s `test_auth_key()` hands the raw `d` to
+`live_auth`, which signs the RFC 4252 section 7 bytes with it. That is fine
+for a test key that is published in RFC 6979 A.2.5 and only ever used against
+a throwaway sshd, and it is exactly what a production client must not do:
+the private key has to be somewhere the client cannot read, or "the client
+never has the key" is a claim about the process rather than about the
+architecture.
+
+`ssh-agent` is the standard answer. The agent holds the keys; the client
+asks it two things -- *which keys do you have?* and *sign this* -- over a
+local transport.
+
+This loop adds the agent protocol (`src/agent`), the authentication path that
+uses it (`src/sshclient/agentauth.mbt`), a command-line mode
+(`cmd/ssh_live --agent <host>::<port>`), a mock agent (`host/agent_mock.py`),
+an independent reference for the wire format (`host/agent_oracle.py`) and the
+gate.
+
+### The protocol, pinned from OpenSSH's source
+
+Everything in `src/agent` was read out of `authfd.c` / `authfd.h`, not out of
+a tutorial:
+
+* **The framing** is `uint32 length` + `byte type` + payload, where the
+  length counts the type byte and the payload but **not itself**. That is
+  `ssh_request_reply` (authfd.c:137) exactly: it writes `POKE_U32(buf, len)`
+  with `len = sshbuf_len(request)`, and the request already holds the type
+  byte.
+* **The message numbers** are `SSH2_AGENTC_REQUEST_IDENTITIES` 11,
+  `SSH2_AGENT_IDENTITIES_ANSWER` 12, `SSH2_AGENTC_SIGN_REQUEST` 13,
+  `SSH2_AGENT_SIGN_RESPONSE` 14, `SSH2_AGENT_FAILURE` 30 (authfd.h).
+* **The payloads** are from `deserialise_identity2` and `ssh_agent_sign`:
+  * `IDENTITIES_ANSWER`: `uint32 count`, then `count` times
+    `string key blob` + `string comment`;
+  * `SIGN_REQUEST`: `string key blob` + `string data` + `uint32 flags`;
+  * `SIGN_RESPONSE`: `string signature`.
+
+### The channel is a struct of closures, not a trait
+
+The first attempt was a trait:
+
+    pub(open) trait AgentChannel {
+      fn agent_write(Self, FixedArray[Byte]) -> Bool
+      fn agent_read_exact(Self, Int32) -> FixedArray[Byte]?
+      fn agent_close(Self) -> Unit
+    }
+
+with `pub impl @agent.AgentChannel for @tcp.TcpConn` in `src/transport`. It
+does not compile:
+
+    Error: [4061] ... cannot implement a foreign trait for a foreign type
+
+MoonBit will not let one package implement a trait, declared in another
+package, for a type, declared in a third package. The repository's rule is
+that every `pub impl` lives in the package that declares the trait -- so a
+trait-based agent channel would have had to live in `src/tcp`, and
+`src/agent` would have had to depend on `src/tcp` to reach it. That is the
+arrow Loop #64 removed, and putting it back for a convenience is exactly the
+kind of trade this repository does not make.
+
+So `AgentChannel` is a **struct of three closures**:
+
+    pub(all) struct AgentChannel {
+      write : (FixedArray[Byte]) -> Bool
+      read_exact : (Int32) -> FixedArray[Byte]?
+      close : () -> Unit
+    }
+
+and the driver wraps a socket into it. Two consequences worth writing down:
+
+* `src/agent` is still a leaf package (it depends on `src/sshwire` only), and
+  `src/sshclient` gains `src/agent` without regaining `src/tcp`.
+* A closure-typed field is called as `(c.write)(data)`, not `c.write(data)` --
+  the compiler says `Type AgentChannel has no method write` and points at the
+  parenthesised form. (`fn { ... }` is not a closure literal; it is
+  `fn() { ... }`.)
+
+### The probe comes first, and that is observable
+
+RFC 4252 section 7 lets the client ask "may I use this key?" before it
+signs anything: the same request with the boolean set to **FALSE** and no
+signature field. The server answers `SSH_MSG_USERAUTH_PK_OK` (60) if it
+accepts the public key, and `USERAUTH_FAILURE` if it does not.
+
+Two reasons to do it that way:
+
+* **Do not disturb the agent for a key the server is going to refuse.** A real
+  agent may ask the user to confirm (touch the key's fingerprint). A
+  confirmation prompt for a key that was always going to be rejected is pure
+  harassment.
+* **"The key is wrong" and "the signature is wrong" are the same sentence to
+  the server.** Both come back as `FAILURE`. Only the probe separates them.
+
+The second reason is the one with a testable consequence, and the test is
+uncomfortable for the obvious implementation: **a successful run cannot show
+that the probe happened.** A successful run signs exactly once whether or not
+the client probed first. So the gate runs a *second* agent, holding a key the
+server does not accept, and asserts that this agent was **never asked to
+sign** -- the mock's sign counter has to be zero. A client that signed before
+probing shows one.
+
+That is why `host/agent_mock.py` counts, and why the gate reads the count
+rather than the transcript.
+
+### The signature is carried, not recomputed
+
+The agent's `SIGN_RESPONSE` payload is `string signature`, and the signature
+inside it is already the **SSH-shaped blob** -- the same shape the publickey
+request's `string signature` field carries. So the client puts it in
+**unchanged**. It does not parse it, does not re-encode it, and does not
+re-sign.
+
+This is worth a note about OpenSSH's own encoding, because it is a place
+where "reasonable" and "right" differ. OpenSSH builds an ECDSA signature blob
+as
+
+    string  "ecdsa-sha2-nistp256"
+    string  ( mpint r || mpint s )
+
+and `sshbuf_put_bignum2` writes a **u32 length prefix** before the body
+(`regress/unittests/sshbuf/test_sshbuf_getput_crypto.c`: `sshbuf_put_bignum2`
+leaves `sizeof(expbn1) + 4` bytes, and the first four are the length). So the
+inner string is `u32||r || u32||s`, **not** `r || s`. RFC 5656 section 3.1.2
+writes it as "mpint r, mpint s", and an SSH mpint *is* length-prefixed, so the
+two readings agree -- but a reader who takes "mpint" to mean "the raw body"
+produces a blob that is 8 bytes short, and the server answers "publickey ...
+signature unverified", which is indistinguishable from "that key is not in
+authorized_keys".
+
+### The bounds are checked before anything is allocated
+
+Every length in this protocol is given by the peer:
+
+| what | who gives it | the limit | where it is checked |
+|---|---|---|---|
+| reply length | the agent | `MAX_AGENT_REPLY_LEN` = 256 KiB | `agent_exchange`, before the read |
+| identity count | the agent | `MAX_AGENT_IDENTITIES` = 2048 | `agent_parse_identities`, before the loop |
+| string length | the agent | the rest of the payload | `ag_read_string`, before the copy |
+
+The reply length is the dangerous one: it is a u32, and taking it at face
+value lets one bad agent ask the client for 4 GiB. The check is *before* the
+read, not after.
+
+`cmd/agent_kat` measures all of this rather than asserting it in prose: it
+feeds the parser a channel that claims a 1 MiB reply, one that claims zero
+bytes, an identity list of 2049 entries, a truncated identity and a truncated
+signature, and prints `PASS`/`FAIL` for each. The identity-count case is
+built with **real** entries, because a count that is simply a lie makes both
+a bounded and an unbounded parser fail for the same reason -- and a test that
+cannot tell the two apart is not a test.
+
+### What the gate proves
+
+`host/verify_loop80.mjs`, 66 checks (57 in the three sections below, 9 in the
+regression section at the end):
+
+* **G1. The wire format, byte for byte, against an independent
+  implementation.** `host/agent_oracle.py` writes the same bytes from
+  OpenSSH's `authfd.c`; `cmd/agent_kat` writes them from `src/agent`. Every
+  hex line has to match, and the KAT has to produce the same bytes on **4
+  targets x 2 modes** (the protocol is pure byte assembly -- no socket
+  anywhere -- so it has to come out identical everywhere).
+* **G2. A real OpenSSH 8.0p1 server accepts a signature the agent
+  produced.** The mock agent holds the RFC 6979 A.2.5 key; the server's
+  `authorized_keys` holds its public half. The client probes, the server
+  answers `PK_OK`, the agent signs, the server answers `USERAUTH_SUCCESS`.
+  The blobs are then judged **here**, not by the server: the request is
+  parsed under the RFC 4252 layout, the signed blob is rebuilt the way
+  OpenSSH rebuilds it and compared byte for byte, and the signature is
+  verified over exactly the bytes we claim with `cryptography` -- an
+  implementation that shares no code with this repository.
+* **G3. The probe comes first.** A second agent holds a key the server does
+  not accept. The client has to report `ProbeRejected`, and that agent's sign
+  counter has to stay at **zero**.
+
+`host/loop80_mutations.py` turns twelve of those checks red on purpose: a
+frame length that counts itself, a sign request with the fields swapped, an
+identity answer with the fields swapped, an identity parser that reads them
+the other way round, a reply-length limit that is not enforced, an
+identity-count limit that is not enforced, a probe that claims a signature
+follows, a probe without the public key, a signed blob without the session
+identifier, an agent asked to sign the wrong bytes, a signature not taken out
+of its string, and a client that signs before it probes.
+
+### The gaps this loop does not close
+
+* **No named pipe, no unix domain socket.** The real agent on Windows is at
+  `\\.\pipe\openssh-ssh-agent` and on unix at a unix domain socket. This loop
+  uses a TCP mock, which is legitimate because the protocol does not care what
+  carries it -- but the real transport is not implemented yet.
+* **No browser path.** A browser has no local agent at all. The protocol is
+  the reusable part; the carrier is a separate problem.
+* **Only ECDSA P-256 identities are exercised.** The parser is
+  key-type-agnostic (the algorithm name is read out of the blob), but no other
+  key type has been through it.
+* **No agent lifecycle.** No `ssh-add`, no key confirmation, no `SSH_AGENTC_*`
+  messages beyond the two this loop uses.
+
+---
+
 
 

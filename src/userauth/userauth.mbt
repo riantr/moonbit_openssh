@@ -42,6 +42,10 @@ pub const AUTH_SERVICE_CONNECTION : String = "ssh-connection"
 pub const SSH_BOOL_TRUE : Byte = b'\x01'
 
 ///|
+/// SSH boolean FALSE 的 wire 形式(RFC 4251 §5)
+pub const SSH_BOOL_FALSE : Byte = b'\x00'
+
+///|
 /// ASCII text to bytes.
 ///
 /// 见 `moon.pkg` 的说明:这是为了不把 `src/sshclient`(以及它带来的
@@ -99,6 +103,45 @@ pub fn userauth_signed_blob(
                 @sshwire.write_ssh_string(pubkey_blob),
               ),
             ),
+          ),
+        ),
+      ),
+    ),
+  )
+}
+
+///|
+/// 构造 publickey 的**探针**请求(载荷里 boolean 是 FALSE,没有签名字段)
+///
+/// RFC 4252 §7 允许客户端先发一个「我打算用这把钥匙」的探针:服务端接受这
+/// 把公钥就回 `SSH_MSG_USERAUTH_PK_OK`(60),不接受就回 FAILURE。
+///
+/// 探针的意义有两个:
+///
+///   * **别为一把服务端根本不认的钥匙去惊动 agent**。真 agent 可能要求用户
+///     确认(摸一下指纹),为一个注定被拒的公钥去弹一次确认框是纯粹的骚扰。
+///   * **区分「钥匙不对」和「签名不对」**。在服务端看来这两种失败都是同一句
+///     FAILURE,只有先探一次才能知道该去找 authorized_keys 还是该去查签名。
+///
+/// 探针请求和带签名的请求只差两处:boolean 从 TRUE 变成 FALSE,末尾不再接
+/// `string signature`。
+pub fn userauth_publickey_probe_request(
+  user : String,
+  service : String,
+  key_type : String,
+  pubkey_blob : FixedArray[Byte],
+) -> FixedArray[Byte] {
+  ua_concat(
+    @sshwire.write_ssh_string(ua_ascii(user)),
+    ua_concat(
+      @sshwire.write_ssh_string(ua_ascii(service)),
+      ua_concat(
+        @sshwire.write_ssh_string(ua_ascii(AUTH_METHOD_PUBLICKEY)),
+        ua_concat(
+          FixedArray::from_array([SSH_BOOL_FALSE]),
+          ua_concat(
+            @sshwire.write_ssh_string(ua_ascii(key_type)),
+            @sshwire.write_ssh_string(pubkey_blob),
           ),
         ),
       ),

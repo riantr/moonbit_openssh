@@ -420,7 +420,7 @@ pub(all) struct KhConfig {
 /// Loop #54:给了 `--kh-file` 就**真的落盘**,不再只打印。写不进去必须是一个
 /// 看得见的失败:打印 `accepted-unpinned` 然后悄悄丢掉 pin,正是 Loop #52 在
 /// 浏览器侧刚消灭掉的 silent-accept 缺陷,换个平台不构成理由。
-async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
+async fn kh_report_tofu(kh : KhConfig, s : @sshclient.SessionReport) -> Unit {
   if !kh.tofu {
     return
   }
@@ -429,8 +429,8 @@ async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
   // 陈述」,恰好把这一层要防的东西放了进来。
   let line = @knownhosts.KnownHostEntry::to_line(
     kh.host,
-    r.session.handshake.hostkey_type,
-    r.session.handshake.hostkey_blob,
+    s.handshake.hostkey_type,
+    s.handshake.hostkey_blob,
   )
   println("tofu: accepted-unpinned")
   if kh.file == "" {
@@ -439,8 +439,8 @@ async fn kh_report_tofu(kh : KhConfig, r : @sshclient.AuthReport) -> Unit {
     let written = @knownhosts.append_line(
       kh.text,
       kh.host,
-      r.session.handshake.hostkey_type,
-      r.session.handshake.hostkey_blob,
+      s.handshake.hostkey_type,
+      s.handshake.hostkey_blob,
     )
     println("tofu: " + written)
     return
@@ -907,12 +907,12 @@ async fn run_forward(
         @sshclient.Done(r) => {
           println("result: FORWARD_DONE")
           // 认证成功了就该记住主机密钥,和认证那条路径同一套逻辑。
-          kh_report_tofu(kh, r.auth)
+          kh_report_tofu(kh, r.auth.session)
           print_forward_report(r)
         }
         @sshclient.NoData(r) => {
           println("result: FORWARD_NO_DATA")
-          kh_report_tofu(kh, r.auth)
+          kh_report_tofu(kh, r.auth.session)
           // 只描述观测,不猜原因——协议没有给任何能区分「服务端连不上目标」
           // 和「目标接了立刻关」的信息(见 src/sshclient/forward.mbt 里
           // ForwardOutcome::NoData 的说明,那里有服务端日志的原文)。
@@ -1116,12 +1116,12 @@ async fn run_remote_forward(
         @sshclient.Done(r) => {
           println("result: REMOTE_FORWARD_DONE")
           // 认证成功了就该记住主机密钥,和认证那条路径同一套逻辑。
-          kh_report_tofu(kh, r.auth)
+          kh_report_tofu(kh, r.auth.session)
           print_remote_forward_report(r)
         }
         @sshclient.NoData(r) => {
           println("result: REMOTE_FORWARD_NO_DATA")
-          kh_report_tofu(kh, r.auth)
+          kh_report_tofu(kh, r.auth.session)
           println(
             "note: the channel opened and closed without one byte coming back",
           )
@@ -1318,7 +1318,7 @@ async fn run_local_forward(
         @sshclient.Done(r) => {
           println("result: LOCAL_FORWARD_DONE")
           // 认证成功了就该记住主机密钥,和认证那条路径同一套逻辑。
-          kh_report_tofu(kh, r.auth)
+          kh_report_tofu(kh, r.auth.session)
           print_local_forward_report(r)
         }
         @sshclient.Failed(e) => {
@@ -2342,6 +2342,180 @@ fn print_conn_effective(cfg : ConnConfig) -> Unit {
   println("=== end ===")
 }
 
+// ---------------------------------------------------------------------------
+// Loop #80: publickey authentication with a key held by an ssh-agent
+// ---------------------------------------------------------------------------
+
+///|
+/// `--agent <host>::<port>`?
+///
+/// 冒号写成两个是因为主机名里本来就有冒号的可能,而端口不会。
+fn wants_agent(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--agent" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
+/// 解析 `--agent <host>::<port>`。
+///
+/// 解析不出来就返回 None,而不是猜一个端口:agent 的端口和 sshd 的端口
+/// 完全是两回事,猜错了会连到别的东西上去。
+fn agent_target(argv : Array[String]) -> (String, Int32)? {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--agent" && i + 1 < argv.length() {
+      let spec = argv[i + 1]
+      // 从**后往前**找 "::":主机名里可以有一个冒号,端口不行。
+      let mut cut = -1
+      let mut k = spec.length() - 2
+      while k >= 0 {
+        if spec[k] == ':' && spec[k + 1] == ':' {
+          cut = k
+          break
+        }
+        k = k - 1
+      }
+      if cut < 0 {
+        return None
+      }
+      let h = spec.unsafe_substring(start=0, end=cut)
+      let p = spec.unsafe_substring(start=cut + 2, end=spec.length())
+      if h.length() == 0 || p.length() == 0 {
+        return None
+      }
+      let port = parse_port(p, 0)
+      if port <= 0 {
+        return None
+      }
+      return Some((h, port))
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// 把一条 TCP 连接包成 agent 通道。
+///
+/// 三个闭包,分别对应 agent 协议真正需要的三件事:发一段字节、读满 N 个字节、
+/// 关掉。`TcpConn` 上正好有对应的 `send` / `read_exact` / `close`。
+///
+/// 这层包装是**驱动**的事,不是协议的事:`src/agent` 只认这三个闭包,它不
+/// 知道 TCP 是什么。这正是它能在命名管道、内存缓冲和浏览器里复用的原因。
+fn agent_channel(conn : @tcp.TcpConn) -> @agent.AgentChannel {
+  {
+    write: fn(d) { conn.send(d) },
+    read_exact: fn(n) { conn.read_exact(n) },
+    close: fn() { conn.close() },
+  }
+}
+
+///|
+/// Loop #80:用 agent 持有的密钥完成 publickey 认证。
+async fn run_agent_auth(
+  host : String,
+  port : Int32,
+  user : String,
+  kh : KhConfig,
+  agent_host : String,
+  agent_port : Int32,
+) -> Unit {
+  println("=== Loop #80 agent publickey auth vs real sshd ===")
+  println("port: " + port.to_string())
+  println("agent: " + agent_host + ":" + agent_port.to_string())
+  println("user: " + user)
+  let agent_conn = match @tcp.TcpConn::connect(agent_host, agent_port) {
+    None => {
+      println("result: AGENT_CONNECT_FAILED")
+      return
+    }
+    Some(c) => c
+  }
+  let chan = agent_channel(agent_conn)
+  match @tcp.TcpConn::connect(host, port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      (chan.close)()
+      return
+    }
+    Some(conn) => {
+      let outcome = @sshclient.live_auth_with_agent(
+        conn,
+        fixed_x(),
+        user,
+        chan,
+        kh.policy,
+      )
+      conn.close()
+      (chan.close)()
+      match outcome {
+        @sshclient.AgentAuthenticated(r) => {
+          println("result: USERAUTH_SUCCESS")
+          kh_report_tofu(kh, r.session)
+          println("user: " + r.user)
+          println("method: " + r.auth_method)
+          println("key_type: " + r.key_type)
+          println("identity_comment: " + r.identity_comment)
+          println("identity_count: " + r.identity_count.to_string())
+          // 探针请求的载荷也带出来:门禁要能确认**探针确实发出去了**,
+          // 而不只是「最后成功了」。
+          println("probe: " + r.probe_hex)
+          println("signed_blob: " + r.signed_blob_hex)
+          println("sig_blob: " + r.sig_blob_hex)
+          println("request: " + r.request_hex)
+          println("session_id_head: " + r.session.session_id_head)
+          println(
+            "handshake_sent_bytes: " +
+            r.session.handshake.sent_bytes.to_string(),
+          )
+          println(
+            "handshake_recv_bytes: " +
+            r.session.handshake.recv_bytes.to_string(),
+          )
+          println("total_sent_bytes: " + r.session.sent_bytes.to_string())
+          println("total_recv_bytes: " + r.session.recv_bytes.to_string())
+        }
+        @sshclient.AgentFailed(e) => {
+          println("result: FAILED")
+          println("error: " + agent_auth_error_name(e))
+          match e {
+            @sshclient.ProbeRejected(why) => println("reason: " + why)
+            @sshclient.AgentUnreachable(why) => println("reason: " + why)
+            @sshclient.AgentRefused(why) => println("reason: " + why)
+            @sshclient.AuthRejected(why, signed, sig) => {
+              println("reason: " + why)
+              println("signed_blob: " + signed)
+              println("sig_blob: " + sig)
+            }
+            _ => ()
+          }
+        }
+      }
+    }
+  }
+}
+
+///|
+/// agent 认证失败的名字。门禁按这个名字断言,所以它必须**稳定**。
+fn agent_auth_error_name(e : @sshclient.AgentAuthError) -> String {
+  match e {
+    @sshclient.Transport(_) => "Transport"
+    @sshclient.AgentUnreachable(_) => "AgentUnreachable"
+    @sshclient.NoIdentity => "NoIdentity"
+    @sshclient.ProbeRejected(_) => "ProbeRejected"
+    @sshclient.AgentRefused(_) => "AgentRefused"
+    @sshclient.NoAuthReply => "NoAuthReply"
+    @sshclient.AuthRejected(_, _, _) => "AuthRejected"
+    @sshclient.BadPacket(_) => "BadPacket"
+  }
+}
+
 ///|
 async fn main {
   let argv = @env.args()
@@ -2461,6 +2635,21 @@ async fn main {
       }
     }
   }
+  if wants_agent(argv) {
+    match agent_target(argv) {
+      Some((ah, ap)) => {
+        run_agent_auth(host, port, user, kh, ah, ap)
+        return
+      }
+      None => {
+        // 目标写错了必须说出来。静默忽略的话,调用方会以为 agent 认证跑过了,
+        // 而实际上一个字节都没发出去。
+        println("result: BAD_AGENT_TARGET")
+        println("usage: --agent <host>::<port>")
+        return
+      }
+    }
+  }
   if auth_mode(argv) {
     println("=== Loop #34 publickey auth vs real sshd ===")
     println("port: " + port.to_string())
@@ -2493,7 +2682,7 @@ async fn main {
             // js-only、浏览器里根本没有文件系统(见 AGENTS.md Loop #48)。所以
             // 「长什么样」由 `src/knownhosts` 决定(两边同一串字节),「写到哪去」
             // 由驱动决定。门禁捕获这一行并落盘,然后用写回来的那份重连。
-            kh_report_tofu(kh, r)
+            kh_report_tofu(kh, r.session)
             println("user: " + r.user)
             println("method: " + r.auth_method)
             println("key_type: " + r.key_type)

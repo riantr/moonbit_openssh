@@ -8,6 +8,9 @@ import {
   "openssh/openssh_moonbit/src/khfile",
   "openssh/openssh_moonbit/src/tcp",
   "openssh/openssh_moonbit/src/sshclient",
+  // Loop #80: `--agent` 把一条 TCP 连接包成 agent 通道。协议在 `src/agent`,
+  // 这里只提供「怎么把连接递进去」。
+  "openssh/openssh_moonbit/src/agent",
   "openssh/openssh_moonbit/src/sshconfig",
   "openssh/openssh_moonbit/src/knownhosts",
   "openssh/openssh_moonbit/src/sftp",
