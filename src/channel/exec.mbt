@@ -132,6 +132,39 @@ pub(all) struct ChanState {
   /// 里在收到任何数据之前只发过这一个请求,所以这个布尔足以定位,不必去跟踪
   /// 一个待确认请求队列。`interactive` 那一支用的是同一个思路。
   mut subsystem_sent : Bool
+  ///
+  /// 这条通道是**对端**发起的吗?
+  ///
+  /// Loop #78 加的。两种角色的通道在协议上**完全相反**:
+  ///
+  ///   * 我们发起的("session"、"direct-tcpip"):我们发 CHANNEL_OPEN,等对端回
+  ///     CHANNEL_OPEN_CONFIRMATION。
+  ///   * 对端发起的("forwarded-tcpip"):对端发 CHANNEL_OPEN,**我们**回
+  ///     CHANNEL_OPEN_CONFIRMATION。
+  ///
+  /// 同一个状态机要同时走这两条路,所以必须记住自己站在哪一边:收到
+  /// CHANNEL_OPEN(0x5a)时,对我们发起的通道来说那是协议错误,对对端发起的
+  /// 通道来说那是这条通道的**开始**。不区分的话,0x5a 只能被当成「不认识
+  /// 的包」悄悄丢掉——而那正是「服务端发来的 forwarded-tcpip 通道不见了」
+  /// 这种症状。
+  peer_opened : Bool
+  ///
+  /// 收到了对端的 CHANNEL_OPEN 吗?
+  ///
+  /// 和 `open_done` 分开:收到 open 和**确认**了 open 是两件事。收到的时候
+  /// 我们还不知道要不要接受这条通道(类型对不对、监听地址是不是我们请求的
+  /// 那一条),确认之后才是。
+  open_received : Bool
+  /// 对端发起的通道类型(还没收到 open 时是空串)
+  open_type : String
+  /// 对端发起的通道里的监听地址
+  open_host : String
+  /// 对端发起的通道里的监听端口
+  open_port : Int32
+  /// 对端发起的通道里的发起方地址
+  open_originator_ip : String
+  /// 对端发起的通道里的发起方端口
+  open_originator_port : Int32
 }
 
 ///|
@@ -162,7 +195,105 @@ pub fn ChanState::new(local_channel : Int32) -> ChanState {
     stdin_packets: 0,
     eof_sent: false,
     subsystem_sent: false,
+    peer_opened: false,
+    open_received: false,
+    open_type: "",
+    open_host: "",
+    open_port: 0,
+    open_originator_ip: "",
+    open_originator_port: 0,
   }
+}
+
+///|
+/// 开始一条**由对端发起**的通道("forwarded-tcpip")
+///
+/// 和 `new` 的唯一区别是 `peer_opened`——它只影响两件事:收到 CHANNEL_OPEN
+/// 时那不是协议错误而是这条通道的开始;以及我们不再发 CHANNEL_OPEN,而是
+/// **回**一个 CHANNEL_OPEN_CONFIRMATION。
+///
+/// 通道号由调用方给:对端发起的通道里,我们的号是我们自己挑的(必须和
+/// 我们已经用掉的号不冲突),而对端的号是它发来的 CHANNEL_OPEN 里带的。
+pub fn ChanState::new_peer_opened(local_channel : Int32) -> ChanState {
+  { ..ChanState::new(local_channel), peer_opened: true, }
+}
+
+///|
+/// 确认对端发起的通道:要发出去的 CHANNEL_OPEN_CONFIRMATION
+///
+/// 必须在收到 CHANNEL_OPEN 之后调用。recipient 是**对端**的号(它发来的
+/// open 里的 sender),sender 是**我们**的号。写反了不会立刻报错——对端会
+/// 安静地忽略后面所有发给这条通道的包,而症状是「连接建立了但一个字节都
+/// 不到」。
+///
+/// 返回 `(新状态, 要发的包?)`。已经确认过或者还没收到 open 时返回 None。
+pub fn ChanState::confirm_open_action(
+  self : ChanState,
+) -> (ChanState, ChanAction?) {
+  if self.open_done || !self.open_received {
+    return (self, None)
+  }
+  (
+    { ..self, open_done: true, },
+    Some(
+      Send(
+        0x5b,
+        channel_open_confirmation_payload(
+          self.remote_id,
+          self.local_channel,
+          self.window.max,
+          self.window.max_packet,
+        ),
+      ),
+    ),
+  )
+}
+
+///|
+/// 拒绝对端发起的通道:要发出去的 CHANNEL_OPEN_FAILURE
+///
+/// 拒绝对端的通道是**正常**操作,不是错误:一条 forwarded-tcpip 如果不是我们
+/// 请求的那一条(监听地址或端口对不上),或者是本客户端不支持的通道类型,
+/// 就该明确地拒掉,而不是沉默地不确认——沉默会让对端一直等下去。
+///
+/// reason 用 `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED`(RFC 4254 §5.1 的 1),
+/// 和 OpenSSH 拒绝对端发起的通道时用的同一个码。
+pub fn ChanState::refuse_open_action(
+  self : ChanState,
+  reason : Int32,
+  description : String,
+) -> (ChanState, ChanAction?) {
+  if self.open_done || !self.open_received {
+    return (self, None)
+  }
+  (
+    { ..self, },
+    Some(
+      Send(
+        0x5c,
+        channel_open_failure_payload(self.remote_id, reason, description, ""),
+      ),
+    ),
+  )
+}
+
+///|
+/// 增量排空收方向的缓冲
+///
+/// 返回 `(新状态, 这一次排出来的字节)`。排空之后 `stdout` 里待发的部分被
+/// 清空,但 `stdout_len` 仍然是**累计收到的字节数**,不因排空而减少——
+/// 否则「排空过」和「一个字节都没收到」会长得一模一样,而这两个是完全不同的
+/// 观测。
+///
+/// 为什么需要它:exec / direct-tcpip 那种一次性流程可以把收到的字节全部攒在
+/// 状态里,结束时一次性取走;但**转发**不一样——转发必须把字节**边收边送**,
+/// 攒着就等于把整条连接的数据都留在内存里,而且送不出去(对端在等我们送,
+/// 我们在等它收完)。
+pub fn ChanState::take_stdout(
+  self : ChanState,
+) -> (ChanState, FixedArray[Byte]) {
+  let out = ch_cat_all(self.stdout)
+  ({ ..self, stdout: [], }, out)
 }
 
 ///|
@@ -429,6 +560,41 @@ pub fn ChanState::eof_action(self : ChanState) -> (ChanState, ChanAction?) {
 }
 
 ///|
+/// CHANNEL_CLOSE:我们这一侧结束了
+///
+/// 和 `eof_action` 分开,因为它们是**两件事**:EOF 是「我的输入方向没有更多
+/// 数据了」,CLOSE 是「这条通道结束了」。
+///
+/// 早先这里写的是「OpenSSH 的服务端在**收到**客户端的 EOF 之后才发自己的
+/// CLOSE,所以一端如果只发 EOF 不发 CLOSE,另一端会一直等下去——表现是
+/// 「连接还在,但永远不结束」。**那句话是错的**,而且错得有代表性:它是照着
+/// 源码想象出来的,没有实测。实测(本机 Win32-OpenSSH 8.0p1,服务端日志由
+/// `host/verify_loop78.mjs` 起的那台 sshd 写下)的结果相反:
+///
+///   * 服务端在**被代理的 socket** 读到 EOF 时就发它自己的 CHANNEL_EOF,
+///     和我们发不发任何东西无关;
+///   * 服务端的 CHANNEL_CLOSE 由「我们发了 EOF」或「我们发了 CLOSE」
+///     **任意一个**触发。
+///
+/// 两条都单独测过:只发 EOF 不发 CLOSE -> 服务端照样回 CLOSE,客户端正常结束,
+/// 所以「不发 CLOSE」是**等价变异**,门禁抓不到它(也抓不到才对);只发 CLOSE
+/// 不发 EOF -> 服务端同样回 CLOSE,但我们没告诉对端「输入方向结束了」,协议
+/// 上不完整,门禁靠 `eof_sent` 抓住。
+///
+/// 少发 CLOSE 之所以不会挂住,是因为状态机在收到对端的 CLOSE 时会自动回一个
+/// (`chan_step` 的 0x61 分支)。EOF 和 CLOSE 还是要都发:EOF 是「输入方向结束」,
+/// CLOSE 是「通道结束」,RFC 4254 §5.3 就是这两件事。
+pub fn ChanState::close_action(self : ChanState) -> (ChanState, ChanAction?) {
+  if self.close_sent {
+    return (self, None)
+  }
+  (
+    { ..self, close_sent: true, },
+    Some(Send(0x61, channel_bare_payload(self.remote_id))),
+  )
+}
+
+///|
 /// 交互式会话的结果
 ///
 /// `exit_status` 与 `exit_signal` 分开:被信号杀死时服务端发的是
@@ -487,21 +653,69 @@ pub fn chan_step(
 ) -> (ChanState, Array[ChanAction], ChanError?) {
   let none : Array[ChanAction] = []
   match msg_type {
+    0x5a =>
+      // CHANNEL_OPEN —— **对端**发起的通道("forwarded-tcpip")。
+      //
+      // 这一支以前根本不存在:0x5a 落进 `_ =>` 那个兜底分支,被当成不认识
+      // 的包悄悄丢掉。而「服务端发来的通道不见了」这件事,没有任何一个包
+      // 能解释它——症状是「连接正常,但转发的那条通道从来没出现」。
+      //
+      // 状态机只负责**记下**这次 open,不负责决定接不接受:类型对不对、
+      // 监听地址是不是我们请求的那一条,都是驱动层的判断,而接受和拒绝
+      // 要发的是不同的包(`confirm_open_action` / `refuse_open_action`)。
+      if !st.peer_opened {
+        // 对我们自己发起的通道来说,CHANNEL_OPEN 是协议错误(RFC 4254 §5.1
+        // 里没有这种用法)。以前它被静默忽略,现在它是一个明确的错误。
+        (st, none, Some(ChanError::Malformed("unexpected_open")))
+      } else if st.open_received {
+        (st, none, Some(ChanError::Malformed("duplicate_open")))
+      } else {
+        match parse_channel_open(payload) {
+          None => (st, none, Some(ChanError::Malformed("open")))
+          Some(o) =>
+            (
+              {
+                ..st,
+                open_received: true,
+                open_type: o.ctype,
+                remote_id: o.sender,
+                remote_window: o.window,
+                remote_max_packet: o.max_packet,
+                open_host: o.host,
+                open_port: o.port,
+                open_originator_ip: o.originator_ip,
+                open_originator_port: o.originator_port,
+              },
+              none,
+              None,
+            )
+        }
+      }
     0x5b =>
       match parse_open_confirmation(payload) {
         None => (st, none, Some(ChanError::Malformed("open_confirmation")))
         Some((sender, win, maxp)) =>
-          (
-            {
-              ..st,
-              remote_id: sender,
-              remote_window: win,
-              remote_max_packet: maxp,
-              open_done: true,
-            },
-            none,
-            None,
-          )
+          if st.peer_opened {
+            // 对端发起的通道里,确认包是我们**发**出去的;服务端不会再回一个
+            // 确认。收到了就说明两边对这条通道的理解已经不一致了。
+            (
+              st,
+              none,
+              Some(ChanError::Malformed("confirmation_for_peer_channel")),
+            )
+          } else {
+            (
+              {
+                ..st,
+                remote_id: sender,
+                remote_window: win,
+                remote_max_packet: maxp,
+                open_done: true,
+              },
+              none,
+              None,
+            )
+          }
       }
     0x5c =>
       match parse_open_failure(payload) {

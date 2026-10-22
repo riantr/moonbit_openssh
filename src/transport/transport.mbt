@@ -48,3 +48,47 @@ pub impl Transport for @tcp.TcpConn with fn wire_read_exact(self, n) {
 pub impl Transport for @tcp.TcpConn with fn wire_close(self) {
   self.close()
 }
+
+///|
+/// A byte stream that can be read in whatever pieces arrive.
+///
+/// `Transport` above is the contract the **SSH** layer needs: SSH is a strict
+/// request/response protocol, so the client cannot compute anything until it
+/// holds exactly the bytes the peer sent, and `wire_read_exact` is the only
+/// read primitive that matters.
+///
+/// A **forward** needs the other contract. The far end of a relayed
+/// connection is a plain TCP peer, not an SSH peer: it sends what it sends
+/// and stops. Asking it for exactly 32 KiB is not "a little slow" -- it is a
+/// deadlock, because the other direction is waiting for us to speak first.
+///
+/// So the two contracts stay separate rather than one growing a flag:
+///   * `Transport`  -- "give me exactly n bytes, or tell me the stream died"
+///   * `ByteStream` -- "give me what has arrived, up to n bytes"
+///
+/// An empty result from `stream_recv_some` means EOF or error; the caller
+/// that needs to tell those apart is reading a length-prefixed protocol, and
+/// that is what `Transport` is for.
+pub(open) trait ByteStream {
+  /// Write every byte. False when the stream is gone.
+  fn stream_send(Self, FixedArray[Byte]) -> Bool
+  /// Read up to `n` bytes. An empty array means EOF or error.
+  fn stream_recv_some(Self, Int32) -> FixedArray[Byte]
+  /// Close the stream. Safe to call twice.
+  fn stream_close(Self) -> Unit
+}
+
+///|
+pub impl ByteStream for @tcp.TcpConn with fn stream_send(self, data) {
+  self.send(data)
+}
+
+///|
+pub impl ByteStream for @tcp.TcpConn with fn stream_recv_some(self, n) {
+  self.recv_some(n)
+}
+
+///|
+pub impl ByteStream for @tcp.TcpConn with fn stream_close(self) {
+  self.close()
+}

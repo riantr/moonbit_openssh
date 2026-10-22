@@ -6308,3 +6308,284 @@ one-hour ceiling in the middle of loop40's chain. `verify_loop40.mjs` has a
 gate, and re-running it inside every gate is what turns "slow" into "cannot
 finish".
 
+## Loop #78: forwarded-tcpip -- the server half of a remote port forward
+
+### What was missing
+
+`ssh -R 9000:db:5432 host` is, at the protocol level, two things:
+
+1. the client asks the **server** to listen on a port (the "tcpip-forward"
+   global request, RFC 4254 section 7.1), and
+2. when somebody connects to that port, the **server** opens a
+   "forwarded-tcpip" channel back to the client (RFC 4254 section 7.2), and
+   the client relays the bytes to its own local target.
+
+This repository had none of it. `src/channel` could not name the channel
+type, and `chan_step` had **no branch for an inbound CHANNEL_OPEN at all**:
+message 0x5a fell into the catch-all `_ =>` and was dropped. The symptom of
+that is the worst kind -- "the server opened a channel and it never
+appeared" -- because every other part of the connection looks perfectly
+healthy.
+
+Loop #76 added the mirror image of this (`direct-tcpip`, the client half of
+`ssh -L`). This loop adds the other half, and the two are mirror images all
+the way down: the *same* CHANNEL_OPEN_CONFIRMATION, the same window rules,
+the same EOF/CLOSE dance, but with the channel numbers running the other way.
+
+### Three things only a real server can settle
+
+RFC 4254 section 7.1 and 7.2 leave three questions open, and all three of
+them are the kind where reading the specification and reading the code give
+different answers.
+
+**1. The reply to "tcpip-forward" does not always carry a port.** The RFC
+says the reply carries the allocated port; OpenSSH's server puts a u32 in the
+reply only `if (allocated_listen_port != 0)`, and that variable is filled in
+only when the client asked for port 0. So:
+
+| the client asked for | the reply payload is |
+|---|---|
+| port 0 | a u32 -- the port the server allocated |
+| a specific port | **empty** |
+
+Measured against a real Win32-OpenSSH 8.0p1 server, by
+`host/remote_fwd_capture.py` (which drives the server through paramiko and
+prints the raw bytes):
+
+```
+client asked for port 0     -> reply payload = 00 00 fb 51   (u32 64337)
+client asked for port 23456 -> reply payload = (empty)
+```
+
+A parser that reads a u32 out of that reply unconditionally reads past the
+end of the message when the client named the port itself -- on a real server
+that is a malformed packet, not a missing field. The gate runs **both**
+shapes end to end, because only the second one can catch that.
+
+**2. The port inside a forwarded-tcpip open is the port the server was
+LISTENING on**, not the ephemeral port of the connection it accepted. The
+same capture, with the open decoded field by field:
+
+```
+0000000f "forwarded-tcpip"
+00000002 sender channel = 2
+00200000 initial window = 2097152
+00008000 maximum packet = 32768
+00000000 host = ""            (the listen address we asked for)
+0000fe59 port = 65113         (the port the server was LISTENING on)
+00000009 originator ip = "127.0.0.1"
+0000fe5a originator port = 65114
+```
+
+This is not a detail. OpenSSH's own client matches an incoming
+forwarded-tcpip against its configured forwards by exactly that number
+(`open_listen_match_tcpip` compares it with the port the client asked to
+listen on), so a client that reads the other number refuses every channel
+it is sent.
+
+And the number is easy to get wrong by reading it the obvious way. The
+OpenSSH server puts `get_local_port(c->sock)` into that field -- the local
+port of the socket it has just accepted -- and "an accepted socket has an
+ephemeral port" is the natural assumption and it is **wrong**: an accepted
+socket keeps the *listener's* local endpoint, so `getsockname()` on it
+answers with the listening port. The 8.0p1 server on this machine and the
+9.9 and 10.4 sources therefore agree, and the agreement is not obvious --
+it is the kind of thing that reads as a contradiction until you look at what
+`getsockname` returns for an accepted socket.
+
+The rule this loop follows: **when the source and the server seem to
+disagree, the server is the specification** -- and when they seem to
+disagree, work out *why* before believing that they do. The measured bytes
+are in `host/gen_remote_fwd_vectors.py` as vector P1, and they are the bytes
+of a real server, not bytes this repository invented.
+
+**3. The server does not know the client's local target.** The "tcpip-forward"
+request carries the *bind* address and the port, and nothing else: the
+"connect to db:5432" half of `ssh -R` lives only in the client's own
+configuration. So the local target has to be given to the driver
+(`dest_host` / `dest_port`), and the fields inside the forwarded-tcpip open
+are only good for **checking** that the channel is the one we asked for --
+which is what this client does, and what OpenSSH's client does.
+
+### The channel state machine grew a second role
+
+`ChanState` now knows whether the channel was opened by us or by the peer.
+That is not bookkeeping, it is the difference between two opposite flows
+sharing one state machine:
+
+| | we opened it | the peer opened it |
+|---|---|---|
+| who sends CHANNEL_OPEN | us | the peer |
+| who sends CHANNEL_OPEN_CONFIRMATION | the peer | us |
+| the channel number in the confirmation | the peer's | ours |
+| `remote_id` | the peer's | the peer's |
+| `local_channel` | ours | ours |
+
+The existing `local_channel` / `remote_id` convention carries over unchanged
+-- the inbound DATA's recipient is *our* number in both cases -- so the
+window rules, the EOF and CLOSE handling, and the `stdin_take` clamping all
+work for a peer-opened channel without being touched. What did change:
+
+* `chan_step` grew a 0x5a branch. It **records** the open and returns no
+  action: whether to accept the channel is a policy decision, and the policy
+  belongs to the driver. `confirm_open_action` and `refuse_open_action` are
+  the two answers, and the driver picks one.
+* A CHANNEL_OPEN arriving on a channel *we* opened is now
+  `Malformed("unexpected_open")` instead of being silently dropped. It used
+  to fall into the catch-all, which is how a peer-initiated channel could
+  vanish without a word.
+* `ChanState::take_stdout` exists because a relay has to **drain** the
+  inbound buffer as it goes. `exec` and `direct-tcpip` can afford to keep
+  everything until the end; a relay cannot, because the far end is waiting
+  for the bytes we are holding. `stdout_len` stays the *cumulative* count
+  across drains -- otherwise "we drained it" and "we never received
+  anything" would look the same.
+* `ChanState::close_action` exists because EOF and CLOSE are two different
+  things.  What it does **not** do is rescue a hang: the first draft of this
+  section claimed that OpenSSH will not send its CLOSE until it has
+  received ours, so "send EOF and stop" leaves the connection hanging with
+  the symptom "the connection is still there, and it never ends".
+  **That claim was wrong**, and wrong in the way only a measurement catches
+  -- it was read off the source and never tested.  What the server actually
+  does, from its own log (the sshd this loop starts):
+
+      channel 2: read<=0          the proxied socket reached EOF
+      channel 2: send eof         the server's CHANNEL_EOF
+      receive packet: type 97     our CHANNEL_CLOSE
+      channel 2: send close       the server's CHANNEL_CLOSE
+
+  So the server sends its EOF because **its** socket ended -- not in answer
+  to anything we sent -- and its CLOSE is triggered by **either** our EOF or
+  our CLOSE.  Two consequences, both measured: sending EOF without CLOSE
+  does *not* hang (the state machine answers the peer's CLOSE with one of
+  its own), and sending CLOSE without EOF leaves the peer never told that
+  our input direction had ended.
+
+### The relay is not full duplex, and saying so is part of the work
+
+MoonBit has no threads. Two blocking reads cannot happen at the same time --
+whichever goes first starves the other -- so the relay reads the local end
+**only right after writing to it**, and reads the SSH end in between. A local
+target that does not answer stalls the relay.
+
+That is a real limitation and it is stated in the code, not hidden. The
+accurate description is: *the local end is read right after it is written to;
+bytes that arrive on the SSH end in the meantime wait in the socket buffer
+and are not lost, but they are deferred.* A genuinely full-duplex relay
+needs both ends to be pollable, which means the SSH transport has to be able
+to say "nothing has arrived yet" -- that is a different loop, and it is
+listed in the gaps below.
+
+### stdout is block-buffered, so the mid-flight line has to go to stderr
+
+The client has to tell the gate which port the server granted, and it has to
+do it **while it is still running** -- the gate is the party that connects
+to that port, and the relay has not started yet.
+
+`println` writes to stdout, and stdout is block-buffered when it is a pipe.
+So the line sat in the buffer, the client went on to block in "wait for the
+server to open a channel", and the gate sat there waiting for a line that
+would only be flushed when the process exited -- which was never, because
+the gate was the one who had to make the connection that would let the
+client finish. A deadlock with a plausible-looking cause.
+
+`eprintln` is not buffered, so the granted port goes to **stderr**, under a
+different key (`granted_port:`, not `listen_port:`) so that a script reading
+the two streams together cannot confuse the mid-flight line with the final
+report.
+
+### What the gate proves
+
+`host/verify_loop78.mjs`, 59 checks:
+
+| layer | who | what it proves |
+|---|---|---|
+| B | paramiko's encoder and decoder | the bytes are the protocol's bytes (11 vectors) |
+| B | a real server's captured bytes | the forwarded-tcpip layout, field for field |
+| C1 | a real OpenSSH 8.0p1 server | the server granted a port and opened the channel |
+| C1 | the probe at the far end | the bytes survive the relay, in **both** directions |
+| C1 | the local target's own digest | what actually arrived at the far end of the relay |
+| C1 | the server's log | the server opened a "forwarded-tcpip" channel, on that port |
+| C2 | a real OpenSSH 8.0p1 server | the reply with **no** port in it is handled |
+| D | a server with `AllowTcpForwarding no` | the refusal is reported, and the client does not hang |
+
+The end-to-end case is a genuine round trip and not a one-way pipe: the
+client writes a payload into the local target, the target echoes it, the
+echo comes back over the channel to the probe; then the probe sends bytes of
+its own, the client relays them to the local target, and the target's echo
+comes back the same way. The local target's own `ECHO <bytes> <sha256>`
+line is the far end's independent account of what it received -- the
+client's counters say what the client *believed* it moved, and only the
+target's digest says what arrived.
+
+`host/loop78_mutations.py` mutates eight ways this code could plausibly be
+wrong -- swapping the two channel numbers in the confirmation, asking for no
+reply, reading an empty reply as port 0, answering the server's open with a
+failure, dropping the bytes the channel delivered, addressing the EOF to our
+own channel instead of the peer's, never sending our EOF, and reading the
+originator port where the listen port belongs -- and requires each of them to
+turn a named gate check red. A mutation that does not compile is reported as
+INVALID, because a build failure is not evidence about the gate.
+
+A mutation that **cannot** fail is not evidence either, and this loop found
+one: "never send our CLOSE" leaves the gate completely green, because the
+state machine answers the peer's CLOSE with a CLOSE of its own, so the
+client finishes exactly as before. It was replaced by "never send our EOF",
+which is caught by the one check that looks at what we actually sent.
+
+Each mutation was also run **on its own** before the batch, because the
+author's expectation and the measurement disagreed once. Addressing the EOF
+to our own channel was expected to hang the client (the reasoning was the
+wrong claim above); measured, the relay still works and the client exits 0,
+but the server takes our EOF for the end of a different channel, tears the
+connection down underneath the relay, and the client reports
+`REMOTE_FORWARD_FAILED` instead of a finished forward. The mutation is
+real and the gate catches it -- but under a different name than the one it
+was written for, and a mutation script that only accepts its own guess
+would have called that a miss and pointed at the gate instead of at the
+expectation.
+
+`host/loop78_mutations.py --only N` runs a single mutation, which is how
+that disagreement was settled without re-running the whole batch.
+
+### The local run was killed mid-way, and it was not the code
+
+The local `python ci/ci.py --tiers env,build,gates` -- the same three tiers
+the CI job runs -- died part-way through on 2026-10-22. `verify_loop46.mjs`
+was killed after 196.8s (exit `0x40010004`), and then **every** gate after
+it died in about 0.1s with `0xC0000409` and no output at all: no header, no
+check, nothing. The engine itself was still alive, because it is the
+parent.
+
+What it is not: a defect in those gates. Each of them passes when it is run
+on its own -- loop46 is 53 checks ALL PASS, loop47 is 19 checks ALL PASS --
+and the gates before the break (9, 22 through 45) all passed in the same
+run. The machine was carrying an unrelated multi-process job at the time,
+and the CI runner -- a clean VM with nothing else on it -- runs the same
+three tiers in 20.4 minutes.
+
+So the fact worth keeping is not a theory about why the process died. It is
+this: **a gate that dies with no output at all has usually not run**, and the
+cheap way to tell the difference between "the code is broken" and "the
+machine stopped cooperating" is to run the gate **on its own**. The gates
+were re-run in small batches with a per-gate timeout, which is also the
+practical way to get a green local run on a busy machine: a batch of eight
+gates with a timeout each cannot be taken down by the first one that hangs.
+
+The CI job runs `--tiers env,build,gates` and **not** the mutations tier, so
+the eight mutations of this loop do not lengthen it.
+
+### The gaps this loop does not close
+
+* **No full-duplex relay.** See above: the local end is read right after it
+  is written to.
+* **No local listener.** `ssh -L` means "listen locally, and for each
+  connection open a direct-tcpip channel". The listener is still missing;
+  Loop #76 built the channel half.
+* **No browser path.** `src/wtlive` drives the same protocol over a
+  WebSocket, and a peer-initiated channel has to be handled there too. The
+  protocol layer is shared (`src/channel`), so the browser side needs a
+  driver, not a second implementation.
+* **No `cancel-tcpip-forward`.** The request exists in the protocol and the
+  constant is in `src/channel/globalreq.mbt`; nothing sends it yet.
+

@@ -172,6 +172,246 @@ pub fn channel_open_direct_tcpip_payload(
 }
 
 ///|
+/// CHANNEL_OPEN "forwarded-tcpip" 的 channel type(RFC 4254 §7.2)
+///
+/// 这是**服务端**发起的那一半端口转发(`ssh -R` 的协议层):客户端先请服务端
+/// 在它那边监听一个端口(RFC 4254 §7.1 的 "tcpip-forward"),有人连上那个端口
+/// 之后,服务端**反过来**开一条 "forwarded-tcpip" 通道给客户端,通道上跑的是
+/// 那条 TCP 连接的字节。
+///
+/// 与 "direct-tcpip" 的载荷字段完全相同(host/port + originator ip/port),
+/// 但两个字段的**含义**不同,这是最容易搞错的地方:
+///
+///   * direct-tcpip 的 host/port 是**服务端要连的目标**;
+///   * forwarded-tcpip 的 host/port 是**服务端在监听的那个地址**——也就是
+///     客户端自己请求转发的那条转发规则。客户端要用它来**核对**这条通道
+///     是不是自己请求的那一条(OpenSSH 的 `open_listen_match_tcpip` 就是拿
+///     它和本地配置比),而不是拿它去连什么地方——本地目标是客户端自己
+///     配置里定的,服务端并不知道。
+///
+/// 实测(Win32-OpenSSH 8.0p1,见 host/remote_fwd_capture.py):服务端发来的
+/// forwarded-tcpip 载荷里,那个 u32 端口是**监听端口**,不是被接受连接的
+/// 临时端口。
+pub const CHANNEL_TYPE_FORWARDED_TCPIP : String = "forwarded-tcpip"
+
+///|
+/// 入站 CHANNEL_OPEN 解析出来的内容(RFC 4254 §5.1)
+///
+/// 这是**对端发起**的通道(目前只有 "forwarded-tcpip")才有的形状,所以它和
+/// `channel_open_payload` 那样「我们发出去的东西」不是一回事:
+///
+///   * `sender` 是**对端**的通道号。我们回确认包时,recipient 用它。
+///   * `window` / `max_packet` 是对端给我们的收方向上限——我们发给它的数据
+///     受这两个限制。
+///   * `host` / `port` 是**监听地址**(见 CHANNEL_TYPE_FORWARDED_TCPIP 的说明),
+///     不是我们的目标地址。
+///   * `originator_ip` / `originator_port` 是**连上服务端那个监听端口的人**
+///     的地址,即这条 TCP 连接的远端。
+pub(all) struct ChannelOpen {
+  /// 通道类型
+  ctype : String
+  /// 对端的通道号
+  sender : Int32
+  /// 对端给我们的收方向窗口
+  window : Int32
+  /// 对端给我们的最大包长
+  max_packet : Int32
+  /// 监听地址("session" 通道为空串)
+  host : String
+  /// 监听端口("session" 通道为 0)
+  port : Int32
+  /// 发起方地址
+  originator_ip : String
+  /// 发起方端口
+  originator_port : Int32
+}
+
+///|
+/// 解析入站的 CHANNEL_OPEN(RFC 4254 §5.1)
+///
+///     string  channel type
+///     uint32  sender channel
+///     uint32  initial window size
+///     uint32  maximum packet size
+///     ...    type-specific
+///
+/// type-specific 那段只有两种通道有,而且两者的布局**完全相同**
+/// (RFC 4254 §7.2):
+///
+///     string  host that was connected
+///     uint32  port that was connected
+///     string  originator IP address
+///     uint32  originator port
+///
+/// "session" 通道没有这一段,所以解析完那四个 u32/string 就必须**正好**到
+/// 载荷末尾——多一个字节就是布局错了,少一个字节就是载荷被截断了。这两种
+/// 情况都返回 None,而不是「尽力解析」:尽力解析会把一个错位一字节的载荷
+/// 读成「host 是空串、port 是 0」,而那正好是一个**合法**的监听地址,
+/// 于是错误被藏起来了。
+///
+/// 只认 "session"、"direct-tcpip" 和 "forwarded-tcpip" 三种类型。别的类型
+/// (x11、auth-agent@openssh.com 等)**也**返回结果,但类型相关的四个字段留空、
+/// 而且**不做**「载荷正好到末尾」的检查——因为那些类型的 type-specific 布局
+/// 是未知的,没法检查。
+///
+/// 为什么不干脆返回 None:那样调用方只知道「有个看不懂的 open」,却拿不到
+/// **类型名**,于是拒绝的时候没法告诉对端「我不支持 x11」,只能写一句
+/// 「open failed」。留着类型名,驱动层才能既拒得干净,又能把类型名报给人看。
+pub fn parse_channel_open(payload : FixedArray[Byte]) -> ChannelOpen? {
+  match read_string_at(payload, 0) {
+    None => None
+    Some((t, o1)) => parse_channel_open_tail(payload, bytes_to_ascii_str(t), o1)
+  }
+}
+
+///|
+/// `parse_channel_open` 的后半段:公共前缀已经读出来了,接着按类型读
+/// type-specific 的那部分。
+///
+/// 单独一个函数,而不是在 match 分支里 `let ctype = ...`:MoonBit 的 match
+/// 分支体不是块,`let` 在那里没有作用域——写成
+///
+///     Some((t, o1)) =>
+///       let ctype = bytes_to_ascii_str(t)
+///       match ...
+///
+/// 编译出来是 "The value identifier ctype is unbound",而错误指向的是**几百行
+/// 之后**那个用到 ctype 的结构体字面量,和真正的原因隔着一整个嵌套的
+/// match。拆成两个函数之后,`ctype` 是一个参数,作用域问题不存在了。
+fn parse_channel_open_tail(
+  payload : FixedArray[Byte],
+  ctype : String,
+  o1 : Int32,
+) -> ChannelOpen? {
+  match read_u32_at(payload, o1) {
+    None => None
+    Some((sender, o2)) =>
+      match read_u32_at(payload, o2) {
+        None => None
+        Some((win, o3)) =>
+          match read_u32_at(payload, o3) {
+            None => None
+            Some((maxp, o4)) =>
+              if ctype == "session" {
+                if o4 != payload.length() {
+                  None
+                } else {
+                  Some({
+                    ctype,
+                    sender,
+                    window: win,
+                    max_packet: maxp,
+                    host: "",
+                    port: 0,
+                    originator_ip: "",
+                    originator_port: 0,
+                  })
+                }
+              } else if ctype == CHANNEL_TYPE_DIRECT_TCPIP ||
+                ctype == CHANNEL_TYPE_FORWARDED_TCPIP {
+                match read_string_at(payload, o4) {
+                  None => None
+                  Some((h, o5)) =>
+                    match read_u32_at(payload, o5) {
+                      None => None
+                      Some((p, o6)) =>
+                        match read_string_at(payload, o6) {
+                          None => None
+                          Some((oi, o7)) =>
+                            match read_u32_at(payload, o7) {
+                              None => None
+                              Some((op, o8)) =>
+                                if o8 != payload.length() {
+                                  None
+                                } else {
+                                  Some({
+                                    ctype,
+                                    sender,
+                                    window: win,
+                                    max_packet: maxp,
+                                    host: bytes_to_ascii_str(h),
+                                    port: p,
+                                    originator_ip: bytes_to_ascii_str(oi),
+                                    originator_port: op,
+                                  })
+                                }
+                            }
+                        }
+                    }
+                }
+              } else {
+                // 不认识的通道类型:公共前缀解析成功就算成功,类型相关的
+                // 字段留空,尾部不检查(布局未知)。
+                Some({
+                  ctype,
+                  sender,
+                  window: win,
+                  max_packet: maxp,
+                  host: "",
+                  port: 0,
+                  originator_ip: "",
+                  originator_port: 0,
+                })
+              }
+          }
+      }
+  }
+}
+
+///|
+/// CHANNEL_OPEN_CONFIRMATION (RFC 4254 §5.1)
+///
+///     uint32  recipient channel
+///     uint32  sender channel
+///     uint32  initial window size
+///     uint32  maximum packet size
+///
+/// **两个号的顺序是反直觉的**:recipient 是**对端**的号(就是它发来的 CHANNEL_OPEN
+/// 里的 sender),sender 是**我们**的号。之后所有我们发给它的包都用它的号当
+/// recipient——所以确认包里这两个号写反的后果不是「连接失败」,而是「后面
+/// 每一个包都发到一条不存在的通道上」,而服务端会安静地忽略它们。
+///
+/// 方向也是反直觉的一半:在 direct-tcpip 里是我们开通道、服务端回确认;在
+/// forwarded-tcpip 里是**服务端**开通道、我们回确认。同一个消息,两个方向。
+pub fn channel_open_confirmation_payload(
+  recipient : Int32,
+  sender : Int32,
+  window : Int32,
+  max_packet : Int32,
+) -> FixedArray[Byte] {
+  ch_cat_all([u32be(recipient), u32be(sender), u32be(window), u32be(max_packet)])
+}
+
+///|
+/// CHANNEL_OPEN_FAILURE (RFC 4254 §5.1)
+///
+///     uint32  recipient channel
+///     uint32  reason code
+///     string  description
+///     string  language tag
+///
+/// 我们拒绝对端发起的通道时用它。`SSH_OPEN_ADMINISTRATIVELY_PROHIBITED` 是
+/// RFC 4254 §5.1 里的 reason 1,OpenSSH 拒绝对端发起的通道时用的也是它
+/// (clientloop.c 的 `SSH2_OPEN_ADMINISTRATIVELY_PROHIBITED`)。
+pub fn channel_open_failure_payload(
+  recipient : Int32,
+  reason : Int32,
+  description : String,
+  language : String,
+) -> FixedArray[Byte] {
+  ch_cat_all([
+    u32be(recipient),
+    u32be(reason),
+    @sshwire.write_ssh_string(ch_ascii(description)),
+    @sshwire.write_ssh_string(ch_ascii(language)),
+  ])
+}
+
+///|
+/// reason code:administratively prohibited(RFC 4254 §5.1)
+pub const SSH_OPEN_ADMINISTRATIVELY_PROHIBITED : Int32 = 1
+
+///|
 /// CHANNEL_REQUEST (RFC 4254 §6.1 / channels.c:1948)
 ///
 ///     uint32  recipient channel
