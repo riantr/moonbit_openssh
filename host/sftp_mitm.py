@@ -585,6 +585,21 @@ def main():
     listener.listen(1)
     listener.settimeout(60)
 
+    # Say that we are listening.
+    #
+    # The gates used to sleep for a fixed 1.2--1.5 seconds and hope.  That is
+    # a guess about how long "start python, import paramiko, bind a port"
+    # takes, and on a loaded machine it is a guess that loses: the client's
+    # connect() is then refused, and the symptom -- "the client could not
+    # connect" -- reads like a protocol difference rather than like a race.
+    # The gate that pays for the cold start is the first one to run, which is
+    # why the failure always lands on the same gate and looks like a
+    # regression in that gate's subject.
+    #
+    # stderr, not stdout: stdout carries the JSON transcript, and the gates
+    # parse the last line of it.
+    print("listening on 127.0.0.1:%d" % args.port, file=sys.stderr, flush=True)
+
     holder = {}
 
     def accept_one():

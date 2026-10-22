@@ -38,6 +38,7 @@ import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sshUser } from './ssh_user.mjs';
+import { waitForMitmReady } from "./mitm_ready.mjs";
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = join(root, ".loop54");
@@ -89,7 +90,9 @@ async function startMitm(tag, extra = []) {
     { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   let err = "";
   proc.stderr.on("data", (d) => (err += d.toString()));
-  await sleep(1200);
+  // Wait for the MITM to say it is listening, rather than guessing how long
+  // that takes.  See host/mitm_ready.mjs.
+  await waitForMitmReady(() => err);
   if (proc.exitCode !== null || proc.signalCode !== null) {
     throw new Error(`the man in the middle for ${tag} died on port ${port}: ${err.trim().slice(0, 400) || "(no stderr)"}`);
   }

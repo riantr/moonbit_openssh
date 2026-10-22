@@ -63,6 +63,7 @@ import {
   wtCfg,
 } from "./wt_browser.mjs";
 import { sshUser } from "./ssh_user.mjs";
+import { waitForMitmReady } from "./mitm_ready.mjs";
 
 let chromium = null;
 try {
@@ -120,7 +121,9 @@ async function startMitm(tag, certSpec) {
   const proc = spawn("python", argv, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   let err = "";
   proc.stderr.on("data", (d) => (err += d.toString()));
-  await sleep(1200);
+  // Wait for the MITM to say it is listening, rather than guessing how long
+  // that takes.  See host/mitm_ready.mjs.
+  await waitForMitmReady(() => err);
   // Loop #52's check, and the reason it is here rather than being new: `freePort()`
   // closes a listener and hands the number back, and the OS may have given it to
   // something else in the meantime, or paramiko died on it. Either way the client

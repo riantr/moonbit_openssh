@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForMitmReady } from "./mitm_ready.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXE = path.join(
@@ -171,7 +172,19 @@ async function runScenario(vector, chop, renderedFromMbt) {
   mitm.stdout.on("data", (d) => (mitmOut += d.toString()));
   mitm.stderr.on("data", (d) => (mitmErr += d.toString()));
 
-  await sleep(1500);
+  // Wait for the MITM to say it is listening.
+  //
+  // The gate used to sleep for 1.5 seconds and hope.  That is a guess about
+  // how long "start python, import paramiko, bind a port" takes, and this
+  // gate is the FIRST one to run, so it is the one that pays for the
+  // interpreter's cold start.  On a loaded runner the guess loses, the
+  // client's connect() is refused, and the failure reads like a protocol
+  // difference rather than like a race.  See host/mitm_ready.mjs.
+  const mitmUp = await waitForMitmReady(() => mitmErr);
+  if (!mitmUp) {
+    mitm.kill();
+    return { tag, ok: false, why: "the mitm never came up\n      " + mitmErr.slice(0, 400) };
+  }
 
   // The prebuilt executable, not `moon run`.
   //

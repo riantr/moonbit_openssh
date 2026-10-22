@@ -62,6 +62,7 @@ import {
   tofuEntry,
 } from "./tofu_transcript.mjs";
 import { sshUser } from "./ssh_user.mjs";
+import { waitForMitmReady } from "./mitm_ready.mjs";
 
 let chromium = null;
 try {
@@ -121,7 +122,9 @@ async function startMitm(tag, extra) {
   );
   let err = "";
   proc.stderr.on("data", (d) => (err += d.toString()));
-  await sleep(1200);
+  // Wait for the MITM to say it is listening, rather than guessing how long
+  // that takes.  See host/mitm_ready.mjs.
+  await waitForMitmReady(() => err);
   return { proc, json, port, err: () => err };
 }
 

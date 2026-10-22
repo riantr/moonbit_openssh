@@ -34,6 +34,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForMitmReady } from "./mitm_ready.mjs";
 
 // The browser plumbing is shared with `host/verify_loop47.mjs`: serving the
 // directory, opening a page, driving the Worker and rendering a Worker's
@@ -173,7 +174,9 @@ async function runScenario(browser, httpPort, vector, chop) {
   );
   let mitmErr = "";
   mitm.stderr.on("data", (d) => (mitmErr += d.toString()));
-  await sleep(1200);
+  // Wait for the MITM to say it is listening, rather than guessing how long
+  // that takes.  See host/mitm_ready.mjs.
+  await waitForMitmReady(() => mitmErr);
 
   // The WebSocket bridge.
   const bridge = spawn(

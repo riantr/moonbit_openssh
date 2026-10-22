@@ -6815,4 +6815,61 @@ window, the re-sent bytes not counted, and an EOF that is never sent.
   is the one that answers), so the two relays deliberately differ. The
   `pending` fix applies to both.
 
+---
+
+## Loop #79, follow-up: the gates that guessed how long a peer takes to start
+
+The push of Loop #79 made CI red -- `verify_loop45.mjs`, and nothing else.
+The new gate passed, every other gate passed, and the failing one had
+passed on the previous run with the same code.
+
+    FAIL  status_before_version  client could not connect
+
+Nothing in Loop #79 touched the SFTP fault-injection path, so the reading
+that suggests itself -- "the loop broke the SFTP client" -- was wrong
+before it was checked. Checked: the same gate, on the same tree, passes
+locally, 51/51.
+
+The cause was a fixed sleep. `verify_loop45.mjs` started the MITM
+(`host/sftp_mitm.py`, paramiko in server mode) and then waited
+
+    await sleep(1500);
+
+before letting the client connect. That is a guess about how long "start
+python, import paramiko, bind a port" takes, and on a loaded runner the
+guess loses: the client's `connect()` is refused, and the failure reads
+like a protocol difference rather than like a race.
+
+The detail that identifies it: **the failure always lands on the same
+gate**. The MITM gates run in numeric order and loop45 is the first of
+them, so it is the one that pays for the interpreter's cold start; every
+later gate reuses the warm page cache and passes. A defect that reproduces
+on exactly one gate, on the gate that happens to run first, is a
+scheduling race and not a protocol difference.
+
+The fix is the one `verify_loop46.mjs` already used for the WebSocket
+bridge: wait for the process to SAY it is ready.
+
+* `host/sftp_mitm.py` prints `listening on 127.0.0.1:<port>` on **stderr**
+  as soon as the socket is bound (stderr, because stdout carries the JSON
+  transcript and the gates parse its last line).
+* `host/mitm_ready.mjs` waits for that line.
+* Every MITM gate (45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 59) now waits
+  for it instead of sleeping.
+
+The port cannot be probed instead: `sftp_mitm.py` serves exactly one
+connection, so a probe would consume the accept the gate is waiting for.
+
+Verified locally after the change: loop45 51/51, loop47 19/19, loop59 7/7.
+
+### The rule this makes explicit
+
+**A gate must not guess how long a peer takes to start.** A sleep is a
+guess, and a guess that loses produces a failure that looks like a
+protocol difference. When a gate fails with "the client could not
+connect", the first thing to ask is whether the peer was ready yet -- and
+the answer has to come from the peer saying so, not from a number in the
+gate.
+
+
 

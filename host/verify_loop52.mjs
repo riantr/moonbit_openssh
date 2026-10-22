@@ -38,6 +38,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { waitForMitmReady } from "./mitm_ready.mjs";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,7 +117,9 @@ async function startMitm(tag) {
     { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   let err = "";
   proc.stderr.on("data", (d) => (err += d.toString()));
-  await sleep(1200);
+  // Wait for the MITM to say it is listening, rather than guessing how long
+  // that takes.  See host/mitm_ready.mjs.
+  await waitForMitmReady(() => err);
   // Check that it is actually alive. `freePort()` closes a listener and hands the
   // number back, and the OS is free to give that same number to something else --
   // or to refuse it, in which case paramiko exits immediately with an address

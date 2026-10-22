@@ -38,6 +38,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForMitmReady } from "./mitm_ready.mjs";
 
 import {
   exitedWithin,
@@ -106,7 +107,9 @@ async function startMitm(tag, extra) {
   );
   let err = "";
   proc.stderr.on("data", (d) => (err += d.toString()));
-  await sleep(1200);
+  // Wait for the MITM to say it is listening, rather than guessing how long
+  // that takes.  See host/mitm_ready.mjs.
+  await waitForMitmReady(() => err);
   return { proc, json, port, err: () => err };
 }
 
