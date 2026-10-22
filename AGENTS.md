@@ -6575,6 +6575,31 @@ gates with a timeout each cannot be taken down by the first one that hangs.
 The CI job runs `--tiers env,build,gates` and **not** the mutations tier, so
 the eight mutations of this loop do not lengthen it.
 
+### The CJK snapshot has to be regenerated when a loop writes Chinese
+
+`verify_loop67.mjs` compares the CJK content of every `.mbt` / `.moon` /
+`.pkg` file against a committed snapshot, and it fails when a file that is
+present in both has gained or lost a CJK run. The guard exists to catch a
+formatter that eats Chinese characters, and it cannot tell "the formatter
+ate it" from "a human wrote a new comment" -- it is not built to, and a
+human writing a new comment is the common case.
+
+So: **a loop that adds or edits Chinese comments must regenerate the
+snapshot** (`python host/cjk_snapshot.py save .cjk_snapshot.json`) and
+commit it. Three existing files changed here (`cmd/ssh_live/main.mbt`,
+`src/channel/channel.mbt`, `src/channel/exec.mbt`); the three new ones
+(`src/channel/globalreq.mbt`, `src/sshclient/remotefwd.mbt`,
+`cmd/remote_fwd_kat/main.mbt`) were only reported as NOTEs, which is the
+guard saying "a file I have never seen" rather than a failure.
+
+This cost a CI round trip. The first push of this loop reached the runner
+with the old snapshot, and `verify_loop67.mjs` was the **only** one of the
+52 steps that went red -- everything else, including this loop's own gate,
+was green. The report is in `ci/artifacts/steps/verify_loop67.mjs.log`, and
+the fix is one command. The order matters too: regenerate the snapshot
+**after** the last edit to a Chinese comment, and after `moon fmt`, because
+a snapshot taken in between is a snapshot of a tree that does not exist.
+
 ### The gaps this loop does not close
 
 * **No full-duplex relay.** See above: the local end is read right after it
