@@ -6600,6 +6600,39 @@ the fix is one command. The order matters too: regenerate the snapshot
 **after** the last edit to a Chinese comment, and after `moon fmt`, because
 a snapshot taken in between is a snapshot of a tree that does not exist.
 
+### A gate that went red for a reason that had nothing to do with the code
+
+`verify_loop49.mjs` (a peer gate) failed twice in a row on this machine:
+
+```
+FAIL  known_hosts round trip  spawn failed: spawnSync cmd ETIMEDOUT
+```
+
+with every other check in the gate green. The obvious reading is that the
+known_hosts round trip broke. It had not: the command it runs,
+`moon test src\knownhosts`, finishes in 0.7s by hand and prints
+"Total tests: 49, passed: 49, failed: 0".
+
+The cause was one character of the timeout. Node's `spawnSync` timeout is in
+**milliseconds**, and the call said `timeout: 900` -- nine tenths of a
+second. `moon test` has to compile the test driver, so it takes a second or
+two, and the check was killed before it could report anything. The same
+command in `verify_loop50.mjs` and `verify_loop51.mjs` says `900000`, and
+every other spawn in the tree says 30000 / 60000 / 90000 / 120000 /
+180000 / 300000 / 900000. loop49 was the only three-digit one, and it was
+the only one that failed.
+
+The unit is what made it invisible: **900 milliseconds is a plausible-looking
+number**, and the failure message does not say "milliseconds" -- it says
+`ETIMEDOUT`, which reads like the toolchain was unreachable rather than
+like a deadline that was too short for the work. It is fixed
+(`timeout: 900000`), and the gate is green: 11/11.
+
+The general rule this suggests, and the one worth keeping: **a gate that
+fails with a timeout has to be re-run by hand before it is believed.**
+A timeout says the deadline was hit, not that the work was wrong, and the
+two are indistinguishable from the failure message alone.
+
 ### The gaps this loop does not close
 
 * **No full-duplex relay.** See above: the local end is read right after it

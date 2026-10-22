@@ -314,8 +314,26 @@ async function main() {
   // end-to-end sequence below cannot see a lost `@revoked` marker -- nothing in
   // it writes one -- and a write-back that quietly turns a revocation into a
   // trust is worse than no write-back at all.
+  //
+  // The timeout is in MILLISECONDS, like every other spawnSync in this
+  // repository. It said `900` -- which is nine tenths of a second -- while
+  // the same command in verify_loop50.mjs and verify_loop51.mjs says
+  // `900000`. The effect was not a slow gate but a **false red**: `moon test
+  // src\knownhosts` has to compile the test driver, so it takes a second or
+  // two, and every run of this gate reported
+  //
+  //     FAIL  known_hosts round trip  spawn failed: spawnSync cmd ETIMEDOUT
+  //
+  // which reads like the round trip broke and is nothing of the kind. It
+  // reproduced twice in a row on a machine that was merely busy, and the
+  // command itself, run by hand, finished in 0.7s and printed
+  // "Total tests: 49, passed: 49, failed: 0".
+  //
+  // The unit that made it invisible is the reason this comment exists: a
+  // timeout of 900 **milliseconds** is a plausible-looking number, and
+  // nothing in the failure message says "milliseconds".
   const t = spawnSync("cmd", ["/c", "moon", "test", "src\\knownhosts"], {
-    cwd: root, encoding: "utf-8", errors: "replace", maxBuffer: 32 * 1024 * 1024, timeout: 900,
+    cwd: root, encoding: "utf-8", errors: "replace", maxBuffer: 32 * 1024 * 1024, timeout: 900000,
   });
   const tOut = norm(`${t.stdout || ""}${t.stderr || ""}`);
   if (t.status !== 0 || !/passed: \d+, failed: 0/.test(tOut)) {
