@@ -118,3 +118,157 @@ pub fn TcpConn::close(self : TcpConn) -> Unit {
     ignore(mb_tcp_close(self.handle))
   }
 }
+
+///|
+/// Loop #79: a listening socket.
+///
+/// `ssh -L 9000:db:5432 host` is two halves. The channel half -- "open a
+/// direct-tcpip channel and carry the bytes" -- is Loop #76. This is the
+/// other half: a local socket that *listens*, and turns every connection it
+/// accepts into one of those channels.
+///
+/// The reason it is a separate type and not a flag on `TcpConn` is the same
+/// reason `ByteStream` is a separate trait from `Transport` (Loop #78): a
+/// listening socket and a connected socket have different contracts, and
+/// merging them means every use site asks "which kind is this?".
+pub struct TcpListener {
+  handle : Int64
+  mut closed : Bool
+}
+
+///|
+/// What an accept attempt produced.
+///
+/// Three outcomes, not two, because "nothing has arrived yet" and "the
+/// accept failed" lead to different decisions: the first one means ask
+/// again, the second one means stop. Collapsing them into a single `None`
+/// would make a listener that cannot be stopped look like a listener that
+/// is merely idle.
+pub(all) enum AcceptOutcome {
+  /// A connection arrived: the socket, the peer's address, the peer's port.
+  Accepted(TcpConn, String, Int32)
+  /// Nothing arrived before the deadline. Not an error.
+  Timeout
+  /// The accept failed. The number is the backend's error code.
+  Failed(Int32)
+}
+
+///|
+/// The backend's "nothing arrived before the deadline" code.
+///
+/// It is spelled out here rather than taken from the C header because the
+/// js and wasm backends have to answer with the same value for the MoonBit
+/// side to behave the same on every target.
+const ACCEPT_TIMEOUT_CODE : Int64 = -7L
+
+///|
+/// Bind and listen.
+///
+/// Returns None when the socket could not be created, the address could not
+/// be parsed, or the bind failed -- which is what "the port is already
+/// taken" looks like from here.
+pub fn TcpListener::listen(host : String, port : Int32) -> TcpListener? {
+  let hb = Bytes::from_array(ascii_bytes(host))
+  match mb_tcp_listen(hb, host.length(), port) {
+    h if h < 0L => None
+    h => Some({ handle: h, closed: false, })
+  }
+}
+
+///|
+/// The port this listener is actually on.
+///
+/// Read back off the socket, not echoed from the request: the caller asked
+/// for port 0 to mean "you pick", and a caller that cannot find out which
+/// port was picked cannot connect to its own listener.
+pub fn TcpListener::port(self : TcpListener) -> Int32 {
+  if self.closed {
+    return 0
+  }
+  // Read the bytes back out of the **Bytes**, not out of the FixedArray.
+  //
+  // `Bytes::from_array` COPIES. The buffer C writes into is the Bytes, and
+  // the FixedArray is a separate copy that C never sees -- so reading the
+  // FixedArray back gives the zeros it was created with, and the port comes
+  // out as 0.
+  //
+  // This is the same trap `TcpConn::recv_some` documents, and it is worth
+  // spelling out twice: the first version of this function read the
+  // FixedArray, reported port 0, and the symptom was a listener that
+  // answered on a port nobody could connect to.
+  let out = FixedArray::make(2, b'\x00')
+  let b = Bytes::from_array(out)
+  if mb_tcp_local_port(self.handle, b) != 0 {
+    return 0
+  }
+  be16(b, 0)
+}
+
+///|
+/// Accept one connection, waiting at most `timeout_ms`.
+///
+/// The timeout is what makes the listener controllable: a caller that has
+/// finished its work (or has been told to stop) can come back and be told
+/// "nothing yet" instead of being stuck inside an accept that never
+/// returns.
+pub fn TcpListener::accept(
+  self : TcpListener,
+  timeout_ms : Int32,
+) -> AcceptOutcome {
+  if self.closed {
+    return Failed(-1)
+  }
+  let out = FixedArray::make(8, b'\x00')
+  let b = Bytes::from_array(out)
+  let h = mb_tcp_accept(self.handle, b, timeout_ms)
+  if h == ACCEPT_TIMEOUT_CODE {
+    return Timeout
+  }
+  if h < 0L {
+    return Failed(h.to_int())
+  }
+  // The annotation is needed because `TcpConn` and `TcpListener` have the
+  // same two field names, and a record literal with those names fits both.
+  let conn : TcpConn = { handle: h, closed: false, }
+  // Read back out of the Bytes, not the FixedArray -- see `port` above.
+  Accepted(conn, ipv4(b, 0), be16(b, 4))
+}
+
+///|
+/// Close the listening socket. Safe to call twice.
+///
+/// Closing it does NOT close the connections it accepted: each of those is
+/// its own socket with its own lifetime, and a forward that closed the
+/// accepted connection when the listener went away would cut off a transfer
+/// that was in the middle of happening.
+pub fn TcpListener::close(self : TcpListener) -> Unit {
+  if !self.closed {
+    self.closed = true
+    ignore(mb_tcp_close(self.handle))
+  }
+}
+
+///|
+/// Big-endian u16 at `off`.
+///
+/// Two bytes, so the result cannot overflow: the largest value is 65535,
+/// which fits an Int32 with room to spare. A four-byte reader would have
+/// to hold 0xFFFFFFFF somewhere, and an Int32 that overflows is a panic in
+/// a debug build.
+fn be16(b : Bytes, off : Int32) -> Int32 {
+  (b[off].to_int() & 0xFF) * 256 + (b[off + 1].to_int() & 0xFF)
+}
+
+///|
+/// IPv4 address at `off`, in dotted-quad form.
+///
+/// The bytes are in network order, so the first one is the highest octet.
+fn ipv4(b : Bytes, off : Int32) -> String {
+  b[off].to_int().to_string() +
+  "." +
+  b[off + 1].to_int().to_string() +
+  "." +
+  b[off + 2].to_int().to_string() +
+  "." +
+  b[off + 3].to_int().to_string()
+}

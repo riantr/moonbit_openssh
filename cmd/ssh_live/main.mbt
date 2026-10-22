@@ -1137,6 +1137,200 @@ async fn run_remote_forward(
 }
 
 ///|
+/// Loop #79: `--local-forward <listen_port>:<dest_host>:<dest_port>`
+///
+
+///|
+/// `ssh -L` 的另外那一半:客户端在**本地**监听一个端口,每有一条本地连接
+/// 进来,就开一条 direct-tcpip 通道请服务端去连目标,再把两个方向的字节
+/// 搬过去。
+///
+/// 和 `--remote-forward` 正好相反:
+///   * `--remote-forward` 服务端开通道,客户端去连目标(协议层是 `ssh -R`)
+///   * `--local-forward`    客户端开通道,服务端去连目标(协议层是 `ssh -L`)
+///
+/// 端口写 0 表示「本地你挑一个」,那端口在**监听成功之后**就知道,所以
+/// 它会被单独打印一行(`listen_port:`,走 stderr)——门禁要靠它连过来。
+fn local_forward_target(argv : Array[String]) -> (Int32, String, Int32)? {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--local-forward" && i + 1 < argv.length() {
+      let spec = argv[i + 1]
+      // 第一个冒号分出监听端口,剩下的按**最后一个**冒号分出目标地址和端口。
+      // 最后一个而不是第一个:目标地址可能是 IPv6 字面量(`[::1]`),按第一个
+      // 冒号切会把地址切成两半,而那会连到一个完全不同的目标——比解析失败
+      // 更糟。
+      let mut first = -1
+      let mut last = -1
+      for j = 0; j < spec.length(); j = j + 1 {
+        if spec[j] == ':' {
+          if first < 0 {
+            first = j
+          }
+          last = j
+        }
+      }
+      if first <= 0 || last <= first || last + 1 >= spec.length() {
+        return None
+      }
+      let listen = parse_port(spec.unsafe_substring(start=0, end=first), -1)
+      if listen < 0 || listen > 65535 {
+        return None
+      }
+      let h = spec.unsafe_substring(start=first + 1, end=last)
+      let p = parse_port(
+        spec.unsafe_substring(start=last + 1, end=spec.length()),
+        0,
+      )
+      if h.length() == 0 || p <= 0 {
+        return None
+      }
+      return Some((listen, h, p))
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// 命令行里有没有 `--local-forward`
+fn wants_local_forward(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--local-forward" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
+/// 打印一次本地转发的结果。
+///
+/// 和 `print_remote_forward_report` 同一个形状:验证脚本读的是长度和计数,
+/// 不是人眼读一遍——转发的内容是二进制的。
+fn print_local_forward_report(r : @sshclient.LocalForwardReport) -> Unit {
+  println("connections: " + r.connections.to_string())
+  println("local_to_channel: " + r.local_to_channel.to_string())
+  println("channel_to_local: " + r.channel_to_local.to_string())
+  println("packets: " + r.packets.to_string())
+  println("remote_id: " + r.remote_id.to_string())
+  println("originator_ip: " + r.originator_ip)
+  println("originator_port: " + r.originator_port.to_string())
+  println("eof_sent: " + yn(r.eof_sent))
+  println("closed: " + yn(r.closed))
+  println("kex_alg: " + r.auth.session.handshake.kex_alg)
+  println("cipher_ctos: " + r.auth.session.handshake.cipher_ctos)
+}
+
+///|
+/// 本地转发的失败原因
+fn local_forward_error_name(e : @sshclient.LocalForwardError) -> String {
+  match e {
+    @sshclient.AuthFailed(inner) => "AuthFailed(" + auth_error_name(inner) + ")"
+    @sshclient.OpenFailed(r, d) =>
+      "OpenFailed(" + r.to_string() + ", " + d + ")"
+    @sshclient.AcceptFailed(w) => "AcceptFailed(" + w + ")"
+    @sshclient.Malformed(w) => "Malformed(" + w + ")"
+    @sshclient.Closed => "Closed"
+    @sshclient.BadPacket(w) => "BadPacket(" + w + ")"
+    @sshclient.SendFailed => "SendFailed"
+    @sshclient.LinkFailed(w) => "LinkFailed(" + w + ")"
+    @sshclient.TooManyPackets => "TooManyPackets"
+    @sshclient.NoConnection => "NoConnection"
+  }
+}
+
+///|
+/// Loop #79:对真实 sshd 做一次本地端口转发(`ssh -L`)。
+///
+/// 监听端口在**监听成功之后**立刻打印一行 `listen_port:`(走 stderr)——
+/// 门禁要靠它连过来,而那一刻中继还没开始。晚一步打印,门禁就连不上了。
+async fn run_local_forward(
+  host : String,
+  port : Int32,
+  user : String,
+  kh : KhConfig,
+  listen_port : Int32,
+  dest_host : String,
+  dest_port : Int32,
+  max_conns : Int32,
+  max_idle_rounds : Int32,
+) -> Unit {
+  println("=== Loop #79 local forward (ssh -L) vs real sshd ===")
+  println("port: " + port.to_string())
+  println("user: " + user)
+  println("listen_port_requested: " + listen_port.to_string())
+  println("dest_host: " + dest_host)
+  println("dest_port: " + dest_port.to_string())
+  match @tcp.TcpConn::connect(host, port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      return
+    }
+    Some(conn) => {
+      // 监听器在**本地**,和 SSH 连接是两条不同的 socket。
+      //
+      // 监听地址写死 127.0.0.1:真的 `ssh -L` 默认也只绑回环(`GatewayPorts
+      // no` 的时候 OpenSSH 绑 127.0.0.1),而且绑 0.0.0.0 会把一个还没
+      // 验证过对端的转发暴露给整个网络。
+      let listener = match @tcp.TcpListener::listen("127.0.0.1", listen_port) {
+        None => {
+          println("result: LISTEN_FAILED")
+          conn.close()
+          return
+        }
+        Some(l) => l
+      }
+      // 端口是**问 socket 要**的,不是把请求里写的那个抄下来:请求写 0 的
+      // 时候「你挑一个」,抄下来的是 0,连都连不上。
+      let actual = listener.port()
+      // 走 stderr 而不是 stdout:stdout 在管道里是块缓冲的,而这个进程接下来
+      // 会**阻塞**在 accept 上——缓冲里的内容要等到进程结束才吐出来,于是
+      // 调用方永远等不到这个端口,只能看着客户端挂着。
+      eprintln("listen_port: " + actual.to_string())
+      // 闭包的类型写出来,是因为 `L` 是从它的返回值推出来的,不写的话泛型
+      // 参数推不出来(而报错会指向泛型定义,不是调用点)。
+      let accept : () -> @sshclient.AcceptResult[@tcp.TcpConn] = fn() {
+        match listener.accept(200) {
+          @tcp.Accepted(c, ip, p) => @sshclient.Accepted(c, ip, p)
+          @tcp.Timeout => @sshclient.NoConnection
+          @tcp.Failed(code) =>
+            @sshclient.Failed("accept failed: " + code.to_string())
+        }
+      }
+      let outcome = @sshclient.live_local_forward(
+        conn,
+        fixed_x(),
+        user,
+        test_auth_key(),
+        kh.policy,
+        accept,
+        dest_host,
+        dest_port,
+        max_conns,
+        max_idle_rounds,
+      )
+      listener.close()
+      conn.close()
+      match outcome {
+        @sshclient.Done(r) => {
+          println("result: LOCAL_FORWARD_DONE")
+          // 认证成功了就该记住主机密钥,和认证那条路径同一套逻辑。
+          kh_report_tofu(kh, r.auth)
+          print_local_forward_report(r)
+        }
+        @sshclient.Failed(e) => {
+          println("result: LOCAL_FORWARD_FAILED")
+          println("error: " + local_forward_error_name(e))
+        }
+      }
+    }
+  }
+}
+
+///|
 /// 截断上限 512 而不是 128:`Loop #37 的远端 fixture 会把 stdin 的字节数、摘要、
 
 ///| 首尾各 16 字节**和**环境变量一起打出来,一共将近 200 字节。128 会把最后
@@ -2238,6 +2432,31 @@ async fn main {
         // 而实际上一个字节都没发出去。
         println("result: BAD_REMOTE_FORWARD_TARGET")
         println("usage: --remote-forward <listen_port>:<dest_host>:<dest_port>")
+        return
+      }
+    }
+  }
+  if wants_local_forward(argv) {
+    match local_forward_target(argv) {
+      Some((lp, dh, dp)) => {
+        run_local_forward(
+          host,
+          port,
+          user,
+          kh,
+          lp,
+          dh,
+          dp,
+          int_flag(argv, "--max-conns", 0),
+          int_flag(argv, "--max-idle-rounds", 0),
+        )
+        return
+      }
+      None => {
+        // 目标写错了必须说出来。静默忽略的话,调用方会以为转发跑过了,
+        // 而实际上一个字节都没发出去。
+        println("result: BAD_LOCAL_FORWARD_TARGET")
+        println("usage: --local-forward <listen_port>:<dest_host>:<dest_port>")
         return
       }
     }

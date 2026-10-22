@@ -332,6 +332,17 @@ pub fn[T : @transport.Transport, L : @transport.ByteStream] live_remote_forward(
   let mut expect_link = false
   let mut link_open = true
   let mut closing = false
+  // `pending` 是**还没发出去**的字节。
+  //
+  // 它必须留着:`stdin_take` 是**夹取**不是报错——窗口不够时它返回
+  // `(状态, None, 全量剩余)`,意思是「这轮没轮到发,剩下的还在缓冲里」。
+  // 把剩余丢掉就是**静默丢数据**:对端一慢、窗口一满,本地读来的字节就
+  // 消失了,而转发看起来一切正常。
+  //
+  // 早先这里写的是 `let (c2, action, rest) = ...` 然后**扔掉 `rest`**,
+  // 症状是「大文件转发时对端一慢就传输静默损坏」:字节数对不上,而转发
+  // 全程「正常」。
+  let mut pending : FixedArray[Byte] = FixedArray::make(0, b'\x00')
   if payload.length() > 0 {
     if !link.stream_send(payload) {
       link.stream_close()
@@ -345,8 +356,44 @@ pub fn[T : @transport.Transport, L : @transport.ByteStream] live_remote_forward(
       link.stream_close()
       return Failed(RemoteForwardError::TooManyPackets)
     }
+    // 7a-0. 先把欠着的补上。
+    //
+    // 补发是**循环**的:一次最多发一个包(窗口和对端最大包长夹着),
+    // 一次只补一个包的话,窗口开着的时候我们每轮只发 32 KiB,而对端的
+    // WINDOW_ADJUST 是攒着发的——一轮一个包会把自己卡死在下一次 adjust
+    // 之前。
+    if pending.length() > 0 {
+      let mut sending = true
+      while sending {
+        let before = pending.length()
+        let (c2, action, rest) = chan.stdin_take(pending)
+        chan = c2
+        pending = rest
+        match action {
+          None => sending = false
+          Some(x) =>
+            match send_action(conn, st, x) {
+              None => {
+                link.stream_close()
+                return Failed(RemoteForwardError::SendFailed)
+              }
+              Some(s) => {
+                st = s
+                // 这一包带走了多少字节:读之前减去读之后。被窗口裁掉的那部分
+                // 在 7a 读的时候还没发出去(还在 `pending` 里),真正发出去是
+                // 在这里——不补上,计数器就会少算被裁掉又补发的那部分。
+                to_channel = to_channel + before - pending.length()
+                packets = packets + 1
+              }
+            }
+        }
+      }
+    }
     // 7a. 本地端 -> 通道。只在**刚写完本地端之后**才读它。
-    if expect_link && link_open {
+    //
+    // 欠着账的时候**不读**本地端:读进来的字节只会让缓冲更长,而窗口不开
+    // 就一个字节也发不出去。
+    if expect_link && link_open && pending.length() == 0 {
       let chunk = link.stream_recv_some(LINK_CHUNK)
       if chunk.length() == 0 {
         // 本地端关了:把 EOF 告诉服务端,这一侧到此为止。
@@ -367,6 +414,7 @@ pub fn[T : @transport.Transport, L : @transport.ByteStream] live_remote_forward(
       } else {
         let (c2, action, rest) = chan.stdin_take(chunk)
         chan = c2
+        pending = rest
         match action {
           None => ()
           Some(x) =>
@@ -375,11 +423,15 @@ pub fn[T : @transport.Transport, L : @transport.ByteStream] live_remote_forward(
                 link.stream_close()
                 return Failed(RemoteForwardError::SendFailed)
               }
-              Some(s) => st = s
+              Some(s) => {
+                st = s
+                packets = packets + 1
+              }
             }
         }
+        // 只有**被通道收下的**那部分才算「已经送出去了」:被窗口裁掉的还在
+        // `pending` 里,等 7a-0 补发的时候才计。
         to_channel = to_channel + chunk.length() - rest.length()
-        packets = packets + 1
       }
       expect_link = false
     }

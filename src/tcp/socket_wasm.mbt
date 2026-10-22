@@ -35,3 +35,31 @@ fn mb_tcp_close(h : Int64) -> Int32 {
   ignore(h)
   -1
 }
+
+///|
+/// Loop #79: the wasm stand-in for the listening socket.
+///
+/// A browser has no raw sockets, so there is nothing to listen with. The
+/// functions are plain MoonBit rather than FFI stubs because the wasm
+/// backends reject `extern "js"` outright.
+fn mb_tcp_listen(host : Bytes, host_len : Int32, port : Int32) -> Int64 {
+  ignore(host)
+  ignore(host_len)
+  ignore(port)
+  -1L
+}
+
+///|
+fn mb_tcp_local_port(h : Int64, port_out : Bytes) -> Int32 {
+  ignore(h)
+  ignore(port_out)
+  -1
+}
+
+///|
+fn mb_tcp_accept(h : Int64, peer : Bytes, timeout_ms : Int32) -> Int64 {
+  ignore(h)
+  ignore(peer)
+  ignore(timeout_ms)
+  -1L
+}

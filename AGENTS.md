@@ -6639,11 +6639,180 @@ two are indistinguishable from the failure message alone.
   is written to.
 * **No local listener.** `ssh -L` means "listen locally, and for each
   connection open a direct-tcpip channel". The listener is still missing;
-  Loop #76 built the channel half.
+  Loop #76 built the channel half. -- **closed by Loop #79**, see below.
 * **No browser path.** `src/wtlive` drives the same protocol over a
   WebSocket, and a peer-initiated channel has to be handled there too. The
   protocol layer is shared (`src/channel`), so the browser side needs a
   driver, not a second implementation.
 * **No `cancel-tcpip-forward`.** The request exists in the protocol and the
   constant is in `src/channel/globalreq.mbt`; nothing sends it yet.
+
+---
+
+## Loop #79: the local listener -- the other half of `ssh -L`
+
+### What was missing
+
+`ssh -L 9000:db:5432 host` is two things:
+
+1. the client **listens** on a local port, and
+2. every connection that arrives on that port becomes one "direct-tcpip"
+   channel to the server (RFC 4254 section 7), and the bytes are relayed to
+   and from the server's target.
+
+Loop #76 built the channel half. Nothing listened: there was no `listen()`
+anywhere in the repository, so a client could open a direct-tcpip channel but
+there was no way for a local program to reach one. Loop #78 built the mirror
+image (`ssh -R`: the server opens the channel, the client relays to its own
+target).
+
+This loop adds the listener (`src/tcp`), the relay that drives it
+(`src/sshclient/locallisten.mbt`), the command-line mode
+(`cmd/ssh_live --local-forward`) and the gate.
+
+### The listener is its own type, and it is in `src/tcp`
+
+A listening socket and a connected socket have different contracts -- the
+same reason `ByteStream` is a separate trait from `Transport` (Loop #78) --
+so `TcpListener` is a separate type with `listen` / `port` / `accept` /
+`close`.
+
+`accept` takes a deadline and reports **three** outcomes, not two:
+`Accepted(conn, peer_ip, peer_port)`, `Timeout` ("nobody yet") and `Failed`
+("the listener is broken"). Collapsing the last two into a single `None`
+makes a listener that cannot be stopped look like a listener that is merely
+idle, and the relay has to tell those apart: "nobody is using this forward"
+and "the forward is broken" call for different actions.
+
+The relay does not mention `TcpListener` at all. `src/sshclient` does not
+depend on `src/tcp` (Loop #64 removed that arrow on purpose, and loop64's
+gate asserts that the repository has exactly one `impl Transport for`), so
+the listener arrives as an injected closure:
+
+    accept : () -> AcceptResult[连接]
+
+`AcceptResult` has the same three cases as `AcceptOutcome`, for the same
+reason: `NoConnection` means "ask again", `Failed` means "stop".
+
+### Three defects in the socket layer that had to be fixed first
+
+1. **`mb_tcp_close` called `WSACleanup()` on every close.** A Winsock
+   process calls `WSACleanup()` once, at the end. Calling it on every socket
+   close tears the process's Winsock state down while other sockets are
+   still open -- and a local forward has three sockets at once (the
+   listener, the SSH connection, the accepted connection). The socket count
+   is now tracked, and the cleanup happens when the last one goes.
+2. **`Bytes::from_array` copies.** The buffer C writes into is the `Bytes`,
+   not the `FixedArray` that was handed to it. Reading the bound port back
+   out of the `FixedArray` returns the zeros it was created with -- which is
+   how the first version of this loop reported "port 0" for a listener that
+   was working perfectly. The trap is already documented in
+   `TcpConn::recv_some`; it is now documented twice, because it was paid for
+   twice.
+3. **The accepted connection's peer address is read back out of the `Bytes`
+   too**, for the same reason.
+
+### The relay's shape: strictly alternating, and why
+
+MoonBit has no threads, and two blocking reads starve each other, so the
+relay runs one direction per round:
+
+1. send whatever is owed (`pending`),
+2. read the local end, send it into the channel,
+3. read the channel, write it to the local end.
+
+Step 3 has to come after step 2 for the same reason Loop #78's relay reads
+the local end after writing to it: the local end of an `ssh -L` is usually
+the party that speaks **first** (request/response protocols: HTTP, a
+database, SSH itself), and a reply that sits in the channel while we block
+on the local socket is a deadlock.
+
+The known boundary, stated in the code rather than hidden: a target that
+**speaks first** (an SMTP banner, say) stalls the relay in step 2, because
+the local end stays quiet and we wait for it. A real `ssh -L` selects on
+both ends; that needs a pollable transport, which is listed in the gaps.
+
+### "A read that did not fill the buffer means there is no more"
+
+Step 2 reads up to 32 KiB. A **short** read means the socket has nothing
+more for now, so the round moves on to the channel. A **full** read means
+there probably is more, so it reads again and sends again.
+
+This is not an optimisation; it is the difference between "small transfers
+work" and "large transfers finish". The SSH channel window is 2 MiB, and the
+peer's `WINDOW_ADJUST` is **batched** (OpenSSH tops the window up once the
+peer has consumed half of it). If the relay sent 32 KiB and then went back
+to wait for a packet, it would wait for an adjust that only comes after the
+peer has consumed 1 MiB -- and it would never get there, because it was not
+sending any more. Both sides wait for the other: the transfer stops after
+32 KiB and looks like a hang.
+
+### The `rest` that `stdin_take` returns is not "the part we did not send"
+
+`stdin_take` **clips** the payload to the channel window and returns the
+rest. The rest is "the part we have not sent **yet**". Dropping it is
+silent data loss: the client believes it forwarded everything, the far end
+received less, and nothing anywhere reports an error.
+
+**Loop #78's relay dropped it.** The symptom was "a big transfer is quietly
+corrupted": the bytes that do not fit in the window are the ones that
+disappear, and the client looks perfectly healthy. This loop fixed that
+relay as well, and the new relay keeps the remainder in a `pending` buffer
+until the window opens again.
+
+Both relays now also count the bytes they re-send. The count used to be
+taken when the bytes were **read**, which only counts the part the channel
+accepted at that moment; the clipped remainder is counted when it is
+actually sent. Forgetting the second half produces a report that is
+*smaller* than the truth on a transfer that worked -- nothing is broken,
+only counted wrong, which is the kind of defect that hides for years.
+
+### What the gate proves
+
+`host/verify_loop79.mjs`, 55 checks:
+
+* **A. The code builds** (`cmd/ssh_live`, `cmd/listen_kat`).
+* **B. The listener works with no SSH server anywhere near it.** It binds,
+  reports the port it actually got, accepts a connection, and sees the
+  peer's **real** address and port. This section runs on every machine,
+  including one with no OpenSSH installed.
+* **C1. A real OpenSSH server forwards for us.** A probe connects to the
+  port the client is listening on; the bytes go both ways; the counters
+  agree; the echo target's own digest agrees; and the server's log names
+  the probe's real ephemeral port as the originator -- the number Loop #76
+  could only put a zero in.
+* **C2. Two local connections over ONE ssh session.** The server logged two
+  channels with two different numbers, and one authentication.
+* **D. More bytes than the channel window holds.** Four megabytes through a
+  2 MiB window, with the far end deliberately **not reading** until the
+  gate lets it -- a target that reads as fast as it can would never close
+  the window, and the case would prove nothing. The far end's byte count
+  and digest have to match exactly.
+* **E. A server that refuses to forward says so** (`AllowTcpForwarding no`
+  -> `OpenFailed`), and does not hang.
+* **F. Nobody connects is told apart from a broken listener**
+  (`NoConnection`, not a hang).
+
+`host/loop79_mutations.py` turns nine of those checks red on purpose: the
+clipped bytes dropped, a made-up originator, a port that is not read back
+off the socket, a made-up peer port, a reused channel number, the channel's
+bytes dropped on the floor, a `WINDOW_ADJUST` that does not reopen the
+window, the re-sent bytes not counted, and an EOF that is never sent.
+
+### The gaps this loop does not close
+
+* **No full-duplex relay.** The local end is read only between the channel
+  reads (see above). A target that speaks first stalls it.
+* **No concurrent connections.** One connection is forwarded at a time, and
+  the next is not accepted until the current one finishes. Real `ssh -L`
+  handles many at once; that needs either threads or a pollable transport.
+* **No browser path.** A browser has no listening socket, so the browser
+  build of this feature would be the other direction (the page asks the
+  server to connect out). The protocol half is shared.
+* **No `cancel-tcpip-forward`.** Still not sent.
+* **The `ssh -R` relay still reads the local end only right after writing
+  to it.** That direction needs the opposite discipline (the local target
+  is the one that answers), so the two relays deliberately differ. The
+  `pending` fix applies to both.
+
 
