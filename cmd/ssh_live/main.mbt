@@ -1137,6 +1137,215 @@ async fn run_remote_forward(
 }
 
 ///|
+/// Loop #81: `--forward-cancel <listen_host>:<listen_port>`
+///
+
+///|
+/// 撤销一次远程端口转发:请服务端监听,拿到它挑的端口,再把这一发撤销掉。
+///
+/// 命令行里有两个模式,区别只在**第一发撤销要不要回包**:
+///
+///   * `--forward-cancel`             第一发要回包(和 `[true, true]` 一致);
+///   * `--forward-cancel-no-reply`    第一发不要回包(和 `[false, true]` 一致),
+///     这才是 OpenSSH 自己的客户端发法(`channels.c` 里那行
+///     `sshpkt_put_u8(ssh, 0)`)。
+///
+/// 两种模式第二发都要回包,而它的答案必须**相反**:
+///
+///   * 第一发要回包时:第一发 SUCCESS(服务端找到了监听器),第二发 FAILURE
+///     (监听器已经没了);
+///   * 第一发不要回包时:第一发没有回包,第二发必须是 FAILURE——服务端是**按
+///     顺序**处理同一个连接上的包的,处理到第二发时第一发早就处理完了;
+///     如果第一发被丢掉或者格式错了,监听器还在,第二发会回 SUCCESS。
+///
+/// 所以「第一发没要回包」这件事不是靠「没报错」推断的,是被第二发**证伪**了。
+///
+/// 端口探测在撤销**之前**做一次、之后做一次。顺序不能改:撤销之后再探测,
+/// 看到的「连不上」也可能只是因为连接已经断了(服务端在会话结束时会把
+/// 监听器一起收掉),那样这个探测就什么也没证明。探测在连接**还活着**的时候做。
+fn forward_cancel_target(argv : Array[String]) -> (String, Int32)? {
+  let mut i = 1
+  while i < argv.length() {
+    if (argv[i] == "--forward-cancel" || argv[i] == "--forward-cancel-no-reply") &&
+      i + 1 < argv.length() {
+      let spec = argv[i + 1]
+      // 按**最后一个**冒号切:地址可能是 IPv6 字面量(`[::1]`),按第一个冒号
+      // 切会把地址切成两半,而那会连到一个完全不同的目标。
+      let mut last = -1
+      for j = 0; j < spec.length(); j = j + 1 {
+        if spec[j] == ':' {
+          last = j
+        }
+      }
+      if last <= 0 || last + 1 >= spec.length() {
+        return None
+      }
+      let h = spec.unsafe_substring(start=0, end=last)
+      let p = parse_port(
+        spec.unsafe_substring(start=last + 1, end=spec.length()),
+        -1,
+      )
+      if h.length() == 0 || p < 0 || p > 65535 {
+        return None
+      }
+      return Some((h, p))
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// 命令行里有没有 `--forward-cancel`
+fn wants_forward_cancel(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--forward-cancel" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
+/// 命令行里有没有 `--forward-cancel-no-reply`
+fn wants_forward_cancel_no_reply(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--forward-cancel-no-reply" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
+/// 探测一个端口还接不接受连接。
+///
+/// 连上了就立刻断开:我们要的只是「监听器还在不在」这一个事实,不是它上面
+/// 的数据。连上再断开会让服务端开一条 forwarded-tcpip 通道过来——那条通道
+/// 在这个模式下不会被处理,服务端等不到确认,会话结束时会自己收掉。
+fn probe_port(host : String, port : Int32) -> Bool {
+  match @tcp.TcpConn::connect(host, port) {
+    None => false
+    Some(c) => {
+      c.close()
+      true
+    }
+  }
+}
+
+///|
+/// Loop #81:撤销一次远程端口转发。
+///
+/// 打印的是**每一发的结果**,而不是一个笼统的「成功」——这条请求的 want_reply
+/// 可以是 0(和 OpenSSH 自己的客户端一样,服务端根本不回包),而「不回包」
+/// 这件事必须能被验证,不能靠「没报错」来推断。
+async fn run_forward_cancel(
+  host : String,
+  port : Int32,
+  user : String,
+  kh : KhConfig,
+  listen_host : String,
+  listen_port : Int32,
+  first_want_reply : Bool,
+) -> Unit {
+  println("=== Loop #81 cancel-tcpip-forward vs real sshd ===")
+  println("port: " + port.to_string())
+  println("user: " + user)
+  println("listen_host: " + listen_host)
+  println("listen_port_requested: " + listen_port.to_string())
+  println("first_want_reply: " + yn(first_want_reply))
+  match @tcp.TcpConn::connect(host, port) {
+    None => {
+      println("result: CONNECT_FAILED")
+      return
+    }
+    Some(conn) => {
+      // 端口一拿到就探测一次:那时候监听器还在。
+      let on_granted : (Int32) -> Unit = fn(p) {
+        println(
+          "probe_before: " +
+          (if probe_port(listen_host, p) { "open" } else { "closed" }),
+        )
+      }
+      // 第二发一定要回包——它是第一发的判据。
+      let steps : Array[Bool] = [first_want_reply, true]
+      let outcome = @sshclient.live_forward_cancel_ladder(
+        conn,
+        fixed_x(),
+        user,
+        test_auth_key(),
+        kh.policy,
+        listen_host,
+        listen_port,
+        steps,
+        on_granted,
+      )
+      // 探测在连接**还活着**的时候做:连接一断,服务端会把监听器一起收掉,
+      // 那时候「连不上」就分不清是撤销生效还是会话结束。
+      match outcome {
+        @sshclient.Done(r) =>
+          println(
+            "probe_after: " +
+            (if probe_port(listen_host, r.granted_port) {
+              "open"
+            } else {
+              "closed"
+            }),
+          )
+        @sshclient.Failed(_) => ()
+      }
+      conn.close()
+      match outcome {
+        @sshclient.Done(r) => {
+          println("result: FORWARD_CANCEL_DONE")
+          kh_report_tofu(kh, r.auth.session)
+          println("granted_port: " + r.granted_port.to_string())
+          println("listen_host_normalized: " + r.listen_host)
+          let mut i = 0
+          while i < r.attempts.length() {
+            let a = r.attempts[i]
+            println(
+              "attempt" +
+              i.to_string() +
+              ": want_reply=" +
+              yn(a.want_reply) +
+              " replied=" +
+              yn(a.replied) +
+              " success=" +
+              yn(a.success),
+            )
+            i = i + 1
+          }
+          println("kex_alg: " + r.auth.session.handshake.kex_alg)
+          println("cipher_ctos: " + r.auth.session.handshake.cipher_ctos)
+        }
+        @sshclient.Failed(e) => {
+          println("result: FORWARD_CANCEL_FAILED")
+          println("error: " + forward_cancel_error_name(e))
+        }
+      }
+    }
+  }
+}
+
+///|
+/// 撤销流程的失败原因
+fn forward_cancel_error_name(e : @sshclient.ForwardCancelError) -> String {
+  match e {
+    @sshclient.AuthFailed(inner) => "AuthFailed(" + auth_error_name(inner) + ")"
+    @sshclient.ForwardRefused => "ForwardRefused"
+    @sshclient.SendFailed => "SendFailed"
+    @sshclient.Closed => "Closed"
+    @sshclient.BadPacket(w) => "BadPacket(" + w + ")"
+    @sshclient.NoReply(w) => "NoReply(" + w + ")"
+  }
+}
+
+///|
 /// Loop #79: `--local-forward <listen_port>:<dest_host>:<dest_port>`
 ///
 
@@ -2606,6 +2815,29 @@ async fn main {
         // 而实际上一个字节都没发出去。
         println("result: BAD_REMOTE_FORWARD_TARGET")
         println("usage: --remote-forward <listen_port>:<dest_host>:<dest_port>")
+        return
+      }
+    }
+  }
+  if wants_forward_cancel(argv) || wants_forward_cancel_no_reply(argv) {
+    match forward_cancel_target(argv) {
+      Some((lh, lp)) => {
+        run_forward_cancel(
+          host,
+          port,
+          user,
+          kh,
+          lh,
+          lp,
+          wants_forward_cancel(argv),
+        )
+        return
+      }
+      None => {
+        // 目标写错了必须说出来。静默忽略的话,调用方会以为撤销跑过了,
+        // 而实际上一个请求都没发出去。
+        println("result: BAD_FORWARD_CANCEL_TARGET")
+        println("usage: --forward-cancel <listen_host>:<listen_port>")
         return
       }
     }

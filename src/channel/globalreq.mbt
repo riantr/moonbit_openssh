@@ -105,3 +105,63 @@ pub fn parse_request_success(payload : FixedArray[Byte]) -> Int32? {
     Some((port, o1)) => if o1 == payload.length() { Some(port) } else { None }
   }
 }
+
+///|
+/// SSH_MSG_GLOBAL_REQUEST "cancel-tcpip-forward" 的载荷(RFC 4254 §7.1)
+///
+///     string  "cancel-tcpip-forward"
+///     boolean want reply
+///     string  address to bind
+///     uint32  port to listen on
+///
+/// ## 三个字段必须和「当初那条请求」对齐,不是和用户的意图对齐
+///
+/// 1. **want_reply。** OpenSSH 自己的客户端发这条请求时 want_reply 是 **0**
+///    ——`channels.c` 里那行 `sshpkt_put_u8(ssh, 0)`,注释就写着
+///    `/* want reply */`。服务端只在 want_reply 为真时才回包(`serverloop.c`
+///    末尾那个 `if (want_reply)`),所以 want_reply=0 的时候**一个回包都没有**。
+///    一个「发完就等回包」的客户端会永远等下去——这条请求最容易踩的坑就是它。
+///
+/// 2. **address。** 服务端拿这条请求里的地址和当初那条 "tcpip-forward" 请求里
+///    的地址**逐字节比较**(`channels.c` 里那句 `strcmp(c->path, host) == 0`)。
+///    服务端存的 `c->path` 就是当初请求里那个字符串的原样(`c->path =
+///    xstrdup(host)`),所以这里必须回**同一个字符串**——「意思一样」不行,
+///    大小写、空格、哪怕一个字节的差别都不行。
+///
+/// 3. **port。** 服务端比的是 `c->listening_port`,而那是**服务端自己挑的**
+///    端口(客户端当初要的是 port=0)。拿 port=0 去取消是取消不掉的:服务端的
+///    监听器记着的是它挑的那个端口号。
+///
+/// 换句话说,这条请求的输入不是「用户想要撤销什么」,而是**当初那次请求的
+/// 结果**——服务端答给我们的那个端口号,加上当初发出去的地址。
+pub fn cancel_tcpip_forward_request_payload(
+  listen_host : String,
+  listen_port : Int32,
+  want_reply : Bool,
+) -> FixedArray[Byte] {
+  let want = if want_reply { b'\x01' } else { b'\x00' }
+  ch_cat_all([
+    @sshwire.write_ssh_string(ch_ascii(GLOBAL_REQUEST_CANCEL_TCPIP_FORWARD)),
+    FixedArray::from_array([want]),
+    @sshwire.write_ssh_string(ch_ascii(listen_host)),
+    u32be(listen_port),
+  ])
+}
+
+///|
+/// 绑定地址的归一化,和 OpenSSH 的 `channel_rfwd_bind_host` 一样。
+///
+/// OpenSSH 的客户端在发 "tcpip-forward" 之前先把绑定地址过一遍这个函数:
+/// 空串和 "*" **都**变成空串(空串的意思是「随便哪个本地地址」)。撤销请求
+/// 必须用当初请求发出去的那个字符串,所以这个归一化在取消这条路上也得再走
+/// 一遍——否则 `ssh -R *:0:host:port` 的撤销会带着 "*" 发出去,而服务端存的是
+/// 空串,比不上,撤销静默地不生效。
+///
+/// OpenSSH 那边 `NULL` 会变成 "localhost";本仓库没有 NULL 可言,空串原样保留。
+pub fn rfwd_bind_host(listen_host : String) -> String {
+  if listen_host == "*" {
+    ""
+  } else {
+    listen_host
+  }
+}

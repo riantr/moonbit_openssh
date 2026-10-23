@@ -6645,7 +6645,8 @@ two are indistinguishable from the failure message alone.
   protocol layer is shared (`src/channel`), so the browser side needs a
   driver, not a second implementation.
 * **No `cancel-tcpip-forward`.** The request exists in the protocol and the
-  constant is in `src/channel/globalreq.mbt`; nothing sends it yet.
+  constant is in `src/channel/globalreq.mbt`; nothing sends it yet. --
+  **closed by Loop #81**, see below.
 
 ---
 
@@ -6809,7 +6810,8 @@ window, the re-sent bytes not counted, and an EOF that is never sent.
 * **No browser path.** A browser has no listening socket, so the browser
   build of this feature would be the other direction (the page asks the
   server to connect out). The protocol half is shared.
-* **No `cancel-tcpip-forward`.** Still not sent.
+* **No `cancel-tcpip-forward`.** Still not sent. -- **closed by Loop #81**,
+  see below.
 * **The `ssh -R` relay still reads the local end only right after writing
   to it.** That direction needs the opposite discipline (the local target
   is the one that answers), so the two relays deliberately differ. The
@@ -7075,6 +7077,162 @@ of its string, and a client that signs before it probes.
   key type has been through it.
 * **No agent lifecycle.** No `ssh-add`, no key confirmation, no `SSH_AGENTC_*`
   messages beyond the two this loop uses.
+
+---
+
+## Loop #81: cancel-tcpip-forward -- the request that undoes a forward
+
+### What was missing
+
+`ssh -R 9000:db:5432 host` is three things at the protocol level, and this
+repository had two of them:
+
+1. the client asks the **server** to listen on a port (the "tcpip-forward"
+   global request, RFC 4254 section 7.1) -- **Loop #78**,
+2. somebody connects to that port and the server opens a "forwarded-tcpip"
+   channel back to the client, and the client relays it to its own target --
+   **Loop #78**,
+3. the client no longer wants the forward and **cancels** it (the
+   "cancel-tcpip-forward" global request, same section) -- **nothing**.
+
+`src/channel/globalreq.mbt` had the request name as a constant and no code
+sent it. AGENTS.md listed it as an open gap in two places.
+
+### The cancel is harder than the request, and the reason is not the RFC
+
+The request payload is self-describing: name, want_reply, address, port.
+The cancel payload is `string name` + `boolean want_reply` + `string
+address` + `uint32 port`, and the last two fields have to **match the
+request it cancels** -- with the rules set by the server, not by the RFC.
+
+Read off OpenSSH 10.4 (`channels.c`, `serverloop.c`):
+
+* the address is compared with `strcmp(c->path, host)` -- byte for byte --
+  and `c->path` is the address string **exactly as the request carried it**
+  (`c->path = xstrdup(host)`). "The same address" means the same bytes, not
+  the same meaning: another spelling, another case, or a missing
+  normalisation is a cancel that silently matches nothing.
+* the port is compared against `c->listening_port`, which is the port **the
+  server allocated**. Cancelling with the port we asked for (0) matches no
+  listener at all.
+
+So the inputs of the cancel are not "what the user wants to undo" but the
+**result of the request**: the port the server answered with, plus the
+address that went out. Only a client that made that request has them. That
+is why the API here is a *ladder* -- request, then cancel -- and not two
+independent calls.
+
+### want_reply=0 is the shape OpenSSH itself uses
+
+OpenSSH's own client sends the cancel with **want_reply = 0**:
+
+    (r = sshpkt_put_cstring(ssh, "cancel-tcpip-forward")) != 0 ||
+    (r = sshpkt_put_u8(ssh, 0)) != 0 || /* want reply */
+
+and the server answers only when want_reply is set (the `if (want_reply) {`
+at the end of `server_input_global_request`). With want_reply=0 the server
+sends **nothing at all**, so a client that waits for an answer waits for
+ever. That is the easiest way to get this protocol wrong, and it is not
+visible in a successful transcript: "no error" and "the cancel worked" look
+identical.
+
+The way out is to make the silent cancel *provable* by a second request. The
+server processes the packets of one connection in order, so:
+
+    cancel(P, want_reply=0)   ->  no reply at all
+    cancel(P, want_reply=1)   ->  REQUEST_FAILURE
+
+The second answer is only FAILURE if the first cancel really closed the
+listener. Had the first one been dropped or malformed, the listener would
+still be there and the second cancel would answer SUCCESS. The ladder gives
+the silent form a deterministic verdict instead of "no complaints".
+
+The same ladder works the other way round: cancel(P, want_reply=1) answers
+SUCCESS (the server found the listener and closed it), and a second one
+answers FAILURE (there is nothing left to cancel).
+
+### The bind address is normalised before it goes out
+
+OpenSSH's client runs the address through `channel_rfwd_bind_host` before
+sending the request: "" and "*" both become the empty string, which means
+"any local address". Since the cancel is matched against the address that
+was **stored**, the cancel has to carry the same normalised string -- so the
+normalisation happens on the request side, once, in
+`@channel.rfwd_bind_host`.
+
+### What was built
+
+* `src/channel/globalreq.mbt`:
+  `cancel_tcpip_forward_request_payload(listen_host, listen_port,
+  want_reply)` and `rfwd_bind_host(listen_host)`.
+* `src/sshclient/cancelfwd.mbt`: `live_forward_cancel_ladder` -- one
+  authenticated connection that asks for the forward, waits for the granted
+  port, calls back with it (so the caller can look at that port **before**
+  the cancel), and then sends one cancel per step of the ladder, reporting
+  each one separately. `ForwardCancelOutcome::{Done, Failed}` with
+  `ForwardCancelError::{AuthFailed, ForwardRefused, SendFailed, Closed,
+  BadPacket, NoReply}`.
+* `cmd/cancel_fwd_kat`: the payloads, byte for byte.
+* `cmd/ssh_live --forward-cancel <host>:<port>` and
+  `--forward-cancel-no-reply <host>:<port>`: the two ladders.
+* `host/gen_cancel_fwd_vectors.py`: the same payloads, built by paramiko's
+  own encoder.
+
+### What the gate proves
+
+`host/verify_loop81.mjs`, 43 checks (1 build, 17 wire format, 18 against a real
+server, 3 regression, 4 of the 18 that are about the server's own log):
+
+* **G0. The client builds.** The gate runs a *prebuilt* binary, so a change
+  to the protocol layer would not reach it unless the binary is rebuilt
+  first. Without that build the mutation harness would happily "prove" that
+  a broken payload still passes, because the broken payload was never in the
+  binary.
+* **G1. The bytes are paramiko's bytes.** `cmd/cancel_fwd_kat` prints the
+  payloads; `host/gen_cancel_fwd_vectors.py` prints the same ones from
+  paramiko's `Message` encoder. Every line has to match, and the KAT has to
+  produce the same bytes on **4 targets x 2 modes** (the payloads are pure
+  byte assembly -- no socket anywhere -- so they have to come out identical
+  everywhere). On top of that the gate checks the **relation** the request
+  exists for: the tail of the cancel (address + port) has to be the *same
+  bytes* as the tail of the request it cancels. That relation is invisible
+  if each payload is only compared against a third party.
+* **G2. A real OpenSSH server cancels the forward.**
+  * the port the server allocated was listening before the cancel and
+    refuses connections after it -- measured while the SSH connection is
+    still alive, because a closed connection tears the listener down anyway
+    and would make the measurement meaningless;
+  * the first cancel is answered SUCCESS, the second FAILURE;
+  * the silent variant: the first cancel gets no answer at all, and the
+    second one is answered FAILURE -- which is what proves the first one
+    worked;
+  * the server's **own** log: `cancel-tcpip-forward addr 127.0.0.1 port
+    <granted>` (the granted port, never 0), `rtype cancel-tcpip-forward
+    want_reply 0` and `want_reply 1`, and
+    `channel_cancel_rport_listener_tcpip: close channel` -- the server's own
+    cancel path running, which the client cannot forge.
+
+`host/loop81_mutations.py` turns ten of those checks red on purpose: the
+cancel sent under the *tcpip-forward* name, a cancel that always asks for a
+reply, an inverted want_reply byte, the cancel with the port before the
+address, an unnormalised "*" bind address, a forward request that asks for
+no reply, a cancel that carries the requested port instead of the granted
+one, REQUEST_FAILURE read as success, a silent cancel reported as answered,
+and a ladder that sends only its first cancel.
+
+### The gaps this loop does not close
+
+* **Only the remote forward can be cancelled.** `ssh -L` has a
+  "cancel-local-forward" in the same family; the client closes its own
+  listener instead, and this loop did not touch that path.
+* **No browser path.** A browser cannot listen on a port at all, so the
+  cancel of a *remote* forward is the part that survives there -- but
+  nothing drives it from `src/wtlive` yet.
+* **The relay is still not full-duplex.** Unchanged from Loop #78: the local
+  end is read right after it is written to.
+* **The cancel does not verify the target went away.** It closes the
+  listener; what happens to a connection that was already accepted is the
+  server's business.
 
 ---
 

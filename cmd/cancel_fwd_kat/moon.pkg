@@ -1,0 +1,6 @@
+import {
+  "openssh/openssh_moonbit/src/channel",
+  "openssh/openssh_moonbit/src/ecdsa",
+}
+
+pkgtype(kind: "executable")
