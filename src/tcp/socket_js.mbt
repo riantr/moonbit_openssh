@@ -5,12 +5,15 @@
 ///   borrow, so the js backend reports "cannot connect" rather than pretending.
 ///   Keeping the symbols present means `sshclient` still type-checks for the
 ///   js target, and Loop #32 replaces this with the WebTransport transport.
-#borrow(host)
-extern "js" fn mb_tcp_connect(
+#borrow(host, report)
+extern "js" fn mb_tcp_connect_ex(
   host : Bytes,
   host_len : Int32,
   port : Int32,
-) -> Int64 = "((_h, _p) => -1n)"
+  timeout_ms : Int32,
+  report : Bytes,
+  report_cap : Int32,
+) -> Int64 = "((_h, _hl, _p, _t, _r, _rc) => -1n)"
 
 ///|
 #borrow(buf)

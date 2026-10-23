@@ -7463,6 +7463,282 @@ thing.
   behaviour; changing it would move the expected output of gates that already
   pass, so it is left for the loop that owns the TOFU path.
 
+## Loop #83: host names resolve -- the transport stops being IPv4-only
+
+### What was missing
+
+`ssh user@example.com` and `ssh-keyscan example.com` are how anybody actually
+uses an SSH client, and this repository could do neither. `src/tcp` connected
+with `inet_pton(AF_INET)`, so it accepted **IPv4 literals only**: a name was
+never turned into an address, and the connection never left the machine.
+
+Loop #82's own gap ledger named this as the next thing to fix, and named it
+precisely: "Host names do not resolve ... it belongs to `src/tcp`, not to the
+key scan". So this loop is in `src/tcp`, and the key scan is where the
+evidence comes from.
+
+### The protocol, pinned from OpenSSH's source
+
+* `ssh.c:resolve_host` -- `getaddrinfo(name, port, &hints)` with
+  `hints.ai_family = AF_UNSPEC` (or `options.address_family`) and
+  `hints.ai_socktype = SOCK_STREAM`. It returns a **list** of addresses, not
+  one. `AI_CANONNAME` only when a CNAME was asked for.
+* `sshconnect.c:ssh_connect_direct` -- the client's own connect loop: "Loop
+  through addresses for this host, and try each one in sequence until the
+  connection succeeds". Each address gets its own socket and its own timeout;
+  a failure closes that socket and moves on to the next one.
+* `misc.c:timeout_connect` -- a non-blocking connect, a wait for the socket,
+  and then `getsockopt(SO_ERROR)`: `optval != 0` means the connect failed.
+
+Two details that are easy to miss, and that the implementation follows:
+
+* the timeout is **per address** -- `ssh_connect_direct` does
+  `*timeout_ms = saved_timeout_ms` before *every* address it tries, so a name
+  that resolves to three addresses gets three times the budget;
+* a timeout of zero or less means "no deadline", and `timeout_connect` then
+  does a plain blocking `connect()`.
+
+### Windows does not report a refused connect the way POSIX does
+
+This is the part that could not be written by analogy, so it was measured
+(`.loop83/measure_socket.py`):
+
+```
+a non-blocking connect to a closed port:  connect_ex -> 10035 (in progress)
+  t =  250 ms  readable=False writable=False except=False  SO_ERROR=0
+  t = 2000 ms  readable=False writable=False except=False  SO_ERROR=0
+  t = 2250 ms  readable=False writable=False except=True   SO_ERROR=10061
+```
+
+Two consequences, and both of them are in the implementation:
+
+1. **A refused connect lands in the EXCEPT set, not in the write set.** On
+   POSIX a failed connect makes `poll`/`select` report `POLLOUT`, and the
+   reason is in `SO_ERROR`. On Windows the socket goes into the except set.
+   An implementation that waits only for writability would sit there until
+   the deadline on *every* refused connection, and never learn that the
+   connection had already failed.
+2. **The refusal is not visible straight away.** For about two seconds the
+   socket is in neither set and `SO_ERROR` is still zero. A blocking connect
+   to the same port takes about 2.0 s and returns `WSAECONNREFUSED`, so the
+   two paths agree on the timing and differ only in who reports it.
+
+So the implementation watches the write set **and** the except set, and reads
+`SO_ERROR` *while* it waits rather than only after `select()` returns.
+
+### The refusal latency depends on the socket, and that decides what can be tested
+
+The same refusal, measured two ways on this machine:
+
+```
+a plain Winsock socket (ours, and Python's)   the refusal shows up after ~2.0 s
+node's socket (libuv)                          the refusal shows up after ~0.001 s
+```
+
+Both numbers are real, and they are not measuring the same thing: node
+creates its sockets with `WSA_FLAG_OVERLAPPED`, and an overlapped socket is
+told about the failed connect through its completion path, which is prompt. A
+plain socket does not see the error until the connect attempt has expired.
+
+This mattered because the gate **calibrates itself**. A deadline shorter than
+the refusal latency cannot see the refusal, so it has to report a timeout
+instead -- and that difference is the only evidence that the deadline is
+doing anything at all. The first version of the gate calibrated with node,
+measured 2 ms, concluded "a timeout and a refusal are the same thing here",
+and **skipped three checks** -- on a machine where the distinction plainly
+exists. The calibration now runs `host/refusal_latency.py`, which measures it
+with a plain socket, the way the implementation measures it.
+
+The lesson is the one this repository keeps meeting: **a calibration has to
+be taken with the same mechanism the thing under test uses**, or it calibrates
+nothing. The first version of the gate was not wrong in what it asserted; it
+was wrong in what it was able to assert -- and it said so loudly rather than
+quietly, which is the only reason the hole was found.
+
+### What OpenSSH's own tools do with a name, measured
+
+Against the same server, the same port and the same name, on this machine:
+
+```
+the real ssh client (9.x), -vv:
+    debug1: Connecting to localhost [::1] port 60560.
+    debug1: connect to address ::1 port 60560: Connection refused
+    debug1: Connecting to localhost [127.0.0.1] port 60560.
+    debug1: Connection established.
+
+the real ssh-keyscan (8.0p1 and 9.x):
+    write (localhost): Connection refused
+```
+
+So the two OpenSSH tools **differ**, and the difference is in their source:
+
+* `sshconnect.c:ssh_connect_direct` loops over the addresses, and the real
+  client therefore reaches the server through the second address. This
+  client does the same thing, and the gate compares the two address lists
+  element by element.
+* `ssh-keyscan.c:tcpconnect` is a **different** function with a different
+  shape: it breaks out of the address loop as soon as a `connect()` returns
+  `EINPROGRESS`, handing the socket straight to the `select()` loop. A
+  refusal that arrives *after* that hand-off is therefore never retried on
+  the next address, and the scan dies at the banner write with
+  `write (<host>): Connection refused`.
+
+That difference is deliberate on OpenSSH's side and is **not** reproduced
+here: this client resolves and tries every address, like OpenSSH's client
+does. A scan of `localhost` therefore succeeds here and fails in OpenSSH's
+own ssh-keyscan. The gate asserts the difference rather than hiding it -- the
+real ssh-keyscan's refusal is part of the evidence that the two tools are
+being compared and not assumed to agree.
+
+(The loop-82 gap ledger said "the real tool resolves the name and gets refused
+on the first address it tries (`::1`)". That was measured against
+**ssh-keyscan**, and it is right about ssh-keyscan. It is not right about
+OpenSSH's `ssh` client, which falls back to the second address -- as the
+transcript above shows.)
+
+### What was built
+
+* `src/tcp/winsock.c` -- `mb_tcp_connect_ex`: `getaddrinfo` with
+  `AF_UNSPEC`/`SOCK_STREAM`, the address list in the resolver's order, and a
+  per-address non-blocking connect with a deadline. It writes a **report**
+  back: how many addresses the name resolved to, which one was reached, what
+  happened to each of the others, and the system's own error code. The report
+  layout is written out byte by byte in that file, because it crosses a
+  language boundary where both sides have to agree on it exactly.
+* `src/tcp/socket_common.mbt` -- `TcpFailure` (`ResolveFailed`,
+  `ConnectFailed(code)`, `ConnectTimeout`), `ConnectReport`, and
+  `TcpConn::connect_with_timeout(host, port, timeout_ms)`.
+  `TcpConn::connect(host, port)` keeps its old shape and now resolves too --
+  it is the same call with no deadline, which is what OpenSSH does when no
+  `ConnectTimeout` is given.
+* `cmd/ssh_keyscan` -- `-T <seconds>` (OpenSSH's flag, and OpenSSH's rule
+  that a zero timeout is invalid) and `-v`, which prints the resolution and
+  what happened to each address. `-v` is silent by default, because
+  OpenSSH's ssh-keyscan prints no addresses either.
+* `host/refusal_latency.py` -- the calibration oracle: how long a refused
+  connection takes to become visible, measured with a **plain** socket, the
+  way the implementation measures it. It is a separate file rather than a
+  few lines inside the gate because it is the one measurement whose method
+  matters, and it has to be readable on its own.
+
+### The failures are three different names
+
+```
+result: RESOLVE_FAILED  no-such-host.invalid:22302   (the name does not resolve)
+result: CONNECT_FAILED  localhost:22302               (it does not listen)  error: 10061
+result: CONNECT_TIMEOUT localhost:22302               (the deadline ran out)
+```
+
+The same closed port produces two different labels depending on whether the
+deadline was long enough to see the refusal -- which is what makes the
+deadline itself testable, and what a single "connect failed" would have
+hidden.
+
+### What the gate proves
+
+`host/verify_loop83.mjs`, 48 checks (43 of its own, 5 regression -- the gates
+of Loop #78 to #82):
+
+* **G0. The code builds**, for native and for the whole tree (the js and wasm
+  backends answer for the browser targets, so the resolution code is shared
+  and has to type-check everywhere).
+* **G1. A name reaches the server.** The same scan by name and by number must
+  produce the same three keys -- only the hosts field differs -- and the
+  **server's own log** must show three more connections, all of them from
+  127.0.0.1. A name in upper case is lower-cased in the hosts field and
+  keeps its case in the note, which is how Loop #82's "the lower-casing
+  cannot be observed end to end" gap closes: a numeric literal has no letters
+  to fold, and a name has letters.
+* **G1b. Every address is tried, in order.** Every resolved address was
+  tried, exactly one of them was reached, and the address that was reached
+  is the one the tool reports.
+* **G2. The failures are told apart.** A name that does not resolve says
+  `RESOLVE_FAILED` and fails fast; a refused connection says
+  `CONNECT_FAILED` and carries the system's own code (10061); a deadline
+  shorter than the refusal says `CONNECT_TIMEOUT`; and a zero timeout is a
+  usage error, as it is in OpenSSH.
+* **G3. The same addresses as OpenSSH's own client.** The oracle is OpenSSH's
+  `ssh -vv`, whose debug output names every address it tries. The lists have
+  to agree element by element, and the client has to have reached the server
+  -- otherwise the comparison would be vacuous.
+* **G4. The numeric path did not move.** A number still resolves to itself,
+  is still reached on the first try, and is still fast.
+
+### The claims that are about this machine, and the ones that are about the code
+
+"localhost" is not a fixed fact. On this machine it resolves to `::1` first
+and `127.0.0.1` second -- but that comes from the Windows DNS client, not
+from the hosts file: the hosts file here has its localhost lines commented
+out ("localhost name resolution is handled within DNS itself"). A machine
+whose resolver handed back only `127.0.0.1` would be just as correct, and a
+gate that insisted on `::1` would be red on it for saying something true.
+
+So the gate runs OpenSSH's own client **first**, and its answer decides which
+claims are about this machine and which are about the code. The portable
+claim -- "we pick the same addresses, in the same order, as OpenSSH's own
+client" -- is asserted unconditionally. The claims about the particular pair
+(`::1` first, `127.0.0.1` second, the first refused and the second
+connected) are asserted only when the oracle shows that pair, and are
+**skipped loudly** otherwise. A gate that hard-codes a machine's resolver
+answer is a gate that will be red on somebody else's machine for no reason.
+
+
+`host/loop83_mutations.py` turns eleven of those checks red on purpose: IPv6
+addresses dropped from the resolved list, only the first address tried, the
+addresses tried in the opposite order, the port lost during the resolution,
+a refused connect never noticed, the error code of a failed connect lost, the
+address that was reached misreported, a name that does not resolve reported
+as a connect failure, a timeout reported as a connect failure, the deadline
+the caller asked for ignored, and a timeout of zero accepted.
+
+### One of the mutations was equivalent, and that is worth knowing
+
+The first list had a mutation that removed **only** the watch on `select()`'s
+except set -- and it did not turn anything red. The reason is that this code
+notices a refused connect **twice**, independently: the socket shows up in the
+except set, and `SO_ERROR` is also polled while the wait goes on. Both report
+the refusal at the same moment (measured: ~2.0 s for both), so either one
+alone is enough.
+
+That is not a hole in the gate; it is a redundancy in the implementation, and
+it is worth recording rather than hiding: the mutation now removes **both**
+mechanisms at once, and that one does turn the gate red. A mutation that
+cannot fail is not evidence, and an equivalent mutant is not a defect -- but
+it is a fact about the code, and the fact is that the refusal is noticed even
+if one of the two ways of noticing it is removed.
+
+
+### The gaps this loop does not close
+
+* **The client's own failure label is still flat.** `cmd/ssh_live` says
+  `result: CONNECT_FAILED` for every way a connect can fail, while
+  `cmd/ssh_keyscan` now says which one it was. `ssh_live` **gains** name
+  resolution from this loop -- its `TcpConn::connect` resolves now -- but its
+  label was not split, because that label is asserted by gates from earlier
+  loops and moving it changes those gates' expectations rather than this
+  loop's subject. It belongs to the loop that owns the client's own output.
+* **No `ConnectTimeout` for the ordinary client.** `TcpConn::connect` has no
+  deadline (0 means "no deadline", like OpenSSH with no `ConnectTimeout`), and
+  `cmd/ssh_live` does not expose one. The transport can do it; the driver
+  does not ask for it yet.
+* **No canonical name.** OpenSSH's `resolve_canonicalize` can replace the
+  host with its canonical name (and follow CNAMEs) when
+  `CanonicalizeHostname` is set. This client resolves and connects, but keeps
+  the name as it was typed -- which is also what the known_hosts line has to
+  carry.
+* **No `AddressFamily` option.** `AF_UNSPEC` is fixed, so both stacks are
+  always tried. OpenSSH lets the user pick one.
+* **The browser path still cannot resolve.** `src/tcp`'s js and wasm backends
+  are stubs that report failure, and the browser transport is `src/wtlive`'s
+  WebTransport, which resolves inside the browser. Nothing here changes that.
+* **Loop #82's "no IPv6" gap is now closed.** It said "the socket layer is
+  AF_INET only, so `::1` is not reachable". `::1` is reachable now, and
+  `localhost` resolves to it first -- it is simply refused on this machine,
+  because the test server listens on 127.0.0.1 only.
+* **Loop #82's "the lower-casing cannot be observed end to end" gap is now
+  closed.** A name in upper case is scanned by name, the known_hosts line
+  comes out lower-cased, and the note keeps the case it was typed in.
+
 ---
 
 

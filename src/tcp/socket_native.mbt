@@ -11,12 +11,25 @@
 ///   The host is passed as bytes plus an explicit length rather than as a
 ///   String: a MoonBit String carries no terminator, and handing it straight
 ///   to inet_pton would read past the end of the data.
-#borrow(host)
-extern "c" fn mb_tcp_connect(
+///
+///   Loop #83: the host may now be a NAME, not just an IPv4 literal. The
+///   native backend resolves it (getaddrinfo, the way OpenSSH's
+///   resolve_host does) and tries each address in turn. `timeout_ms` is the
+///   budget for each address, and 0 or less means "no deadline".
+///
+///   `report` is where the backend writes back what it did: how many
+///   addresses the name resolved to, which one was reached, and what
+///   happened to the others. The layout is documented in winsock.c, and it
+///   is read back in socket_common.mbt.
+#borrow(host, report)
+extern "c" fn mb_tcp_connect_ex(
   host : Bytes,
   host_len : Int32,
   port : Int32,
-) -> Int64 = "mb_tcp_connect"
+  timeout_ms : Int32,
+  report : Bytes,
+  report_cap : Int32,
+) -> Int64 = "mb_tcp_connect_ex"
 
 ///|
 #borrow(buf)

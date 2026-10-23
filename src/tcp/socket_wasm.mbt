@@ -6,10 +6,28 @@
 ///   Loop #32 supplies WebTransport/WebSocket, which is also why the transport
 ///   is kept behind a read/write contract instead of being spread through the
 ///   SSH layer.
-fn mb_tcp_connect(host : Bytes, host_len : Int32, port : Int32) -> Int64 {
+
+///|
+/// Loop #83: the wasm stand-in for the connect.
+///
+/// A browser has no raw sockets and no resolver, so this reports failure
+/// rather than pretending. The six parameters are the ones the native
+/// backend takes: the host and its length, the port, the per-address
+/// timeout, and the report buffer with its size.
+fn mb_tcp_connect_ex(
+  host : Bytes,
+  host_len : Int32,
+  port : Int32,
+  timeout_ms : Int32,
+  report : Bytes,
+  report_cap : Int32,
+) -> Int64 {
   ignore(host)
   ignore(host_len)
   ignore(port)
+  ignore(timeout_ms)
+  ignore(report)
+  ignore(report_cap)
   -1L
 }
 

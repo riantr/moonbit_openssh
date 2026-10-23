@@ -2,7 +2,7 @@
 ///
 
 ///|
-///     ssh_keyscan [-p port] [-t type] host [host ...]
+///     ssh_keyscan [-p port] [-t type] [-T seconds] [-v] host [host ...]
 ///
 /// 打印的是 known_hosts 行,和 OpenSSH 自己的 ssh-keyscan **一字不差**:
 ///
@@ -31,6 +31,33 @@
 ///
 /// 输出行的**顺序**也跟着 OpenSSH 的类型顺序走(RSA、ECDSA、Ed25519——那正是
 /// `ssh-keyscan.c` 里 `KT_MIN..KT_MAX` 的顺序)。
+///
+/// ## Loop #83:主机名
+///
+/// 主机可以是名字,不只是 IPv4 字面量。名字先解析成**一组**地址,然后按顺序
+/// 一个个试——和 OpenSSH 的 `ssh_connect_direct` 一样(「try each one in
+/// sequence until the connection succeeds」)。
+///
+/// 失败要**分种类**报出来:
+///
+///   * `RESOLVE_FAILED` —— 名字解析不出地址
+///   * `CONNECT_FAILED` —— 解析出来了,但连不上
+///   * `CONNECT_TIMEOUT` —— 解析出来了,但每个地址都等超时了
+///
+/// 这三件事的原因不同、处置也不同,合成一个「连接失败」就没法处置了。
+///
+/// `-T <秒>` 是**每个地址**的连接超时(OpenSSH 的 `ssh_connect_direct` 也是
+/// 每个地址重置一次超时)。`-T 0` 是用法错误,和 OpenSSH 的 `convtime()` 一致。
+///
+/// `-v` 把解析和连接的过程打印到 stderr。默认不出声,和 OpenSSH 的
+/// ssh-keyscan 一样(只有 `ssh -v` 才打印 "Connecting to host [addr] port N.")。
+
+///|
+/// 默认的每地址连接超时(秒)。
+///
+/// 5 秒是 OpenSSH 的 ssh-keyscan 的默认值(`ssh-keyscan.c:88`:
+/// `static int timeout = 5;`)。
+const DEFAULT_TIMEOUT_SECONDS : Int32 = 5
 
 ///|
 /// 一次扫描要提议的主机密钥算法
@@ -101,10 +128,28 @@ fn fixed_x() -> @bigint.BigNat {
 /// 扫一个主机的一种类型,打印它找到的密钥。
 ///
 /// 返回这一类有没有找到密钥。
-fn scan_one(host : String, port : Int32, t : ScanType) -> Bool {
-  match @tcp.TcpConn::connect(host, port) {
+fn scan_one(
+  host : String,
+  port : Int32,
+  timeout_ms : Int32,
+  verbose : Bool,
+  t : ScanType,
+) -> Bool {
+  // Loop #83:主机名先解析成一组地址,再按顺序一个个试。
+  let report = @tcp.TcpConn::connect_with_timeout(host, port, timeout_ms)
+  if verbose {
+    print_resolution(host, report)
+  }
+  match report.conn {
     None => {
-      eprintln("result: CONNECT_FAILED " + host + ":" + port.to_string())
+      // 失败要**分种类**说出来。名字解析不了、和连不上、和等超时,是三件
+      // 原因不同的事:一个是名字写错了,一个是服务端没在听,一个是网络没
+      // 回应。合成一个「连接失败」,使用者就没法处置了。
+      let label = match report.failure {
+        Some(f) => f.label()
+        None => "CONNECT_FAILED"
+      }
+      eprintln("result: " + label + " " + host + ":" + port.to_string())
       false
     }
     Some(conn) => {
@@ -146,6 +191,41 @@ fn scan_one(host : String, port : Int32, t : ScanType) -> Bool {
 }
 
 ///|
+/// 打印解析和连接的过程(`-v`)。
+///
+/// 这一段是**给人看的**,不是协议输出。OpenSSH 的 ssh-keyscan 平时什么也不
+/// 打印地址(只有 `ssh -v` 才打印 "Connecting to host [addr] port N."),所以
+/// 它默认不出声,只在 `-v` 下才说。
+fn print_resolution(host : String, report : @tcp.ConnectReport) -> Unit {
+  if report.addrs.length() == 0 {
+    eprintln("resolve: " + host + " -> (unresolved)")
+  } else {
+    let mut line = "resolve: " + host + " ->"
+    for a in report.addrs {
+      line = line + " " + a
+    }
+    eprintln(line)
+  }
+  let mut i = 0
+  while i < report.addrs.length() {
+    eprintln(
+      "tried: " + report.addrs[i] + " " + @tcp.addr_state_name(report.states[i]),
+    )
+    i = i + 1
+  }
+  // 连到的是哪一个地址——这是「最后到底连上了没有」那句话。上面几行说的是
+  // 每个地址各自的下场,这一行说的是结果。
+  if report.chosen != "" {
+    eprintln("connected: " + report.chosen)
+  }
+  match report.failure {
+    Some(@tcp.TcpFailure::ConnectFailed(code)) =>
+      eprintln("error: " + code.to_string())
+    _ => ()
+  }
+}
+
+///|
 /// 握手失败的错误名
 ///
 /// 这一份标签住在 `src/sshclient`(`live_error_label`):两个驱动给同一个错误
@@ -158,6 +238,20 @@ fn live_error_name(e : @sshclient.LiveError) -> String {
 fn main {
   let argv = @env.args()
   let port = int_arg(argv, "-p", 22)
+  // Loop #83:每个地址的连接超时。`-T 0` 是用法错误(OpenSSH 的 `convtime()`
+  // 把 0 和负数都判为非法),所以这里用 Some(0) 表示「给了但是不合法」。
+  let timeout_ms = match seconds_arg(argv, "-T") {
+    None => DEFAULT_TIMEOUT_SECONDS * 1000
+    Some(0) => {
+      eprintln("result: BAD_USAGE")
+      eprintln(
+        "usage: ssh_keyscan [-p port] [-t type] [-T seconds] [-v] host [host ...]",
+      )
+      return
+    }
+    Some(n) => n * 1000
+  }
+  let verbose = has_flag(argv, "-v")
   let hosts : Array[String] = []
   let type_names : Array[String] = []
   let mut i = 1
@@ -165,6 +259,15 @@ fn main {
     if argv[i] == "-p" && i + 1 < argv.length() {
       // 端口在前面已经读过了;这一段只是把它跳过去。
       i = i + 2
+      continue
+    }
+    if argv[i] == "-T" && i + 1 < argv.length() {
+      // 超时同样在前面读过了,这里只把它跳过去。
+      i = i + 2
+      continue
+    }
+    if argv[i] == "-v" {
+      i = i + 1
       continue
     }
     if argv[i] == "-t" && i + 1 < argv.length() {
@@ -177,7 +280,9 @@ fn main {
     }
     if argv[i].has_prefix("-") {
       eprintln("result: BAD_USAGE")
-      eprintln("usage: ssh_keyscan [-p port] [-t type] host [host ...]")
+      eprintln(
+        "usage: ssh_keyscan [-p port] [-t type] [-T seconds] [-v] host [host ...]",
+      )
       return
     }
     hosts.push(argv[i])
@@ -185,7 +290,9 @@ fn main {
   }
   if hosts.length() == 0 {
     eprintln("result: BAD_USAGE")
-    eprintln("usage: ssh_keyscan [-p port] [-t type] host [host ...]")
+    eprintln(
+      "usage: ssh_keyscan [-p port] [-t type] [-T seconds] [-v] host [host ...]",
+    )
     return
   }
   // 类型:给了 `-t` 就用给的,没给就扫默认的三种。
@@ -210,7 +317,7 @@ fn main {
   let mut found = false
   for host in hosts {
     for t in types {
-      if scan_one(host, port, t) {
+      if scan_one(host, port, timeout_ms, verbose, t) {
         found = true
       }
     }
@@ -218,6 +325,41 @@ fn main {
   if !found {
     eprintln("result: NO_KEYS")
   }
+}
+
+///|
+/// 读一个秒数参数(`-T`)。
+///
+/// 没给这个参数时返回 None;给了但值不合法时返回 Some(0)。0 是「不合法」
+/// 而不是「不超时」:OpenSSH 的 `convtime()` 对 0 和负数都判为非法
+/// (`ssh-keyscan.c` 的 `case 'T'` 里 `if (timeout <= 0) fatal(...)`),
+/// 本客户端照做。
+fn seconds_arg(argv : Array[String], flag : String) -> Int32? {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == flag && i + 1 < argv.length() {
+      let v = parse_int(argv[i + 1])
+      if v <= 0 {
+        return Some(0)
+      }
+      return Some(v)
+    }
+    i = i + 1
+  }
+  None
+}
+
+///|
+/// 这个开关出现过吗
+fn has_flag(argv : Array[String], flag : String) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == flag {
+      return true
+    }
+    i = i + 1
+  }
+  false
 }
 
 ///|
