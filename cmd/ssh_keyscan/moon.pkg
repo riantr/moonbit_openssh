@@ -1,0 +1,13 @@
+import {
+  "moonbitlang/core/env",
+  "openssh/openssh_moonbit/src/tcp",
+  "openssh/openssh_moonbit/src/sshclient",
+  "openssh/openssh_moonbit/src/knownhosts",
+  "openssh/openssh_moonbit/src/bigint",
+}
+
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+native",
+)

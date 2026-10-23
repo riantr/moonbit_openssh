@@ -1,0 +1,5 @@
+import {
+  "openssh/openssh_moonbit/src/knownhosts",
+}
+
+pkgtype(kind: "executable")

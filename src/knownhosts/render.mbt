@@ -53,6 +53,75 @@ pub fn KnownHostEntry::to_line(
 }
 
 ///|
+/// known_hosts 条目的 hosts 字段:非标准端口要写成 `[host]:port`。
+///
+/// OpenSSH 的 `put_host_port`(`misc.c`)只有两条规则:端口是 0 或 22(默认端口)
+/// 就写主机名本身,否则写 `[主机名]:端口`。方括号是为了让 `host:port` 这种
+/// IPv6 字面量不会和端口混淆——`[::1]:2222` 里那个方括号是**必须的**。
+///
+/// 为什么这条规则住在 known_hosts 这一侧:它就是 known_hosts 行的 hosts 字段
+/// 的格式,谁写这一行谁就得守它。Loop #82 的 ssh-keyscan 是第一个用到它的
+/// 地方——OpenSSH 自己的 ssh-keyscan 也是这么写的(`ssh-keyscan.c` 的
+/// `keyprint_one` 调 `put_host_port`)。
+///
+/// 注意这条规则**不含**小写化:OpenSSH 的 ssh-keyscan 额外调了一次
+/// `lowercase()`,那是那个工具的行为,不是 known_hosts 的格式。写 known_hosts
+/// 文件的路径不做小写化(主机名大小写敏感)。
+pub fn host_field(host : String, port : Int32) -> String {
+  if port == 0 || port == 22 {
+    host
+  } else {
+    "[" + host + "]:" + port.to_string()
+  }
+}
+
+///|
+/// ASCII 小写化。
+///
+/// OpenSSH 的 `lowercase()`(`misc.c`)就是这件事:ssh-keyscan 在写 known_hosts
+/// 行之前拿它处理 hostport(`ssh-keyscan.c` 的 `keyprint_one`)。
+///
+/// 它是**那个工具**的行为,不是 known_hosts 的格式:写 known_hosts 文件的路径
+/// 不做小写化(主机名大小写敏感)。所以它住在这里,是因为「known_hosts 行怎么
+/// 写」这件事住在这一侧,而 ssh-keyscan 是目前唯一用到它的那个工具。
+///
+/// 只碰 ASCII 字母:主机名里的非 ASCII 字符原样保留——把别的字符按某个
+/// Unicode 规则折叠,就不是 OpenSSH 那个函数了。
+pub fn lowercase_ascii(s : String) -> String {
+  let sb = StringBuilder()
+  let mut i = 0
+  while i < s.length() {
+    let c = s[i].to_int()
+    if c >= 65 && c <= 90 {
+      sb.write_char(Int32::unsafe_to_char(c + 32))
+    } else {
+      sb.write_char(Int32::unsafe_to_char(c))
+    }
+    i = i + 1
+  }
+  sb.to_string()
+}
+
+///|
+/// ssh-keyscan 写进 known_hosts 行之前的那一步:先按 `put_host_port` 拼出
+/// hosts 字段,再把**整个字段**小写化(OpenSSH 的 `lowercase`)。
+///
+/// 为什么这两件事合成一处,而不是各写各的:
+///
+/// `host_field` 与 `lowercase_ascii` 分开时,「谁负责小写化」没有唯一答案——
+/// 驱动里写一次、库里再写一次,少一次不会有任何东西变红。而小写化恰恰是
+/// OpenSSH 的 ssh-keyscan **特有**的行为(写 known_hosts 文件的那条路不做),
+/// 漏掉它的后果是 known_hosts 行的 hosts 字段和我们写的、和 OpenSSH 写的
+/// 长得不一样。
+///
+/// 注意小写化作用在**整个字段**上,不只是主机名:`[Example.COM]:2222` 变成
+/// `[example.com]:2222`。端口部分没有字母,所以效果上看不出差别,但规则是
+/// 「先拼后小写」,顺序反过来就是另一个函数了。
+pub fn keyscan_host_field(host : String, port : Int32) -> String {
+  lowercase_ascii(host_field(host, port))
+}
+
+///|
 /// 一条 known_hosts 行 = 一个条目,**带结尾换行**。
 ///
 /// 带换行不是格式偏好,而是往返闭合的必要条件:`parse_file` 切出来的每一行都含

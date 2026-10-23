@@ -28,35 +28,12 @@ fn fixed_x() -> @bigint.BigNat {
 }
 
 ///|
+/// `LiveError` 的短标签。
+///
+/// Loop #82:这份拷贝搬到了 `src/sshclient`(`live_error_label`),因为那时加了
+/// 第二个驱动(`cmd/ssh_keyscan`),两边各写一份的话,某个 label 改了另一个不会。
 fn live_error_name(e : @sshclient.LiveError) -> String {
-  match e {
-    ConnectFailed => "ConnectFailed"
-    NoServerIdent => "NoServerIdent"
-    KexinitSendFailed => "KexinitSendFailed"
-    NoPeerKexinit => "NoPeerKexinit"
-    KexinitParseFailed => "KexinitParseFailed"
-    NoAgreement(_) => "NoAgreement"
-    EcdhInitSendFailed => "EcdhInitSendFailed"
-    NoEcdhReply => "NoEcdhReply"
-    EcdhReplyMalformed => "EcdhReplyMalformed"
-    HostkeyInvalid => "HostkeyInvalid"
-    SignatureInvalid(h) => "SignatureInvalid"
-    // Loop #48: pinning failures get their own labels because "we refused"
-    // and "we refused *because the key is not the one we pinned*" call for
-    // different responses, and collapsing them would make the second one
-    // indistinguishable from a network fault.
-    HostkeyMismatch(h) => "HostkeyMismatch"
-    HostkeyUnknown(h) => "HostkeyUnknown"
-    // Loop #51: 不叫 HostkeyMismatch,也不叫 HostkeyUnknown。前者会让人去查中间人
-    // (没有),后者会让人去找一条直接条目(这个客户端给不了)。见 policy.mbt。
-    HostkeyCertAuthority(h, r) => "HostkeyCertAuthority"
-    // Loop #53: 「压根没配信任锚」——加一行就解决，而把它报成上面任何一种都
-    // 会让人查错方向。
-    HostkeyCertUntrusted(h) => "HostkeyCertUntrusted"
-    NewkeysSendFailed => "NewkeysSendFailed"
-    NoNewkeys => "NoNewkeys"
-    BadPacket => "BadPacket"
-  }
+  @sshclient.live_error_label(e)
 }
 
 ///|

@@ -7234,6 +7234,235 @@ and a ladder that sends only its first cancel.
   listener; what happens to a connection that was already accepted is the
   server's business.
 
+## Loop #82: ssh-keyscan -- the host key, without authenticating
+
+### What was missing
+
+There was no way to ask a server for its keys without connecting *as a user*.
+The only path to a host key in this repository was the client path, and the
+client path authenticates. So the question "what keys does this host have,
+and is it the one I expect?" could only be answered by handing credentials to
+that host first -- which is exactly the thing you want to decide *before* you
+trust it.
+
+The second half was narrower but just as real: `KnownHostEntry::to_line` could
+render `host keytype base64(blob)`, but nothing produced the **hosts field**
+the way OpenSSH's ssh-keyscan does. That field is not "the host name" -- it is
+`put_host_port(host, port)` lower-cased, and the two rules in it are the rules
+`misc.c` implements.
+
+### The protocol, pinned from OpenSSH's source
+
+* `ssh-keyscan.c`, `keygrab_ssh2`: the scan **only does the key exchange**.
+  The comment in that function says it runs "until an error occurs or until
+  the `key_print_wrapper()` callback sets `c_done`", and then it disconnects.
+  It never sends `SSH_MSG_SERVICE_REQUEST` and never sends
+  `SSH_MSG_USERAUTH_REQUEST`.
+* `ssh-keyscan.c`, `keygrab_ssh2`: **one connection per key type.** The
+  function sets `myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS]` to a single
+  algorithm per attempt, because a key exchange negotiates exactly one host
+  key.
+* `ssh-keyscan.c`, `keyprint_one`: `put_host_port(host, port)`, then
+  `lowercase(hostport)`, then `sshkey_write` -- and `sshkey_write` prints the
+  type name **inside the key blob**.
+* `misc.c`, `put_host_port`: port 0 or 22 -> the host as typed; anything else
+  -> `[host]:port`. The brackets are what keep an IPv6 literal from swallowing
+  the port.
+* `misc.c`, `lowercase`: ASCII upper-case letters fold, nothing else moves.
+
+### The name in the line is not the name that was negotiated
+
+This is the one that is easy to get wrong, and the server's own log is what
+settles it. Measured against a real `sshd`:
+
+```
+server log:   debug1: kex: host key algorithm: rsa-sha2-512
+known_hosts:  [127.0.0.1]:22302 ssh-rsa AAAAB3NzaC1yc2E...
+```
+
+RFC 8332 is the reason the two differ: the blob says `ssh-rsa`, the
+negotiated algorithm is `rsa-sha2-512`. OpenSSH writes the blob's name
+(`sshkey_write`), and OpenSSH also *reads* a known_hosts line by the blob's
+name -- so a line that says `rsa-sha2-512` is a line OpenSSH would not match
+against the key it just saw.
+
+The gate asserts both halves in two different places, because they are two
+different facts: the **server's log** names the negotiated algorithm, and the
+**line** names the blob's type.
+
+### One connection per key type, and each one gets its own key
+
+The gate reads the server's log **straight after this client's scan and before
+any other client has touched the server**, so the slice belongs to the scan
+alone. Measured:
+
+```
+the scan opened exactly one connection per key type
+  -- 3 key exchanges: rsa-sha2-512,ecdsa-sha2-nistp256,ssh-ed25519
+```
+
+Three connections, three different keys, in OpenSSH's type order. One
+connection proposing all three types would negotiate one key and print one
+line -- and the mutation harness has that mutation in it.
+
+### What was built
+
+* `src/sshclient/keyscan.mbt` -- `live_keyscan`: the handshake and nothing
+  else. It uses `KnownHostsPolicy::skip()`, which is **not** a bypass: it is
+  "no entries, and not strict", so it goes through the same decision code as
+  an ordinary client's allow branch. A side channel around that code would be
+  the shape where "the default fell through to the side channel".
+* `src/sshclient/live.mbt` -- `live_proposal_with_hostkey` (a proposal that
+  names one host key algorithm) and `handshake_to_session_with_proposal` (the
+  handshake, with the proposal as an argument). The scan and the ordinary
+  client share **one** handshake; they differ by one argument.
+* `src/knownhosts/render.mbt` -- `host_field` (`put_host_port`), `lowercase_ascii`
+  (`lowercase`), and `keyscan_host_field`, the composition of the two. The
+  composition is a function because "who lower-cases?" has to have one answer:
+  split across the driver and the library, dropping it changes nothing that a
+  test can see.
+* `cmd/ssh_keyscan` -- the tool. `-p port`, `-t type`, the default type list
+  in OpenSSH's order (rsa, ecdsa, ed25519). The known_hosts lines go to
+  **stdout**; the `# host:port SSH-2.0-...` comment goes to **stderr**, which
+  is what both installed OpenSSH builds do.
+* `cmd/keyscan_kat` + `host/gen_keyscan_vectors.py` -- the two rules and their
+  composition, as cases, against a Python transcription of `misc.c`.
+
+### The oracle is the real tool, not a second implementation
+
+The comparison is against **OpenSSH's own `ssh-keyscan`**, running against the
+same server, on this machine: both installed builds (the portable 8.0p1 under
+`Program Files`, and the inbox 9.x under `System32`). Its known_hosts lines
+have to be the **same lines, byte for byte**, and so does the
+`# host:port ...` note.
+
+That is deliberately *not* a re-implementation. A second implementation of
+`put_host_port` would agree with the first one for the same reason two copies
+of the same mistake agree. The installed binaries cannot agree with our bug
+by construction.
+
+### The real tool's output order is not a contract, and finding that out cost a red run
+
+The first version of the gate compared the two stdouts **as one byte string**,
+order included. It passed, twice -- and then failed, on a third run, with the
+two outputs visibly identical in the first 120 characters and different after
+that.
+
+The difference was the *order*:
+
+```
+ours  line0 = ssh-rsa              theirs line0 = ecdsa-sha2-nistp256
+ours  line1 = ecdsa-sha2-nistp256  theirs line1 = ssh-rsa
+```
+
+and `ssh-keyscan.c` says why. The tool opens **all** of its connections at
+once -- `conprocess`/`conread`/`congreet` over a `select()` loop, one
+connection per key type -- and prints each key from the key-exchange
+completion callback (`key_print_wrapper` -> `keyprint_one`). So its output
+order is the order the handshakes **finished**, which is timing, not
+specification. On this machine the 8.0p1 build printed ecdsa before rsa on
+one run and rsa before ecdsa on the next.
+
+A gate that compares something neither tool promises is not a strict gate; it
+is a coin flip that happens to be green most of the time. So the comparison
+is now over the **set of lines**, each byte for byte, and this client's own
+order is asserted as the separate claim it is: it is sequential, so it always
+prints in the order it requested the types in (rsa, ecdsa, ed25519 -- the
+order of OpenSSH's own `keytypes` array, `KT_MIN..KT_MAX`).
+
+### The note line's stream is not a contract either
+
+The same reasoning applies one level down. The tool's "# host:port
+SSH-2.0-..." note is a separate thing from the known_hosts lines, and **which
+stream it lands on is a version detail of the real tool**: the installed 8.0p1
+and 9.x builds put it on stderr, while OpenSSH 10.4's `congreet` writes it to
+`stdout` (`fprintf(stdout, "%c %s:%d %s\n", ...)`). Comparing whole streams
+would compare that detail as if it were the contract.
+
+So the gate compares the known_hosts lines as a set, and compares the note
+**wherever the tool put it**. This client's own layout -- known_hosts on
+stdout, note on stderr -- is a claim of ours, and it is asserted separately.
+
+What the two builds do **not** agree on is the default type list: 9.x also
+scans the FIDO and ML-DSA types, so its stderr carries five comment lines
+where 8.0p1's carries three. Its **stdout** carries the same three lines,
+because the server does not have the other two keys -- and stdout is the
+contract.
+
+### What the gate proves
+
+`host/verify_loop82.mjs`, 43 checks (2 build, 15 line rules, 16 against the real
+tool and a real server, 6 about the server's own log, 4 regression):
+
+* **G0. The code builds.** The gate runs a *prebuilt* binary, so a change to
+  the protocol layer would not reach it unless the binary was rebuilt first.
+* **G1. The line rules, byte for byte.** `cmd/keyscan_kat` prints the rules;
+  `host/gen_keyscan_vectors.py` prints the same cases from a Python
+  transcription of `put_host_port` and `lowercase`. Every line has to match,
+  and the KAT has to produce the same bytes on **4 targets x 2 modes**.
+* **G2. The output is the real tool's output.** The same known_hosts lines,
+  byte for byte, as each installed `ssh-keyscan` (order apart, and the note
+  wherever the tool puts it -- see above); the `-t ed25519` line and note
+  identical too; the server's log showing one connection per key type with
+  three different negotiated algorithms.
+* **G3. The scan never authenticates.** The **server's own log** must contain
+  no `userauth` for the scan -- and, to make that zero mean something, the
+  gate then authenticates for real against the same server and shows the log
+  *does* record userauth when a client really does it. A zero that would be
+  zero anyway is not a measurement.
+
+The gate also counts `SSH_MSG_SERVICE_REQUEST` packets in the server's log.
+Asking for the `ssh-userauth` service sends no credentials, so "no userauth"
+alone would not notice it -- but it is the step right before credentials go,
+and a scan that took it would be one refactor away from taking the next one
+too. That count is **conditional on a positive control**: the same marker must
+appear for the client that does authenticate, or the check reports itself as
+skipped rather than passing vacuously on a server that logs nothing.
+
+`host/loop82_mutations.py` turns twelve of those checks red on purpose: the
+line written with the negotiated algorithm name instead of the blob's type
+name, the hosts field without its brackets, port 22 not treated as the default
+port, port 0 not treated as the default port, the host name not lower-cased,
+the composition skipping the lower-casing, the line with its fields in the
+wrong order, all key types proposed in one connection, the key types scanned
+in the wrong order, ed25519 preferred for every connection, the scan asking
+for the `ssh-userauth` service as well, and the comment line naming the wrong
+thing.
+
+### The gaps this loop does not close
+
+* **Host names do not resolve.** The native socket layer connects with
+  `inet_pton(AF_INET)`, so it accepts **IPv4 literals only** -- `ssh-keyscan
+  example.com` does not work, and neither does `ssh user@host`. This is
+  pre-existing and project-wide, not something this loop introduced, but it is
+  the first loop whose tool is *useless without* it. Measured, same server,
+  same argument: ours prints `result: CONNECT_FAILED LOCALHOST:22303`, the
+  real 8.0p1 prints `write (LOCALHOST): Connection refused` -- the real tool
+  resolves the name and gets refused on the first address it tries (`::1`),
+  ours never resolves it at all. This is the next thing to fix, and it belongs
+  to `src/tcp`, not to the key scan.
+* **The lower-casing cannot be observed end to end.** The only host this
+  client can reach is a numeric literal, which has no letters to fold. The
+  rule is therefore pinned as cases (`KEYFIELD K1..K3`, against the Python
+  transcription) rather than by the byte comparison. It closes when host names
+  resolve.
+* **No exit code.** `core` and `async` have no `exit()`, and `moon.mod` is
+  frozen, so the driver reports through `result:` lines instead. OpenSSH
+  returns `found_one ? 0 : 1`; this tool currently exits 0 even when it found
+  nothing, so a script cannot tell success from failure.
+* **No `-H`** (write the host name hashed), and no `-F`/`-f` file options.
+* **No FIDO and no ML-DSA.** OpenSSH 10.4's default type list includes them.
+  This client does not scan them, because it cannot verify them, and writing
+  an unverified key into known_hosts is worse than not writing it. The names
+  that were dropped are all *after* the ones that were kept, so the key the
+  server picks is the same one OpenSSH picks.
+* **No IPv6.** The socket layer is AF_INET only, so `::1` is not reachable
+  even though the line format for it (`[::1]:2222`) is pinned by a case.
+* **The client's own TOFU path still writes the bare host name** for a
+  non-standard port, unlike this tool's `put_host_port`. That is pre-existing
+  behaviour; changing it would move the expected output of gates that already
+  pass, so it is left for the loop that owns the TOFU path.
+
 ---
 
 

@@ -110,6 +110,44 @@ pub(all) enum LiveError {
 }
 
 ///|
+/// `LiveError` 的短标签,供诊断输出用。
+///
+/// 放在 `src/sshclient` 而不是留在各个驱动里,理由和 `packet_error_label`
+/// 一样:两个驱动给同一个错误起同一个名字,只可能有一份实现。Loop #82 加了
+/// 第二个驱动(`cmd/ssh_keyscan`),那份拷贝如果各写各的,某个 label 改了
+/// 另一个不会——而门禁读的就是这些 label。
+pub fn live_error_label(e : LiveError) -> String {
+  match e {
+    ConnectFailed => "ConnectFailed"
+    NoServerIdent => "NoServerIdent"
+    KexinitSendFailed => "KexinitSendFailed"
+    NoPeerKexinit => "NoPeerKexinit"
+    KexinitParseFailed => "KexinitParseFailed"
+    NoAgreement(_) => "NoAgreement"
+    EcdhInitSendFailed => "EcdhInitSendFailed"
+    NoEcdhReply => "NoEcdhReply"
+    EcdhReplyMalformed => "EcdhReplyMalformed"
+    HostkeyInvalid => "HostkeyInvalid"
+    SignatureInvalid(_) => "SignatureInvalid"
+    // Loop #48: pinning failures get their own labels because "we refused"
+    // and "we refused *because the key is not the one we pinned*" call for
+    // different responses, and collapsing them would make the second one
+    // indistinguishable from a network fault.
+    HostkeyMismatch(_) => "HostkeyMismatch"
+    HostkeyUnknown(_) => "HostkeyUnknown"
+    // Loop #51: 不叫 HostkeyMismatch,也不叫 HostkeyUnknown。前者会让人去查中间人
+    // (没有),后者会让人去找一条直接条目(这个客户端给不了)。见 policy.mbt。
+    HostkeyCertAuthority(_, _) => "HostkeyCertAuthority"
+    // Loop #53: 「压根没配信任锚」——加一行就解决,而把它报成上面任何一种都
+    // 会让人查错方向。
+    HostkeyCertUntrusted(_) => "HostkeyCertUntrusted"
+    NewkeysSendFailed => "NewkeysSendFailed"
+    NoNewkeys => "NoNewkeys"
+    BadPacket(_) => "BadPacket"
+  }
+}
+
+///|
 /// `PacketError` 的短标签,供诊断输出与 `LiveError::BadPacket` 共用。
 ///
 /// 放在 `src/sshclient` 而不是只留在本文件,是因为 `src/wtlive` 要给
@@ -283,13 +321,30 @@ pub fn live_proposal() -> @kexflow.Proposal {
 ///|
 /// 带主机证书的提案
 pub fn live_proposal_with_certs(allow_certs : Bool) -> @kexflow.Proposal {
-  {
-    kex_algs: "diffie-hellman-group14-sha256",
-    hostkey_algs: if allow_certs {
+  live_proposal_with_hostkey(
+    if allow_certs {
       LIVE_HOSTKEY_ALGS_CERTS
     } else {
       LIVE_HOSTKEY_ALGS
     },
+  )
+}
+
+///|
+/// 只提议指定的主机密钥算法。
+///
+/// Loop #82 的 ssh-keyscan 用它:OpenSSH 自己的 ssh-keyscan 对每种密钥类型开
+/// **一条**连接,那条连接的 KEXINIT 里只写那一种算法(`ssh-keyscan.c` 的
+/// `keygrab_ssh2` 里那几段 `myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = ...`)。
+/// 一次握手只协商出**一把**主机密钥,所以要拿到服务端的几把密钥,就得几种类型
+/// 各连一次——这也是为什么 ssh-keyscan 对一个主机会打印好几行。
+///
+/// 其余四个类目(kex / cipher / mac / comp)保持和普通客户端一样:换的只是
+/// 「要哪把主机密钥」这一件事。
+pub fn live_proposal_with_hostkey(hostkey_algs : String) -> @kexflow.Proposal {
+  {
+    kex_algs: "diffie-hellman-group14-sha256",
+    hostkey_algs,
     enc_ctos: "aes128-ctr",
     enc_stoc: "aes128-ctr",
     mac_ctos: "hmac-sha2-256",
@@ -565,6 +620,30 @@ fn[T : @transport.Transport] handshake_to_session(
   x : @bigint.BigNat,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> (LiveResult, SessionState?) {
+  handshake_to_session_with_proposal(
+    conn,
+    x,
+    kh,
+    live_proposal_with_certs(kh.has_ca_anchor()),
+  )
+}
+
+///|
+/// 握手,提案由调用方给。
+///
+/// Loop #82 引入:「只提议一种主机密钥算法」这件事 ssh-keyscan 必须做——OpenSSH
+/// 自己的 ssh-keyscan 对每种密钥类型开**一条**连接,那条连接的 KEXINIT 里只写
+/// 那一种算法(`ssh-keyscan.c` 的 `keygrab_ssh2`)。客户端握手一次只协商出**一把**
+/// 主机密钥,所以想拿到服务端的几把密钥,就得几种类型各连一次。
+///
+/// 提案从参数进来而不是在这里写死,是为了让这一条路和普通客户端**共用同一段
+/// 握手代码**——差一个提案而已,不该有两份握手。
+fn[T : @transport.Transport] handshake_to_session_with_proposal(
+  conn : T,
+  x : @bigint.BigNat,
+  kh : @knownhosts.KnownHostsPolicy,
+  my : @kexflow.Proposal,
+) -> (LiveResult, SessionState?) {
   let counters = { sent: 0, recv: 0, }
   let s = @bpacket.SendCtx::new()
   let r = @bpacket.RecvCtx::new()
@@ -594,8 +673,8 @@ fn[T : @transport.Transport] handshake_to_session(
     return (Failed(NoServerIdent), None)
   }
   // ---- 2. KEXINIT ----
-  // Loop #53: 只有这台主机配了 `@cert-authority` 才报出主机证书算法。
-  let my = live_proposal_with_certs(kh.has_ca_anchor())
+  // Loop #53: 只有这台主机配了 `@cert-authority` 才报出主机证书算法——那是
+  // `handshake_to_session` 这一层的事:提案由调用方给,提案里写什么就是什么。
   let ic_payload = @kexflow.kexinit_payload(fixed_cookie(), my)
   if !send_packet(conn, counters, s, @sshwire.SSH_MSG_KEXINIT, ic_payload) {
     return (Failed(KexinitSendFailed), None)
