@@ -7555,6 +7555,59 @@ nothing. The first version of the gate was not wrong in what it asserted; it
 was wrong in what it was able to assert -- and it said so loudly rather than
 quietly, which is the only reason the hole was found.
 
+### The deadline has to be measured against the clock, not accounted for
+
+This one was found by GitHub Actions and not by the machine it was written on,
+which is the whole point of the sentence.
+
+The connect's deadline was **accounted for**: the wait loop added up the time
+it had *asked* `select()` to wait for, and compared that total with the
+budget. That is not the same thing as measuring how long the wait really
+took. A wait comes back late whenever the machine is loaded, so an accounted
+budget is spent at a fraction of the rate the clock runs.
+
+On the idle machine where it was written, the two accounts agreed and the
+gate was green. On the CI runner they did not: a `select()` asked to wait
+100 ms took 276 ms, so a one-second budget ran out after 2.8 seconds, and the
+two addresses a name resolved to took 5.5 seconds between them -- *later than
+the refusal the deadline was supposed to beat*. The gate noticed, because it
+compares the deadline-limited run against the run that waits out the refusal:
+
+```
+the deadline was honoured -- it finished before the refusal arrived
+  on the runner:  5522 ms vs 4084 ms   FAIL
+  here:           2042 ms vs 4093 ms   PASS
+```
+
+The fix is `GetTickCount64()`: the budget is charged against the wall clock,
+in one place (`mb_budget_left`), so that "the deadline is measured against the
+clock" is a single thing the mutation check can point at rather than
+something spread across a loop.
+
+Two things came out of it:
+
+* **The wait slice went from 100 ms to 500 ms.** The slice is only a
+  granularity limit -- `select()` returns the moment the socket is ready --
+  so it decides how often the deadline is re-checked, not how long the wait
+  lasts. A long slice means fewer `select()` calls, and a loaded machine
+  makes each of those calls late, which is exactly what used to stretch the
+  budget.
+* **The gate's absolute bound is derived from the number of addresses.** The
+  budget is per *address* (OpenSSH resets it before every address it tries),
+  so a name that resolves to three addresses gets three budgets. A bound
+  written for one address would fail on a name that resolves to more -- and
+  the number of addresses is not the same on every machine, so it is read
+  out of the run rather than assumed. The bound is deliberately loose; the
+  two checks around it are the ones with teeth. The label says the deadline
+  was honoured, and the comparison says it was honoured *earlier* than
+  waiting out the refusal would have been.
+
+The lesson is the one this repository keeps meeting, in a new shape: **a
+deadline that is only *accounted for* is correct exactly as long as the
+machine is idle.** Timing code that is never run under load is timing code
+that has not been tested -- and the only place it got tested was a CI
+runner that was busy with something else.
+
 ### What OpenSSH's own tools do with a name, measured
 
 Against the same server, the same port and the same name, on this machine:
@@ -7586,9 +7639,19 @@ So the two OpenSSH tools **differ**, and the difference is in their source:
 That difference is deliberate on OpenSSH's side and is **not** reproduced
 here: this client resolves and tries every address, like OpenSSH's client
 does. A scan of `localhost` therefore succeeds here and fails in OpenSSH's
-own ssh-keyscan. The gate asserts the difference rather than hiding it -- the
-real ssh-keyscan's refusal is part of the evidence that the two tools are
-being compared and not assumed to agree.
+own ssh-keyscan.
+
+The gate **pins** that difference rather than leaving it in prose, because a
+difference that is only written down is a difference the next loop will
+"fix" by making this client match the weaker one. So the real ssh-keyscan is
+run against the same name on the same server, and:
+
+* when it produces known_hosts lines, they have to be **our** lines, byte for
+  byte (the same claim Loop #82 makes for a numeric host, extended to names);
+* when it produces none -- which is what both installed builds do here --
+  its own message has to say why, because a tool that fails silently is a
+  tool whose failure nobody can act on. Measured: `write (localhost):
+  Connection refused`.
 
 (The loop-82 gap ledger said "the real tool resolves the name and gets refused
 on the first address it tries (`::1`)". That was measured against
@@ -7636,7 +7699,7 @@ hidden.
 
 ### What the gate proves
 
-`host/verify_loop83.mjs`, 48 checks (43 of its own, 5 regression -- the gates
+`host/verify_loop83.mjs`, 50 checks (45 of its own, 5 regression -- the gates
 of Loop #78 to #82):
 
 * **G0. The code builds**, for native and for the whole tree (the js and wasm
@@ -7661,6 +7724,10 @@ of Loop #78 to #82):
   `ssh -vv`, whose debug output names every address it tries. The lists have
   to agree element by element, and the client has to have reached the server
   -- otherwise the comparison would be vacuous.
+* **G3b. The real ssh-keyscan, on the same name.** When it produces keys,
+  they have to be our keys, byte for byte; when it produces none, its own
+  message has to say why. See above -- this is the check that pins the
+  documented difference between the two OpenSSH tools.
 * **G4. The numeric path did not move.** A number still resolves to itself,
   is still reached on the first try, and is still fast.
 
@@ -7682,14 +7749,31 @@ connected) are asserted only when the oracle shows that pair, and are
 **skipped loudly** otherwise. A gate that hard-codes a machine's resolver
 answer is a gate that will be red on somebody else's machine for no reason.
 
+The timing claims are machine claims too, and they are handled the same way.
+A deadline shorter than the refusal latency can only report a timeout if the
+refusal really is that slow here, so the gate **measures** the latency first
+(`host/refusal_latency.py`, with the same kind of socket the implementation
+uses) and skips the deadline checks loudly when the machine is too fast for
+the distinction to exist. What is left is the part that is about the code: a
+deadline has to make the wait *shorter*, and it has to be measured against the
+clock rather than accounted for -- the defect GitHub Actions found, and the
+one an idle machine cannot see.
 
-`host/loop83_mutations.py` turns eleven of those checks red on purpose: IPv6
+
+`host/loop83_mutations.py` turns twelve of those checks red on purpose: IPv6
 addresses dropped from the resolved list, only the first address tried, the
 addresses tried in the opposite order, the port lost during the resolution,
 a refused connect never noticed, the error code of a failed connect lost, the
 address that was reached misreported, a name that does not resolve reported
 as a connect failure, a timeout reported as a connect failure, the deadline
-the caller asked for ignored, and a timeout of zero accepted.
+the caller asked for ignored, a timeout of zero accepted, and the deadline
+charged against something other than the wall clock.
+
+The last one is the mutation for the defect GitHub Actions found, and it
+works the way that defect worked: it charges the budget at a third of the
+rate the clock runs, so the deadline arrives *later* than it should -- late
+enough that the refusal is seen first, and the run reports a refusal where
+the caller asked for a timeout.
 
 ### One of the mutations was equivalent, and that is worth knowing
 
@@ -7707,6 +7791,18 @@ cannot fail is not evidence, and an equivalent mutant is not a defect -- but
 it is a fact about the code, and the fact is that the refusal is noticed even
 if one of the two ways of noticing it is removed.
 
+### A mutation run that is killed leaves the tree mutated
+
+The mutation runner restores the tree in a `finally` block -- which a killed
+process never reaches. Stopping one mid-batch (here, because its anchor had
+drifted and the run was going to be repeated anyway) left `src/tcp/winsock.c`
+holding a mutation, and the next build compiled it as if it were the code.
+
+The runner now writes the pristine state to disk before it changes anything
+and a run that finds its predecessor's leftovers puts them back before it
+starts, loudly. The lesson is the general one: **a checker that mutates the
+tree under test has to survive being stopped**, and "it restores in a
+`finally`" is not the same as "it restores".
 
 ### The gaps this loop does not close
 
@@ -7721,6 +7817,14 @@ if one of the two ways of noticing it is removed.
   deadline (0 means "no deadline", like OpenSSH with no `ConnectTimeout`), and
   `cmd/ssh_live` does not expose one. The transport can do it; the driver
   does not ask for it yet.
+* **The deadline is per address, and OpenSSH's ssh-keyscan makes it global.**
+  The per-address budget is OpenSSH's *client* arrangement
+  (`ssh_connect_direct` resets the timeout before every address), and that is
+  what the transport does. But `ssh-keyscan.c` has one `timeout = 5` for the
+  whole scan, so `-T 5` here can mean five seconds *per address* -- fifteen
+  for a name with three addresses. The two tools answer the same question
+  with different budgets, and a user who expects ssh-keyscan's behaviour
+  waits longer here than there.
 * **No canonical name.** OpenSSH's `resolve_canonicalize` can replace the
   host with its canonical name (and follow CNAMEs) when
   `CanonicalizeHostname` is set. This client resolves and connects, but keeps

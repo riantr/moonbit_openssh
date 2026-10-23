@@ -12,8 +12,16 @@
  *     (pointer, length) and copied into a terminated buffer here. Handing
  *     inet_pton a raw MoonBit String makes it read past the end of the data.
  */
+/* winsock2.h has to come FIRST: windows.h drags in the old winsock.h unless
+ * WIN32_LEAN_AND_MEAN is set, and the two header sets cannot both be in
+ * scope. GetTickCount64 -- the wall clock the connect deadline is measured
+ * against -- comes from windows.h. */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -202,6 +210,28 @@ static void mb_addr_text(const struct addrinfo *ai, unsigned char *slot) {
     strncpy((char *)slot, buf, MB_TCP_ADDR_TEXT - 1);
 }
 
+/* How much of one address's budget is left, in milliseconds.
+ *
+ * The budget is charged against the WALL CLOCK.  An earlier version of
+ * this code charged it against the time it had ASKED select() to wait
+ * for, and those are not the same thing: a wait comes back late whenever
+ * the machine is loaded, so an accounted budget is spent at a fraction of
+ * the rate the clock runs, and the deadline arrives later than the caller
+ * asked for.
+ *
+ * GitHub Actions caught exactly that, and only there.  On a busy runner a
+ * 100 ms request took 276 ms, so a one-second budget ran out after 2.8
+ * seconds and two addresses took 5.5 -- later than the refusal the
+ * deadline was meant to beat.  On the machine it was written on the
+ * machine was idle, and there the two accounts agreed.
+ *
+ * The budget is charged HERE, in one place, so that "the deadline is
+ * measured against the clock" is something the mutation check can point
+ * at rather than something spread across a loop. */
+static long long mb_budget_left(unsigned long long start, int timeout_ms) {
+    return (long long)timeout_ms - (long long)(GetTickCount64() - start);
+}
+
 /* Try one address.
  *
  * Returns 0 when the connect worked (the socket comes back in *sock_out),
@@ -240,7 +270,7 @@ static int mb_connect_one(const struct addrinfo *ai, int timeout_ms,
         struct timeval tv;
         int optval = 0;
         int optlen = sizeof(optval);
-        int waited = 0;
+        unsigned long long start;
 
         nonblock = 1;
         if (ioctlsocket(s, FIONBIO, &nonblock) != 0) {
@@ -257,18 +287,25 @@ static int mb_connect_one(const struct addrinfo *ai, int timeout_ms,
                 return -1;
             }
         }
+        start = GetTickCount64();
         for (;;) {
-            int slice = timeout_ms - waited;
+            long long remaining = mb_budget_left(start, timeout_ms);
+            int slice;
             int ready;
 
-            if (slice <= 0) {
+            if (remaining <= 0) {
                 *err_out = WSAETIMEDOUT;
                 closesocket(s);
                 return -2;
             }
-            if (slice > 100) {
-                slice = 100;
-            }
+            /* How long to ask select() to wait. The slice is only a
+             * granularity limit -- select() returns the moment the socket
+             * is ready -- so it decides how often the deadline is
+             * re-checked, not how long the wait lasts. A long slice means
+             * fewer select() calls, and a loaded machine makes each of
+             * those calls late, which is exactly what used to stretch the
+             * budget. */
+            slice = remaining > 500 ? 500 : (int)remaining;
             FD_ZERO(&wfds);
             FD_SET(s, &wfds);
             FD_ZERO(&xfds);
@@ -285,7 +322,6 @@ static int mb_connect_one(const struct addrinfo *ai, int timeout_ms,
                 /* Nothing yet. The refusal may already be sitting in
                  * SO_ERROR even though select() did not report the socket,
                  * so read it before waiting again. */
-                waited += slice;
                 optval = 0;
                 optlen = sizeof(optval);
                 if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&optval,

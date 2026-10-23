@@ -49,9 +49,10 @@ import time
 # not something the implementation could ever report as a refusal.
 BUDGET_S = 8.0
 
-# The slice the implementation waits with.  Keeping the two the same means
-# the measurement sees the refusal at the same moment the implementation
-# would.
+# The slice the measurement samples with.  It is not the slice the
+# implementation waits with -- that one is 500 ms -- but the slice only
+# decides how often the refusal is LOOKED for, not when it appears, so a
+# finer slice here measures the same moment more precisely.
 SLICE_S = 0.1
 
 

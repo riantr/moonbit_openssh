@@ -149,6 +149,24 @@ function openSshBinary(name) {
   return null;
 }
 
+// The keyscan's, when there is one.  The list is the same one
+// host/sshd_setup.mjs probes, and the same one Loop #82's gate used.
+function keyscanBinaries() {
+  const out = [];
+  for (const d of OPENSSH_DIRS) {
+    const p = path.join(d, "ssh-keyscan.exe");
+    if (existsSync(p)) out.push(p);
+  }
+  return out;
+}
+
+// The same set of known_hosts lines, byte for byte, order apart.
+function sameLines(a, b) {
+  const la = keyLines(a).slice().sort();
+  const lb = keyLines(b).slice().sort();
+  return la.length === lb.length && la.every((l, i) => l === lb[i]);
+}
+
 function startSshd(port, name) {
   const child = spawn("node", ["host/sshd_setup.mjs", "--port", String(port), "--name", name], {
     cwd: ROOT, stdio: ["ignore", "pipe", "pipe"],
@@ -212,7 +230,17 @@ function runRealSsh(bin, args) {
   });
   const ms = Date.now() - t0;
   const text = norm(`${r.stdout || ""}${r.stderr || ""}`);
-  return { text, code: r.status, ms, error: r.error && r.error.message };
+  return { text, out: norm(r.stdout || ""), err: norm(r.stderr || ""), code: r.status, ms, error: r.error && r.error.message };
+}
+
+function runRealKeyscan(bin, args) {
+  const t0 = Date.now();
+  const r = spawnSync(bin, args, {
+    cwd: ROOT, encoding: "utf8", errors: "replace", timeout: SCAN_TIMEOUT_MS,
+  });
+  const ms = Date.now() - t0;
+  if (r.error) return { out: "", err: String(r.error.message), code: null, ms };
+  return { out: norm(r.stdout || ""), err: norm(r.stderr || ""), code: r.status, ms };
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +523,26 @@ async function main() {
       const latency = await refusalLatencyMs(closedPort);
       ok("the refusal latency could be measured", latency > 0, `${latency} ms`);
       if (latency > 1200) {
+        // The budget is per ADDRESS, not per name.  OpenSSH resets the
+        // timeout before every address it tries (ssh_connect_direct), and
+        // so does this implementation, so a name that resolves to three
+        // addresses gets three one-second budgets and not one.  A bound
+        // written for a single address would therefore fail on a name that
+        // resolves to more -- and the number of addresses is not the same
+        // on every machine, so it is read out of the run rather than
+        // assumed.
+        //
+        // The multiplier is two because the deadline is checked between
+        // waits, and a wait can come back late on a loaded machine; the
+        // extra second is for starting the process and resolving the name.
+        // This bound is deliberately loose: the two checks around it are
+        // the ones with teeth.  The label says the deadline was honoured,
+        // and the comparison says it was honoured EARLIER than waiting out
+        // the refusal would have been -- and that comparison is what
+        // catches a deadline that is only accounted for rather than
+        // measured against the clock.
+        const nTried = Math.max(1, parseTried(refused.err).length);
+        const deadlineBudgetMs = 1000 * nTried * 2 + 1000;
         const timedOut = runKeyscan(["-p", String(closedPort), "-t", "ed25519", "-T", "1", "-v", "localhost"]);
         ok("a deadline shorter than the refusal says CONNECT_TIMEOUT",
           /result: CONNECT_TIMEOUT/.test(timedOut.err),
@@ -502,7 +550,7 @@ async function main() {
         ok("the deadline was honoured -- it finished before the refusal arrived",
           timedOut.ms < refused.ms, `${timedOut.ms} ms vs ${refused.ms} ms`);
         ok("the deadline was honoured -- it did not wait for either refusal",
-          timedOut.ms <= 4000, `${timedOut.ms} ms`);
+          timedOut.ms <= deadlineBudgetMs, `${timedOut.ms} ms, budget ${deadlineBudgetMs} ms`);
       } else {
         skip("a deadline shorter than the refusal says CONNECT_TIMEOUT",
           `the refusal shows up in ${latency} ms here, so a timeout and a refusal are the same thing`);
@@ -537,6 +585,42 @@ async function main() {
           "this machine resolves the name to " + (realAddrs.join(",") || "nothing"));
         skip("OpenSSH's own client fell back to the IPv4 address",
           "this machine resolves the name to " + (realAddrs.join(",") || "nothing"));
+      }
+
+      // ------------------------------------------------------------- G3b --
+      //
+      // OpenSSH's own ssh-keyscan, on the same name.
+      //
+      // It has a different connect path from OpenSSH's own client:
+      // `ssh-keyscan.c:tcpconnect` breaks out of the address loop as soon as
+      // a connect() returns EINPROGRESS, so a refusal that arrives after the
+      // socket was handed to its select() loop is never retried on the next
+      // address.  On a name whose first address refuses, the real tool
+      // therefore never reaches the server at all.
+      //
+      // So the claim is not "the two tools agree" -- it is "when the real
+      // tool does produce keys, they are our keys".  And when it does not,
+      // its own message has to say why, because a tool that fails silently
+      // is a tool whose failure nobody can act on.
+      section("G3b: the real ssh-keyscan, on the same name");
+      const scanners = keyscanBinaries();
+      if (!scanners.length) {
+        skip("the comparison against OpenSSH's own ssh-keyscan",
+          "no ssh-keyscan.exe in " + OPENSSH_DIRS.join(", "));
+      }
+      for (const bin of scanners) {
+        const who = path.basename(path.dirname(bin));
+        const ref = runRealKeyscan(bin, ["-p", String(sshdPort), "localhost"]);
+        const refLines = keyLines(ref.out);
+        if (refLines.length === 0) {
+          ok(`${who}'s ssh-keyscan could not reach the name either, and says why`,
+            /(refused|timed out)/i.test(ref.err),
+            (norm(ref.err).trim().split("\n").filter(Boolean).pop()) || "no message");
+        } else {
+          ok(`${who}'s ssh-keyscan got the same keys by name`,
+            sameLines(ref.out, byName.out) && refLines.length === 3,
+            `${refLines.length} line(s) against our ${keyLines(byName.out).length}`);
+        }
       }
 
       // ------------------------------------------------------------- G4 --

@@ -44,6 +44,14 @@ unusual about:
     went wrong" instead has thrown away the only part of the failure the
     user can act on.
 
+The one about **the deadline** is the one that only a loaded machine could
+find.  A deadline that is *accounted for* -- that adds up the time it asked a
+wait to last instead of measuring how long the wait really took -- is right
+on an idle machine and wrong on a busy one, because a wait comes back late
+exactly when the machine is loaded.  GitHub Actions found it: a one-second
+budget took 2.8 seconds there, and the two addresses a name resolved to took
+5.5 seconds between them.
+
 The pair about **which address** is the other half of the loop.  A name
 usually maps to more than one address, and the resolver's order is not a
 matter of taste: OpenSSH's own client names the addresses it tries, and a
@@ -68,6 +76,63 @@ FILES = [
     os.path.join(ROOT, "src", "tcp", "socket_common.mbt"),
     os.path.join(ROOT, "cmd", "ssh_keyscan", "main.mbt"),
 ]
+
+# A run that is killed -- a timeout, a Ctrl-C, a runner that goes away --
+# never reaches the `finally` at the bottom, and the tree is left MUTATED.
+# That happened here once: the runner was stopped in the middle of the
+# batch, the next build compiled the mutation as if it were the code, and
+# the gate that followed was measuring the wrong thing.  The pristine state
+# is therefore written to disk before anything is changed, and a run that
+# finds its predecessor's leftovers puts them back before it starts.
+#
+# The backup lives under .loop83/, which is gitignored.
+BACKUP_DIR = os.path.join(ROOT, ".loop83", "mutation_backup")
+RUNNING = "RUNNING"
+
+
+def _backup_path(name):
+    return os.path.join(BACKUP_DIR, name)
+
+
+def save_backup(state):
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    for p, text in state.items():
+        with open(_backup_path(os.path.basename(p)), "w", encoding="utf-8",
+                  newline="") as fh:
+            fh.write(text)
+    with open(_backup_path(RUNNING), "w", encoding="utf-8", newline="") as fh:
+        fh.write("a mutation run was interrupted\n")
+
+
+def drop_backup():
+    if not os.path.isdir(BACKUP_DIR):
+        return
+    for name in os.listdir(BACKUP_DIR):
+        os.remove(os.path.join(BACKUP_DIR, name))
+    os.rmdir(BACKUP_DIR)
+
+
+def restore_leftovers():
+    """Undo a run that was killed before it could restore the tree.
+
+    Returns the list of files it put back, or an empty list when there was
+    nothing to undo.  It only acts when the marker of an interrupted run is
+    there, so a normal run never overwrites edits made between runs.
+    """
+    if not os.path.exists(_backup_path(RUNNING)):
+        return []
+    restored = []
+    for p in FILES:
+        b = _backup_path(os.path.basename(p))
+        if not os.path.exists(b):
+            continue
+        with open(b, "r", encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        with open(p, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        restored.append(os.path.relpath(p, ROOT))
+    drop_backup()
+    return restored
 
 # (label, original, mutated, a check name that must go FAIL)
 MUTATIONS = [
@@ -142,7 +207,6 @@ MUTATIONS = [
         "                /* Nothing yet. The refusal may already be sitting in\n"
         "                 * SO_ERROR even though select() did not report the socket,\n"
         "                 * so read it before waiting again. */\n"
-        "                waited += slice;\n"
         "                optval = 0;\n"
         "                optlen = sizeof(optval);\n"
         "                if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&optval,\n"
@@ -163,7 +227,6 @@ MUTATIONS = [
         "                return -1;\n"
         "            }\n"
         "            if (ready == 0) {\n"
-        "                waited += slice;\n"
         "                continue;\n"
         "            }",
         "a refused connection says CONNECT_FAILED",
@@ -246,6 +309,31 @@ MUTATIONS = [
         "    Some(0) => DEFAULT_TIMEOUT_SECONDS * 1000",
         "a timeout of zero is a usage error, as it is in OpenSSH",
     ),
+    (
+        # The deadline has to be measured against the clock, not accounted
+        # for.  This is the defect GitHub Actions found and the local
+        # machine never would: the wait loop used to add up the time it had
+        # ASKED select() to wait for and compare that total with the
+        # budget.  A wait comes back late on a loaded machine, so the
+        # accounted budget was spent at a fraction of the rate the clock
+        # runs, and the deadline arrived later than the caller asked for --
+        # on a busy runner, later than the refusal it was meant to beat.
+        #
+        # The mutation charges the budget at a third of the clock's rate.
+        # That is a stand-in for the accounting rather than a copy of it,
+        # and it reproduces the shape of the bug: the deadline arrives
+        # LATER than it should.  Here that means the refusal is seen
+        # before the deadline, and the run reports a refusal where the
+        # caller asked for a timeout.
+        "the deadline is charged against something other than the wall clock",
+        "static long long mb_budget_left(unsigned long long start, int timeout_ms) {\n"
+        "    return (long long)timeout_ms - (long long)(GetTickCount64() - start);\n"
+        "}",
+        "static long long mb_budget_left(unsigned long long start, int timeout_ms) {\n"
+        "    return (long long)timeout_ms - (long long)(GetTickCount64() - start) / 3;\n"
+        "}",
+        "a deadline shorter than the refusal says CONNECT_TIMEOUT",
+    ),
 ]
 
 
@@ -297,9 +385,17 @@ def selected():
 
 
 def main():
+    # A run that was killed leaves the tree mutated.  Put it back before
+    # anything else, and say so loudly -- a tree that is quietly wrong
+    # measures nothing.
+    restored = restore_leftovers()
+    if restored:
+        print("RESTORED  a previous run was interrupted; put back: %s"
+              % ", ".join(restored), flush=True)
     original = read()
     failures = []
     chosen = selected()
+    save_backup(original)
     try:
         for idx, (label, old, new, must_fail) in chosen:
             # The file that contains the anchor -- and it has to contain it
@@ -339,6 +435,7 @@ def main():
                         print("        " + line.strip(), flush=True)
     finally:
         write(original)
+        drop_backup()
 
     print()
     if failures:
