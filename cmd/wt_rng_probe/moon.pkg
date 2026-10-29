@@ -1,0 +1,15 @@
+import {
+  "openssh/openssh_moonbit/src/rng",
+}
+
+///| Loop #84 browser probe: js target only, runs inside a browser Web Worker.
+///
+///| `src/rng`'s js backend is an `extern "js"` call into the Web Crypto API,
+///| and the wasm backends reject `extern "js"` outright -- so this probe has
+///| no reason to compile there, and saying so is cheaper than letting the
+///| toolchain fail with a confusing FFI error.
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+js",
+)

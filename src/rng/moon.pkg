@@ -1,0 +1,30 @@
+///| src/rng -- the platform's cryptographically secure random source.
+///
+///| Loop #84.  This package has no state and no seed: it is a thin wrapper
+///| over the platform CSPRNG, one call per request, exactly like OpenSSH's
+///| `arc4random_buf`.  The per-file `targets` gate is the same shape as
+///| `src/tcp`'s: the native backend calls BCryptGenRandom, the js backend
+///| calls the Web Crypto API, and the wasm backend has no entropy source at
+///| all and says so.
+///
+///| The two TEST files are gated the same way, and for the same reason.  The
+///| contract in `rng_test.mbt` is a contract about a source of entropy, so it
+///| is compiled only where there is one (native, js).  `rng_wasm_test.mbt` is
+///| compiled only where there is none, and asserts the one thing that has to
+///| be true there: the backend REPORTS the failure instead of inventing
+///| bytes.
+///
+///| Without this split, `moon test src/rng` on a target with no entropy
+///| source would be a red run -- and a red run that means "there is no
+///| entropy here", not "the code is wrong".  A gate that has to be read for
+///| its meaning is a gate that gets ignored.
+options(
+  native_stub: [ "rng.c" ],
+  targets: {
+    "rng_native.mbt": [ "native" ],
+    "rng_js.mbt": [ "js" ],
+    "rng_wasm.mbt": [ "wasm", "wasm-gc" ],
+    "rng_test.mbt": [ "native", "js" ],
+    "rng_wasm_wbtest.mbt": [ "wasm", "wasm-gc" ],
+  },
+)

@@ -23,6 +23,8 @@ import {
   "openssh/openssh_moonbit/src/agent",
   "openssh/openssh_moonbit/src/channel",
   "openssh/openssh_moonbit/src/sftp",
+  // Loop #84: the KEXINIT cookie is drawn from the platform CSPRNG.
+  "openssh/openssh_moonbit/src/rng",
 }
 
 pkgtype(kind: "library")

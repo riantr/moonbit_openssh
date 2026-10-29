@@ -228,13 +228,19 @@ async fn cfg_report_tofu(r : @wtlive.WtAuthReport) -> Unit {
 }
 
 ///|
-fn fixed_x() -> @bigint.BigNat {
-  let bytes : FixedArray[Byte] = FixedArray::from_array([
-    0x5A, 0x17, 0xC3, 0x9E, 0x44, 0xB2, 0x6D, 0xF1, 0x08, 0xA7, 0x35, 0xCC, 0x91,
-    0x2E, 0x60, 0xD3, 0x74, 0x18, 0x9F, 0xE2, 0x50, 0xB7, 0xC6, 0x3D, 0x81, 0x0A,
-    0xF5, 0x29, 0x64, 0xC8, 0x7B, 0x1E,
-  ])
-  @bigint.BigNat::from_bytes_be(bytes)
+/// DH 私有指数。
+///
+/// Loop #84:浏览器路径也从 CSPRNG 取——Web Crypto API 就是浏览器自己的
+/// CSPRNG,和原生侧走的是同一个 `src/rng` 包。
+/// `cfg("fixed_kex") == "1"` 是给需要可复现报文的门禁留的逃生口,和
+/// `cmd/ssh_live --fixed-kex` 是同一件事、同一个理由(`host/transcript_check.py`
+/// 要在 Python 侧重算交换哈希,就得知道客户端的私有指数)。
+fn dh_priv() -> @bigint.BigNat {
+  if cfg("fixed_kex") == "1" || cfg("fixed_kex") == "true" {
+    @sshclient.fixed_dh_priv()
+  } else {
+    @sshclient.random_dh_priv()
+  }
 }
 
 ///|
@@ -671,7 +677,7 @@ async fn wt_sftp_fault_run(url : String) -> Unit {
   // that is the property being asserted.
   let outcome = @wtlive.wt_live_sftp(
     conn,
-    fixed_x(),
+    dh_priv(),
     uname,
     test_auth_key(),
     ops,
@@ -759,7 +765,7 @@ async fn wt_sftp_run(url : String) -> Unit {
   println("transport: connected")
   let outcome = @wtlive.wt_live_sftp(
     conn,
-    fixed_x(),
+    dh_priv(),
     uname,
     test_auth_key(),
     ops,
@@ -948,7 +954,7 @@ async fn main {
     println("transport: connected")
     let soutcome = @wtlive.wt_live_shell(
       sconn2,
-      fixed_x(),
+      dh_priv(),
       uname,
       test_auth_key(),
       shell_cmd,
@@ -1027,7 +1033,7 @@ async fn main {
     println("transport: connected")
     let outcome = @wtlive.wt_live_exec_io(
       econn,
-      fixed_x(),
+      dh_priv(),
       uname,
       test_auth_key(),
       exec_cmd,
@@ -1091,7 +1097,7 @@ async fn main {
     match
       @wtlive.wt_live_auth(
         aconn,
-        fixed_x(),
+        dh_priv(),
         uname,
         test_auth_key(),
         cfg_kh_policy(),
@@ -1149,7 +1155,7 @@ async fn main {
       }
     }
     println("transport: connected")
-    match @wtlive.wt_live_session(sconn, fixed_x(), cfg_kh_policy()) {
+    match @wtlive.wt_live_session(sconn, dh_priv(), cfg_kh_policy()) {
       @wtlive.ServiceAccepted(r) => {
         println("result: SERVICE_ACCEPTED")
         println("service: " + r.service_name)
@@ -1184,7 +1190,7 @@ async fn main {
     }
   }
   println("transport: connected")
-  match @wtlive.wt_live_handshake(conn, fixed_x(), cfg_kh_policy()) {
+  match @wtlive.wt_live_handshake(conn, dh_priv(), cfg_kh_policy()) {
     @wtlive.Established(r) => {
       println("result: ESTABLISHED")
       println("server_ident: " + r.server_ident)

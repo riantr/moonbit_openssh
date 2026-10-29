@@ -7845,5 +7845,397 @@ tree under test has to survive being stopped**, and "it restores in a
 
 ---
 
+## Loop #84: the client has a random source -- the secrets stop being constants
+
+### What was missing
+
+Before this loop the client had **no entropy at all**.  Two values that should
+never be the same twice were the same every single time:
+
+* the KEXINIT cookie was the fixed 16-byte array `A0 A1 .. AF`
+  (`sshclient.fixed_cookie`);
+* the Diffie-Hellman private exponent was a fixed 32-byte constant
+  (`5A17C39E .. 87B1E`), and **three drivers each carried their own copy of
+  it** -- `cmd/ssh_live`, `cmd/ssh_keyscan` and `cmd/wt_ssh`.
+
+Two consequences, and the second one is the serious one:
+
+1. every transcript this client produced started with the same sixteen bytes;
+2. a DH exchange with a known private exponent has **no forward secrecy at
+   all**.  The shared secret is `f^x mod p` for an `x` that is in the source
+   code, so anybody with the repository can recompute it from a recorded
+   exchange.  The whole point of a DH key exchange is that `x` is secret.
+
+### The practice, pinned from OpenSSH's source
+
+* `kex.c:598` -- `arc4random_buf(cookie, KEX_COOKIE_LEN)`
+* `kexc25519.c:54` -- `arc4random_buf(key, CURVE25519_SIZE)`
+* `dh.c:303` -- `DH_generate_key(dh)`, which is OpenSSL, whose randomness
+  comes from the platform
+* `dh.c:300` -- `DH_set_length(dh, MINIMUM(need * 2, pbits - 1))`
+* `kexdh.c:67` -- `dh_gen_key(kex->dh, kex->we_need * 8)`
+
+OpenSSH draws both from the platform CSPRNG and never reuses either.  The
+doubling in `dh.c:300` is there because Pollard rho and the big-step/little-step
+attacks are O(sqrt(n)), and the length it ends up with is what OpenSSL's
+`BN_priv_rand(..., BN_RAND_TOP_ONE, BN_RAND_TOP_ONE, ...)` then fills in: the
+top TWO bits set, so the key really has the length that was asked for, and the
+bottom bit set, so the key is odd.
+
+### `src/rng`: one platform call per request, no state, no seed
+
+The new package is a thin wrapper and nothing else:
+
+* **native** -- `BCryptGenRandom(NULL, buf, len, BCRYPT_USE_SYSTEM_PREFERRED_RNG)`.
+  A NULL algorithm handle asks for the primary provider, which is the same
+  generator the system uses for its own keys.
+* **js** -- the Web Crypto API's `crypto.getRandomValues`.  It refuses a view
+  longer than 65536 bytes, so a long request is filled in chunks, and
+  `subarray` gives a view on the SAME buffer so the chunks land where the
+  first one would have.  Measured, not assumed: a MoonBit `Bytes` reaches JS
+  as a `Uint8Array`, and `getRandomValues` fills it in place.
+* **wasm** -- **there is no entropy source**, so the backend says so.
+
+It holds no state and no seed, and it makes one platform call per request,
+exactly like `arc4random_buf`.  A seeded generator whose seed lives in the
+binary is not a CSPRNG, and a package whose whole job is to be one is not the
+place where that mistake should hide.
+
+### A failure is reported, and never papered over with zeros
+
+`bytes(n)` aborts when the platform call fails.  OpenSSH's `arc4random_buf`
+aborts too, and the reason is the same: a caller handed zeros would use them
+as a secret, and **a zero key is not a key**.
+
+This is the one claim in this loop that nothing about the *successful* path
+can check, so it is checked from the outside -- see "A unit test cannot watch
+an abort" below.
+
+### The exponent: 2047 bits, the top two bits set, odd
+
+`src/kexdh/privkey.mbt` draws `pbits - 1` bits -- 2047 for group 14 -- which
+is the largest length the group allows and is the length OpenSSH ends up with
+for the largest `need`.
+
+* Why `pbits - 1` rather than `pbits`: the exponent has to be smaller than
+  the prime, and the prime has `pbits` bits, so a value with `pbits - 1` bits
+  is below 2^(pbits-1) and therefore below the prime.  That is a GUARANTEE,
+  not a rejection loop, so the distribution of the exponent is not skewed by
+  filtering.
+* Why the top two bits and the low bit: OpenSSL's `BN_RAND_TOP_ONE` twice and
+  once, which is what makes Pollard rho cost O(sqrt(n)) over the whole
+  exponent rather than half of it.
+
+The difference from OpenSSH's rule (`MINIMUM(need * 2, pbits - 1)`) is that
+this client does not know `we_need` before it negotiates, and takes the
+maximum instead.  The maximum is never weaker than OpenSSH's rule; it costs a
+few hundred extra squarings in a modexp that takes milliseconds.
+
+### The one exception, and why it exists
+
+The cookie is **always** random: nothing needs it to be reproducible, because
+the transcript oracle reads it off the wire.
+
+The exponent has **one** documented exception.  `host/transcript_check.py`
+recomputes the exchange hash in Python from the bytes on the wire, and to do
+that it needs the shared secret, and to get the shared secret it needs the
+client's private exponent -- which it cannot learn from the wire, because
+recovering it from `e = g^x mod p` is the discrete logarithm.  So the oracle
+asks for the known exponent by name:
+
+* `cmd/ssh_live --fixed-kex`
+* `cmd/wt_ssh` with `cfg("fixed_kex") == "1"`
+
+That is a testing premise, not a production one: a client that used the fixed
+exponent in anger would have no forward secrecy, which is the very thing this
+loop exists to remove.  `host/verify_loop31.mjs` now passes
+`--client-arg=--fixed-kex` to the oracle, which it has to -- without that the
+oracle computes an exchange hash over a secret it does not have.
+
+### What the wire actually carries (measured)
+
+The DH public value `e = g^x mod p` goes on the wire as an SSH mpint, and its
+**length is not constant**.  Measured over 20000 draws:
+
+```
+257 bytes   49.80 %
+256 bytes   50.01 %
+255 bytes    0.19 %
+```
+
+(The first guess -- that `e` would always be 256 bytes -- was wrong, and the
+number theory behind it was wrong too: the QR subgroup's elements are spread
+over the whole of `[1, p-1]`, not over the top half of it.)  It does not
+matter for the byte counts the gates pin: SSH's padding rounds every packet
+up to a multiple of the cipher block size, and all three lengths land on the
+same padded total, so `sent_bytes: 541` and `recv_bytes: 737` are stable.
+
+### How the gate checks randomness without checking randomness
+
+A gate cannot check randomness by looking at it -- that is what randomness is.
+What it can check is the contract a CSPRNG *wrapper* can be wrong about, and
+the observable difference between two runs:
+
+| claim | how it is checked |
+|---|---|
+| the length asked for is the length delivered | `src/rng`'s five contract tests |
+| two calls are not the same bytes | the same tests, and `cmd/rng_probe` |
+| the output is not all zeros | the same tests |
+| the WHOLE buffer was written | the SECOND HALF is not all zeros |
+| the cookie is fresh | two connections, two cookies, off the wire |
+| the exponent is fresh | two connections, two `e`, off the wire |
+| neither is the old constant | the same, against a value computed in Python |
+| the escape hatch still reproduces the old value | byte-for-byte equality with `pow(g, FIXED_X, p)` computed in Python |
+| the browser draws entropy too | a real Chromium Web Worker |
+| the target with no entropy source says so | a wasm build that PANICS |
+
+The oracle is `host/loop84_peek.py`: a MITM tee in front of a real sshd, with
+the SSH packet parser **imported** from `host/transcript_check.py` rather
+than copied, so the two cannot drift apart.  It prints the client's cookie and
+`e`, and the value the OLD constant exponent would have produced -- computed
+in Python from the group 14 prime, not read out of the repository.
+
+### A test file has to be gated by the target its contract can hold on
+
+The first version of `src/rng`'s test file was compiled on every target, and
+the wasm run failed 4/4 -- correctly, because the wasm backend has no entropy
+source and the draw aborts.  That was the right behaviour and the wrong
+shape: it made `moon test src/rng` red on the default target, and the default
+target is **not** native (`moon test src/rng` failed while
+`moon test src/rng --target native` passed).
+
+So the test files are gated per target, the same way the backends are:
+
+* `src/rng/rng_test.mbt` -- the five contract tests, compiled on native and js;
+* `src/rng/rng_wasm_wbtest.mbt` -- one test, compiled on wasm and wasm-gc: the
+  backend reports failure, and it did not touch the buffer on its way to
+  failing.
+
+A **white-box** test (`*_wbtest.mbt`) is what can see a private function: a
+black-box test file is compiled into its own package and can only see `pub`
+items, so `mb_rng_fill` was "unbound" until the file was renamed.
+
+### The SHAPING has to be separable from the DRAW, or the test cannot be instrumented
+
+The exponent's contract is about its SIZE and its SHAPE -- 2047 bits, the top
+two set, odd -- and the first version of the test asserted it on a real draw,
+which means the test needed an entropy source, which means the test file had
+to be compiled only where there is one.
+
+That is where the coverage tool stopped talking about `src/kexdh`.
+`moon coverage analyze` has no `--target` flag, so it runs at the DEFAULT
+target, and a package whose only test driver does not compile there produces
+
+```
+error: coverage runtime data does not match the selected source files
+```
+
+-- which is a package that has tests and can no longer be measured.  The
+refreshing of `host/cov_reportable.json` put `src/kexdh` in the
+not-reportable list, and it would have stayed there for a reason that was
+entirely this loop's own doing.
+
+So the SHAPING is separated from the DRAW:
+
+* `private_exponent_bytes(pbits)` -- how many bytes a group of `pbits` bits
+  draws from;
+* `exponent_from_bytes(bytes)` -- the pure shaping: the top byte's high bit
+  cleared, the top two bits below it set, the bottom byte's low bit set;
+* `dh_private_exponent(pbits)` -- draw, then shape.
+
+The shape is then testable on FIXED bytes, with no entropy source at all, so
+the test file compiles and passes on every target -- native, js, wasm and
+wasm-gc -- and the coverage tool can instrument the package again.
+
+The general lesson: **a test that needs an entropy source is a test that
+cannot be instrumented at the default target**, and the way out is not to
+gate the test file but to split the function so that the part worth asserting
+does not need the random part.
+
+### A unit test cannot watch an abort, so the abort is watched from outside
+
+Nothing in a MoonBit test can observe an `abort` from the inside.  So the
+"the failure stops the client" half of the contract is observed from the
+outside, by a wasm build of `cmd/wasm_rng_probe` run under
+`host/node_host.mjs`:
+
+```
+wasm_rng_probe: start
+Runtime error: unreachable          <- exit code 3
+```
+
+The gate requires exit code 3 and **no** second line.  A build that turned the
+failure into bytes would print `wasm_rng_probe: got 32` and exit 0, and the
+gate would see it.
+
+### The assertion that was pointed the wrong way
+
+The mutation suite found a real defect in the gate itself, and it is worth
+writing down because the mistake is a natural one.
+
+The contract test for "the whole buffer was written" compared the two halves
+of a 4096-byte draw and required them to be **different**, and its comment
+said: "an implementation that filled only the first half would leave two
+identical halves".  **That is false.**  A half-filled buffer has a RANDOM
+first half and a ZERO second half, and those two are different -- so the
+assertion passed on exactly the implementation it was supposed to catch.
+
+The mutation "only half of the requested buffer is filled" was MISSED, and the
+fix is the other direction: the **second half must not be all zeros**.  An
+implementation that filled only the first half leaves the second half exactly
+as it found it, and a real CSPRNG output's second half is all zeros with
+probability 2^-16384.
+
+The general lesson is the one this repository keeps learning: **a structural
+assertion has to be checked against the mistake it is supposed to catch.**
+Comparing the two halves catches "the buffer holds one constant"; it does not
+catch "the buffer holds half of one".  Both assertions are now there, and they
+say which mistake each one is for.
+
+### A mutation run that is killed leaves the tree mutated (again)
+
+This happened a second time in this loop, and the backup mechanism that
+Loop #83 added is what stopped it from becoming a mystery.
+
+The mutation runner was stopped in the middle of the batch (its anchor for the
+"the exponent may be even" mutation had drifted, and the run was going to be
+repeated anyway).  The runner restores the tree in a `finally` block, which a
+killed process never reaches, so `src/kexdh/privkey.mbt` was left holding the
+mutation `bytes[nbytes - 1] = (last & 0xFEUL).to_byte()` -- an exponent that
+may be even.
+
+The symptom was not a compile error.  It was `moon test src/kexdh` reporting
+`3/4 passed` on a test that had passed a minute earlier, with the failing
+test named `the_private_exponent_is_odd` -- which is exactly the mutation
+that had been left behind.  The runner's next start printed
+
+```
+RESTORED  a previous run was interrupted; put back: src\rng\api.mbt, ...
+```
+
+and the tree was whole again.
+
+Two things are worth saying about that:
+
+* **the mechanism worked**, and it worked from a plain `import` of the
+  runner's own `restore_leftovers()` -- it is a function with a job, not a
+  habit;
+* **the symptom pointed straight at the cause.**  "The oddness test fails" is
+  not a mystery when the mutation that makes the exponent even is the last
+  thing that ran.  A structural test that names the property it protects is
+  also a test that names the defect when the property is broken.
+
+### The mutation suite, in full
+
+| # | the defect | the check that catches it |
+|---|---|---|
+| 0 | the wrapper returns a constant instead of the platform's bytes | two draws are not the same bytes |
+| 1 | a platform failure becomes zeros instead of stopping the client | the wasm draw PANICS instead of returning bytes |
+| 2 | only half of the requested buffer is filled | the WHOLE 4096-byte buffer was written |
+| 3 | the native backend always reports failure | native: every contract test passes |
+| 4 | the js backend fills the buffer with a constant | js: every contract test passes |
+| 5 | the wasm backend pretends to have an entropy source | wasm: the one test that can hold there passes |
+| 6 | the private exponent is half the group's size | the exponent keeps the group's size and shape |
+| 7 | the private exponent does not have its top two bits set | the exponent keeps the group's size and shape |
+| 8 | the private exponent may be even | the exponent keeps the group's size and shape |
+| 9 | the client falls back to the fixed DH exponent | the two DH public values are different |
+| 10 | the client falls back to the fixed KEXINIT cookie | the two cookies are different |
+| 11 | `--fixed-kex` is accepted and ignored | the fixed-KEX DH public value is the old constant's |
+
+All twelve turn the gate red.
+
+### The mutation anchors drifted, and that is what the anchor rule is for
+
+The first run of the suite reported ten CAUGHT and two SKIPped, and the two
+SKIPs were **not** defects in the code -- they were anchors that had
+drifted:
+
+* the wasm backend's anchor was written with semicolons (`ignore(buf);`)
+  and MoonBit has none (`ignore(buf)`);
+* the `--fixed-kex` anchor was written with parentheses around the condition
+  (`if (argv[i] == "--fixed-kex")`) and MoonBit has none either
+  (`if argv[i] == "--fixed-kex"`).
+
+A drifted anchor is reported as SKIP and counted as "not caught", and that is
+exactly right: a mutation that cannot be applied proves nothing about the
+gate, and counting it as caught would be a lie about the gate's teeth.  The
+fix is to copy the anchor **out of the file**, not to write it from memory.
+
+And `moon fmt` moved them a second time: it rewrites `if (x != 0) {` into
+`if x != 0 {`, so an anchor that contains the parenthesised form stops
+matching as soon as the file is formatted.  The rule this repository already
+has -- **run `moon fmt` first, then re-check the anchors** -- is not a
+formality; it is the only thing that catches this, and it caught it twice in
+this loop.
+
+### The formatter has an opinion about doc comments, and it is not yours
+
+`///|` on *every* line of a paragraph is read by `moon fmt` as the start of a
+new doc-comment block on every line, and the formatter then separates them
+with blank lines -- a wall of one-line paragraphs.  The repository's
+canonical form is:
+
+```
+///|
+/// Multi-precision unsigned natural (limbs little-endian, limbs[0] = LSB)
+pub struct BigNat {
+```
+
+i.e. the `|` marker alone on the first line, and the body as plain `///`
+lines with no blank lines between them.  Writing the comment in that form
+from the start avoids the round trip entirely.
+
+### A new package with tests is a red gate until the coverage evidence is refreshed
+
+`host/verify_loop68.mjs` re-derives the set of packages the toolchain can
+produce a coverage report for, and compares it against the committed
+measurement in `host/cov_reportable.json`.  A package that BECOMES
+reportable is a red gate until that file is refreshed -- and `src/rng` became
+one in this loop, because it has test files.
+
+The refresh is
+
+```
+python host/cov_probe.py --json host/cov_reportable.json
+```
+
+and it has to be that script rather than a hand edit.  The file is a
+MEASUREMENT: a row in it says "a run of this script produced a report for
+this package".  Editing the list by hand would make the file claim something
+that was never measured, which is the same class of failure as the committed
+one, in the other direction.
+
+### The gaps this loop does not close
+
+* **The wasm targets have no entropy source at all.**  The client cannot run
+  there: the browser path is the js target, where the Web Crypto API is
+  there, and the wasm targets are compile-only in this repository.  A real
+  wasm deployment would need the host to provide an entropy import, and
+  nothing here provides one.
+* **curve25519 is not implemented.**  OpenSSH's modern default is
+  `curve25519-sha256` (`kexc25519.c:54`), and this client still negotiates
+  `diffie-hellman-group14-sha256` only.  The exponent rule in
+  `src/kexdh/privkey.mbt` is the DH one and does not carry over.
+* **The exponent length rule differs from OpenSSH's.**  This client takes the
+  group's maximum; OpenSSH takes `MINIMUM(need * 2, pbits - 1)`, where `need`
+  is known only after the negotiation.  The maximum is never weaker, and it
+  is a few hundred extra squarings.
+* **`src/rng` is used for exactly two things so far**: the KEXINIT cookie and
+  the DH private exponent.  Everything else the client derives -- the session
+  id, the exchange hash, the traffic keys -- comes from the shared secret, so
+  it inherits the randomness of the exponent.  A future ed25519 key, a
+  hostbased salt or a password challenge would need `src/rng` too.
+* **`--fixed-kex` is on `cmd/ssh_live` only.**  `cmd/wt_ssh` has the same
+  escape hatch (`cfg("fixed_kex")`), and no gate sets it: the browser path
+  has no oracle that needs a known exponent.
+* **No `ssh-keygen`.**  The client can USE a key, but there is nothing here
+  that generates one, and a generated key needs `src/rng` as well.
+* **`src/rng` has no audit of what it does NOT cover.**  A package that is
+  "the random source" tends to accumulate callers, and every one of them
+  should be checked for "is this actually a secret".  There is no such list
+  yet.
+
+---
+
 
 

@@ -14,17 +14,41 @@
 ///|   that our own verifier accepted.
 
 ///|
-/// DH private exponent. A production client draws this from the CSPRNG and
-/// never reuses it; fixing it here keeps the byte transcript reproducible so a
-/// diff against the paramiko capture is meaningful. The value is well above
-/// 2^ so it is not a toy magnitude for a 2048-bit group.
-fn fixed_x() -> @bigint.BigNat {
-  let bytes : FixedArray[Byte] = FixedArray::from_array([
-    0x5A, 0x17, 0xC3, 0x9E, 0x44, 0xB2, 0x6D, 0xF1, 0x08, 0xA7, 0x35, 0xCC, 0x91,
-    0x2E, 0x60, 0xD3, 0x74, 0x18, 0x9F, 0xE2, 0x50, 0xB7, 0xC6, 0x3D, 0x81, 0x0A,
-    0xF5, 0x29, 0x64, 0xC8, 0x7B, 0x1E,
-  ])
-  @bigint.BigNat::from_bytes_be(bytes)
+/// Does the caller want the reproducible KEX secrets?
+///
+/// `--fixed-kex` exists for `host/transcript_check.py`, which recomputes the
+/// exchange hash in Python from the bytes on the wire.  To do that it needs
+/// the shared secret, and to get the shared secret it needs this client's
+/// private DH exponent -- which it cannot learn from the wire, because
+/// recovering it from `e = g^x mod p` is the discrete logarithm.  So the
+/// oracle runs the client with a known exponent.
+///
+/// A real client never wants this.  The fixed exponent is in the source
+/// code, so a session that used it has no forward secrecy -- which is the
+/// very thing Loop #84 exists to remove.  That is why it is a flag and not
+/// the default.
+fn wants_fixed_kex(argv : Array[String]) -> Bool {
+  let mut i = 1
+  while i < argv.length() {
+    if argv[i] == "--fixed-kex" {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
+/// The DH private exponent for this run.
+///
+/// Fresh from the platform CSPRNG, unless the caller asked for the
+/// reproducible one.
+fn dh_priv() -> @bigint.BigNat {
+  if wants_fixed_kex(@env.args()) {
+    @sshclient.fixed_dh_priv()
+  } else {
+    @sshclient.random_dh_priv()
+  }
 }
 
 ///|
@@ -700,7 +724,7 @@ fn run_exec(
     Some(conn) => {
       let outcome = @sshclient.live_exec_io(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         command,
@@ -871,7 +895,7 @@ async fn run_forward(
     Some(conn) => {
       let outcome = @sshclient.live_forward(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         kh.policy,
@@ -1076,7 +1100,7 @@ async fn run_remote_forward(
       }
       let outcome = @sshclient.live_remote_forward(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         kh.policy,
@@ -1252,7 +1276,7 @@ async fn run_forward_cancel(
       let steps : Array[Bool] = [first_want_reply, true]
       let outcome = @sshclient.live_forward_cancel_ladder(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         kh.policy,
@@ -1488,7 +1512,7 @@ async fn run_local_forward(
       }
       let outcome = @sshclient.live_local_forward(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         kh.policy,
@@ -1836,7 +1860,7 @@ fn run_shell(
     Some(conn) => {
       let outcome = @sshclient.live_shell(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         command,
@@ -2118,7 +2142,7 @@ fn sftp_mode(
     Some(conn) => {
       let outcome = @sshclient.live_sftp_named(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         test_auth_key(),
         subsystem,
@@ -2633,7 +2657,7 @@ async fn run_agent_auth(
     Some(conn) => {
       let outcome = @sshclient.live_auth_with_agent(
         conn,
-        fixed_x(),
+        dh_priv(),
         user,
         chan,
         kh.policy,
@@ -2871,7 +2895,7 @@ async fn main {
       Some(conn) => {
         let outcome = @sshclient.live_auth(
           conn,
-          fixed_x(),
+          dh_priv(),
           user,
           test_auth_key(),
           kh.policy,
@@ -2948,7 +2972,7 @@ async fn main {
         return
       }
       Some(conn) => {
-        let outcome = @sshclient.live_session(conn, fixed_x(), kh.policy)
+        let outcome = @sshclient.live_session(conn, dh_priv(), kh.policy)
         conn.close()
         match outcome {
           @sshclient.ServiceAccepted(r) => {
@@ -2992,7 +3016,7 @@ async fn main {
       return
     }
     Some(conn) => {
-      let outcome = @sshclient.live_handshake(conn, fixed_x(), kh.policy)
+      let outcome = @sshclient.live_handshake(conn, dh_priv(), kh.policy)
       conn.close()
       match outcome {
         @sshclient.Established(r) => {

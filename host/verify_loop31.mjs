@@ -295,9 +295,16 @@ run(`Get-Process ssh_live -ErrorAction SilentlyContinue | Stop-Process -Force`);
 // name rather than as a value. The first version of this line used the space
 // form and the oracle died with "expected one argument" -- a failure that
 // reads like the transcript tool being broken.
+// `--client-arg=--fixed-kex` is not optional.  The oracle recomputes the shared
+// secret as `f^x mod p`, and it can only do that if it knows the client's
+// private exponent -- which it cannot learn from the wire, because recovering
+// it from `e = g^x mod p` is the discrete logarithm.  Since Loop #84 the
+// client draws that exponent from the CSPRNG, so the oracle has to ask for the
+// reproducible one by name.  The flag is a testing premise, never the default.
 const tc = run(
   `python host/transcript_check.py --port ${PORT} --proxy-port ${PROXY_PORT} --exe ${exeArg} ` +
-  PIN_ARGS.map(a => `--client-arg=${a}`).join(' ')
+  PIN_ARGS.map(a => `--client-arg=${a}`).join(' ') +
+  ' --client-arg=--fixed-kex'
 );
 check('MoonBit reached ESTABLISHED via tee', tc.includes('result: ESTABLISHED'));
 check('MoonBit H == Python H from wire bytes', tc.includes('H_match:     True'));

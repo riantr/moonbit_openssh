@@ -89,6 +89,16 @@
       "report": true
     },
     {
+      "package": "src/kexdh",
+      "test_files": [
+        "privkey_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 29,
+      "files_reported": 3,
+      "report": true
+    },
+    {
       "package": "src/kexflow",
       "test_files": [
         "kexflow_test.mbt"
@@ -117,7 +127,7 @@
         "render_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 53,
+      "uncovered_lines": 61,
       "files_reported": 7,
       "report": true
     },
@@ -130,6 +140,17 @@
       "exit": 0,
       "uncovered_lines": 2,
       "files_reported": 2,
+      "report": true
+    },
+    {
+      "package": "src/rng",
+      "test_files": [
+        "rng_test.mbt",
+        "rng_wasm_wbtest.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 3,
+      "files_reported": 1,
       "report": true
     },
     {
@@ -196,9 +217,11 @@
     "src/hmac_sha512",
     "src/hostkey",
     "src/kexc25519",
+    "src/kexdh",
     "src/kexflow",
     "src/knownhosts",
     "src/poly1305",
+    "src/rng",
     "src/sha256",
     "src/sha512",
     "src/sshconfig",

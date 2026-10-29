@@ -362,7 +362,9 @@ async fn wt_handshake_into(
   // Loop #53: 只有这台主机配了 `@cert-authority` 才报出主机证书算法，
   // 和原生侧用同一个判定。
   let my = @sshclient.live_proposal_with_certs(kh.has_ca_anchor())
-  let ic_payload = @kexflow.kexinit_payload(@sshclient.fixed_cookie(), my)
+  // Loop #84: the cookie comes from the platform CSPRNG, on the browser
+  // side too -- the Web Crypto API is the browser's own CSPRNG.
+  let ic_payload = @kexflow.kexinit_payload(@sshclient.random_cookie(), my)
   if !wt_send_plain_packet(
       conn,
       counters,

@@ -13,6 +13,8 @@
 import {
   "openssh/openssh_moonbit/src/bigint",
   "openssh/openssh_moonbit/src/sha256",
+  // Loop #84: the private exponent is drawn from the platform CSPRNG.
+  "openssh/openssh_moonbit/src/rng",
 }
 
 pkgtype(kind: "library")

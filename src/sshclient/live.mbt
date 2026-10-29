@@ -357,18 +357,10 @@ pub fn live_proposal_with_hostkey(hostkey_algs : String) -> @kexflow.Proposal {
 }
 
 ///|
-/// Deterministic 16-byte KEXINIT cookie. A real client would use random
-/// bytes; a fixed cookie keeps the transcript reproducible so a byte diff
-/// against the paramiko capture is meaningful.
-pub fn fixed_cookie() -> FixedArray[Byte] {
-  let c : FixedArray[Byte] = FixedArray::make(16, b'\x00')
-  let mut i = 0
-  while i < 16 {
-    c[i] = (0xA0 + i).to_byte()
-    i = i + 1
-  }
-  c
-}
+// Loop #84: the fixed KEXINIT cookie and the fixed DH private exponent moved
+// to `secrets.mbt`, next to `KexSecrets` -- they are the "reproducible
+// transcript" pair, and they belong with the thing that decides whether a
+// client uses them or the CSPRNG.
 
 // ---------------------------------------------------------------------------
 // Transport framing
@@ -675,7 +667,10 @@ fn[T : @transport.Transport] handshake_to_session_with_proposal(
   // ---- 2. KEXINIT ----
   // Loop #53: 只有这台主机配了 `@cert-authority` 才报出主机证书算法——那是
   // `handshake_to_session` 这一层的事:提案由调用方给,提案里写什么就是什么。
-  let ic_payload = @kexflow.kexinit_payload(fixed_cookie(), my)
+  // Loop #84: the cookie comes from the platform CSPRNG.  It used to be a
+  // fixed 16-byte array, which made every transcript this client produced
+  // start with the same sixteen bytes.
+  let ic_payload = @kexflow.kexinit_payload(random_cookie(), my)
   if !send_packet(conn, counters, s, @sshwire.SSH_MSG_KEXINIT, ic_payload) {
     return (Failed(KexinitSendFailed), None)
   }

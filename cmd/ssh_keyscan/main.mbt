@@ -113,15 +113,13 @@ fn type_algs(name : String) -> String? {
 ///|
 /// DH 私有指数。
 ///
-/// 真正的客户端从 CSPRNG 取,每次连接都不一样。这里固定成一个常量,是为了
-/// 让字节级对拍有意义——和 `cmd/ssh_live` 用的是同一个理由、同一个值。
-fn fixed_x() -> @bigint.BigNat {
-  let bytes : FixedArray[Byte] = FixedArray::from_array([
-    0x5A, 0x17, 0xC3, 0x9E, 0x44, 0xB2, 0x6D, 0xF1, 0x08, 0xA7, 0x35, 0xCC, 0x91,
-    0x2E, 0x60, 0xD3, 0x74, 0x18, 0x9F, 0xE2, 0x50, 0xB7, 0xC6, 0x3D, 0x81, 0x0A,
-    0xF5, 0x29, 0x64, 0xC8, 0x7B, 0x1E,
-  ])
-  @bigint.BigNat::from_bytes_be(bytes)
+/// Loop #84:真正的客户端从 CSPRNG 取,每次连接都不一样。这里之前固定成
+/// 一个常量,是为了让字节级对拍有意义——而 Loop #84 之后,没有任何门禁还
+/// 需要这个对拍:扫出来的密钥与指数无关(密钥来自服务端的主机密钥,与 DH
+/// 无关),而报文的**长度**也不受指数影响(见 `src/sshclient/secrets.mbt`
+/// 里关于 e 的 mpint 长度的说明)。所以这里直接用随机值。
+fn dh_priv() -> @bigint.BigNat {
+  @sshclient.random_dh_priv()
 }
 
 ///|
@@ -155,7 +153,7 @@ fn scan_one(
     Some(conn) => {
       let outcome = @sshclient.live_keyscan(
         conn,
-        fixed_x(),
+        dh_priv(),
         @knownhosts.KnownHostsPolicy::skip(),
         t.algs,
       )

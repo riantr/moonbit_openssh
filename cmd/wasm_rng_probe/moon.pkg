@@ -1,0 +1,27 @@
+///| cmd/wasm_rng_probe -- Loop #84: what the wasm backend does when it has
+///| no entropy to give.
+///
+///|   `src/rng`'s wasm backend has no entropy source: a bare wasm module has
+///|   no operating system underneath it, no Web Crypto API and no host to
+///|   ask.  The package's answer is to REPORT that, and this driver is how
+///|   that answer is observed from the outside.
+///
+///|   It prints one line before the draw and one after.  On a target with an
+///|   entropy source, both lines appear.  On the wasm backends, only the
+///|   first one does -- the draw aborts, and the abort is the answer: a
+///|   client handed zeros would use them as a key, and a zero key is not a
+///|   key.
+///
+///|   The driver is wasm-only, and says so in its `moon.pkg`, because a
+///|   `cmd/` package is a leaf: nothing imports it, so a package-level
+///|   declaration costs nothing and makes the toolchain refuse the other
+///|   targets instead of failing there with a confusing [4067].
+import {
+  "openssh/openssh_moonbit/src/rng",
+}
+
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+wasm",
+)

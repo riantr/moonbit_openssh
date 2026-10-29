@@ -1,0 +1,9 @@
+import {
+  "openssh/openssh_moonbit/src/rng",
+}
+
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+native",
+)
