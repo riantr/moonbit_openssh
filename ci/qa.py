@@ -286,7 +286,7 @@ QA_CATEGORIES = [
             "arithmetic over observed exit codes, never a constant. Line "
             "coverage is deliberately NOT folded in even though Loop #68 made "
             "`moon coverage analyze` produce a number: it is a real measurement, "
-            "but it is an UNCOVERED-line count over the 15 of 17 src "
+            "but it is an UNCOVERED-line count over the 18 of 20 src "
             "directories with tests that can be reported at all, so folding it "
             "into a single 'quality metrics' number would silently treat the "
             "two that cannot as 100% covered. The per-package figures are "
@@ -319,7 +319,7 @@ QA_CATEGORIES = [
         command=None,
         tier="mutations",
         evidence=(
-            "host/loop*_mutations.py: 20 harnesses that edit the working tree, "
+            "host/loop*_mutations.py: 21 harnesses that edit the working tree, "
             "run `moon clean`, re-run the gate that owns the decision, and "
             "restore. Owned by the mutations tier and NOT in the qa tier on "
             "purpose: each one is many full gate runs and they mutate the tree, "

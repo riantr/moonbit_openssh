@@ -8237,5 +8237,372 @@ one, in the other direction.
 
 ---
 
+## Loop #85: ssh-keygen -- the client can MAKE a key
+
+### What was missing
+
+Loop #84 closed a gap it named in its own list: "**No `ssh-keygen`.**  The
+client can USE a key, but there is nothing here that generates one."
+
+That is a bigger gap than it looks.  A client that can only be handed a key is
+a client that cannot be used by anybody who does not already have one, and the
+file that holds a key is a **published format** -- so the thing that is missing
+is not only a command but a second implementation of OpenSSH's file format,
+written by nobody, checked by nobody.
+
+Two things made it possible to do it right:
+
+* `src/rng` (Loop #84) is the entropy source a key needs.  A key is a secret,
+  and a secret needs somewhere to come from that is not a constant in the
+  source code.
+* OpenSSH itself is on this machine, in two builds.  So the oracle for "is
+  this file the file OpenSSH writes" is not another implementation of the same
+  idea -- it is **the program that everybody else has to read**.
+
+### The format, pinned from OpenSSH's source
+
+`openssh-key-v1`, the format OpenSSH has written since 7.8:
+
+```
+"openssh-key-v1\0"        15 bytes
+cstring  ciphername      "none"
+cstring  kdfname         "none"
+string   kdfoptions      empty
+uint32   number of keys  1
+string   publickey blob  51 bytes
+string   encrypted       144 bytes
+```
+
+and inside the last field:
+
+```
+uint32   check           the same random word, twice
+uint32   check
+string   "ssh-ed25519"
+string   <32 bytes of public key>
+string   <64 bytes of secret key>
+string   <the comment>
+padding  1, 2, 3, ...    up to the cipher's block size
+```
+
+The sources:
+
+* `sshkey.c:72` -- `AUTH_MAGIC` is `"openssh-key-v1"`, and it is written with
+  `sizeof(AUTH_MAGIC)`, so **the NUL terminator is part of the bytes on the
+  wire**.  Fifteen bytes, not fourteen.
+* `sshkey.c:2832` -- `sshkey_private_to_blob2`; the header fields are at
+  `sshkey.c:2891-2898` and the check words, the key, the comment and the
+  padding at `sshkey.c:2903-2918` (the padding is `++i & 0xff`, i.e. 1, 2, 3,
+  ... in order).
+* `sshkey.c:2935-2937` -- the PEM assembly.
+* `sshbuf-misc.c:128` -- `sshbuf_dtob64` with `wrap=1`, which breaks the line
+  after every **70** characters; `sshbuf-misc.c:222` removes the padding for
+  the `authorized_keys` form.
+* `ssh-ed25519.c:81-88` -- `ssh_ed25519_generate` calls
+  `crypto_sign_ed25519_keypair`, and the secret key is **64 bytes**: the
+  32-byte seed followed by the 32-byte public key.  That is `ED25519_SK_SZ`,
+  and it is the same layout RFC 8032 uses for the expanded secret key -- so
+  `src/ed25519`'s `keypair_from_seed` already returns exactly what the file
+  wants, and nothing has to be re-derived.
+* `authfile.c:82` -- `sshkey_perm_ok`, which is why the permissions below are
+  not a nicety.
+
+### A `cstring` and a `string` are the SAME wire form
+
+This is the trap in the format, and it is worth writing down because the
+natural reading is wrong:
+
+> a `cstring` in OpenSSH means "a string whose contents contain no NUL" --
+> it does **NOT** mean "a NUL-terminated string".
+
+Both are a uint32 length followed by the bytes.  Reading "cstring" as
+"NUL-terminated" puts one extra byte after every string field, and the file
+comes out 244 bytes instead of 242 and **no reader accepts it** -- not
+OpenSSH's, not ours.
+
+The file is 242 bytes, and the arithmetic says so before a single byte is
+written:
+
+```
+15 (magic) + 8 ("none") + 8 ("none") + 4 (empty options) + 4 (one key)
+  + (4 + 51) (public blob) + (4 + 144) (private block) = 242
+```
+
+where 51 = 15 + 36 for `ssh-ed25519` plus the 32-byte key, and 144 is the
+private block padded up to the "none" cipher's block size of 8.
+
+### The three packages
+
+* **`src/keyfile`** -- the format, and nothing else.  It knows how to write a
+  file, how to read one back, and how to derive a key pair from a seed.  It
+  draws nothing on its own except through `src/rng`.
+* **`src/keyperm`** -- making the file private.  On Windows there are no POSIX
+  mode bits, so the mode is the ACL, and the ACL has to be replaced rather
+  than inherited.
+* **`cmd/ssh_keygen`** -- the driver.  `-f`, `-t`, `-C`, `-N`, `-q`.
+
+The split is deliberate: the format is pure and testable byte for byte on
+every target, while the drawing lives in `generate_ed25519` and is exercised
+by the gate instead.
+
+### A passphrase is refused, not ignored
+
+`-N secret` is an **error**, and no file is written.
+
+A tool that accepts `-N secret` and writes an UNENCRYPTED key is a way to lose
+a secret quietly, and the whole point of this file is that the secret really is
+protected.  The same reasoning applies to the private key that is already
+there: it is written with `CreateNew`, so an existing key is **never silently
+replaced**.
+
+Both refusals are checked by the gate, and the second one is checked by the
+bytes on disk rather than by a message, because a message is what a tool prints
+on its way to doing the thing anyway.
+
+### Making the file private on Windows (six attempts, and what each one cost)
+
+A file created on Windows inherits the ACL of its directory, and in an ordinary
+user directory that ACL lets "Authenticated Users" read it.  OpenSSH then
+refuses the key with "Permissions for '...' are too open", so **a key file that
+is not private is not a key file**.
+
+The attempts, in order, because the failures are the interesting part:
+
+1. `SetEntriesInAclW` + `EXPLICIT_ACCESS_W` -- **crash**.
+2. `SetEntriesInAclA` + `EXPLICIT_ACCESS` -- **crash** as well.
+3. The root cause of both: the owner SID was taken with
+   `GetSecurityDescriptorOwner` from the **self-relative** security descriptor
+   that `GetNamedSecurityInfoW` returns.  In a self-relative descriptor the
+   owner pointer is an *offset into the descriptor*, not a separate allocation,
+   and handing it to an API that frees it corrupts the heap.  The fix is
+   `GetNamedSecurityInfoW`'s **owner output parameter**, which is the API's own
+   correctly-scoped pointer.
+4. `SetSecurityInfo` with a self-relative DACL -- returns **-5**: the two
+   forms are not interchangeable.
+5. `MakeAbsoluteSecurityDescriptor` -- **LNK2019**: it is not in `advapi32`.
+6. What works: `ConvertStringSecurityDescriptorToSecurityDescriptorW` to build
+   the whole descriptor from an **SDDL** string, and `SetFileSecurityW` to
+   install it.  The SDDL's `P` is what protects the DACL from inheriting the
+   parent's permissions back:
+
+   ```
+   D:P(A;;FA;;;<owner sid>)
+   ```
+
+   The SDDL is used because the alternative -- assembling the
+   `ACL_REVISION` / `ACCESS_ALLOWED_ACE` bytes by hand -- is exactly the kind
+   of thing that reads past the end of a SID and crashes, and a crash in a
+   function whose job is to protect a secret is a bad way to spend an
+   afternoon.
+
+`PROTECTED_DACL_INHERIT` is spelled out as `0x80000000` in `keyperm.c`, because
+the SDK header that declares it is not reachable from this build; the value is
+fixed by the API.
+
+**The failure is reported.**  `src/keyperm` returns a negative stage code and
+the driver says so and stops.  On the js and wasm targets there is no way to
+protect a file, so `protect` returns -1 there rather than pretending.
+
+### The gate's oracle is OpenSSH itself
+
+`host/verify_loop85.mjs` is the first gate in this repository whose judge is
+not another implementation of the same idea but the real thing:
+
+| section | what it checks |
+|---|---|
+| G0 | `src/keyfile` compiles and its tests pass on native, js, wasm and wasm-gc |
+| G0b | a real `ssh-keygen` exists (both builds, when both are here) |
+| G1 | our file has the shape OpenSSH's writer produces: the same magic, the same field lengths, the same 242 bytes, and our private file embeds the public key from our own `.pub` |
+| G2 | OpenSSH reads our private key and derives **the public key we wrote** |
+| G3 | the private key file is private: OpenSSH does not complain, and the ACL says so on its own |
+| G4 | the tool refuses a passphrase, refuses another key type, and refuses to overwrite an existing key |
+| G5 | two keys are different, and the public key in the file is the public key of the secret key in the file |
+
+The two-way check in G2 is the one that matters: `ssh-keygen -y -f <our
+private>` has to succeed **and** print the public key that is in our `.pub`
+file, byte for byte.  That is two claims in one: the file is parseable by
+OpenSSH, and the key it holds is the key we say it is.
+
+### The first run of the gate found four defects, and all four were in the gate
+
+The gate's first run was red in twelve places -- the four test-assertion
+checks (one per target), the seven shape checks that compare our file with a
+reference file, and the fingerprint check -- and **every one of the failures
+was a bug in the gate rather than in the code**.  After the first three fixes
+it was 53/55, and the two that were left were the last two defects.  They
+are worth writing down, because the first two are the kind of thing that
+looks like a failure of the thing being tested.
+
+1. **The test-output regex had the wrong groups.**  `moon test` prints
+   `Total tests: 8, passed: 8, failed: 0`, and the regex
+   `Total tests:\s*(\d+),\s*passed:\s*(\d+),\s*failed:\s*(\d+)` gives
+   **m[1] = total, m[2] = passed, m[3] = failed**.  The code compared **m[2]**
+   (which is `passed`) against 0 and **m[1]** (which is `total`) against `> 0`,
+   so all four targets FAILED while the detail line printed "8/8 passed".
+2. **`-N '""'` is not an empty passphrase on Windows.**  OpenSSH took the two
+   quote characters *as* the passphrase and wrote an **aes256-ctr + bcrypt**
+   file of 274 bytes -- a completely different format from the one under test,
+   and seven of the shape checks failed because of it.  The call has to be a
+   **real empty argument**, and the repository already had the precedent
+   (`host/gen_loop53_fixtures.mjs:136-138`: "-N '' has to be a real empty
+   argument").
+3. **The fingerprint helper read the wrong field.**  `fingerprint()` took
+   `r.status` from the object `keygen()` returns -- and that object has
+   `code`, not `status` -- so the exit code was `undefined`, the check failed,
+   and the fingerprint next to it was **correct**.
+4. **A structural check was comparing bytes where only lengths are
+   comparable.**  "our blob's key count and public blob have the same length"
+   compared the bytes of the range that holds the public key blob -- and the
+   two files are made by **different writers with different seeds**, so their
+   public keys differ by construction and that comparison could never pass.
+   It now compares the length fields, and a stronger check was added next to
+   it: the public key blob **inside** our private file has to be the public key
+   in our own `.pub` file.  If those two disagreed, the file would be saying
+   two things at once.
+
+The general lesson is the one this repository keeps learning: **a gate that
+fails is a gate that has to be read before the code is touched.**  Three of
+the four failures were in the instrument, and a gate that reports a failure
+without being read is worth exactly nothing.
+
+### The mutation suite, in full
+
+| # | the defect | the check that catches it |
+|---|---|---|
+| 0 | the magic loses its NUL terminator | our blob starts with the same magic |
+| 1 | the cipher name claims the key is encrypted | src/keyfile's tests pass on native |
+| 2 | the two check words are not the same word | src/keyfile's tests pass on native |
+| 3 | the private block stores the public key instead of the secret key | our blob is 242 bytes |
+| 4 | the padding bytes are not 1, 2, 3, ... | src/keyfile's tests pass on native |
+| 5 | the base64 is wrapped at 64 columns instead of 70 | we wrap the base64 at 70 columns |
+| 6 | the base64 padding is not stripped | the fingerprint OpenSSH prints is the one our tool printed |
+| 7 | the fingerprint is computed over the seed instead of the public key | the fingerprint OpenSSH prints is the one our tool printed |
+| 8 | the reader compares the two check words the wrong way round | src/keyfile's tests pass on native |
+| 9 | the reader takes the public half of the secret key for the seed | src/keyfile's tests pass on native |
+| 10 | the ACL is never installed, but the caller is told it was | the private key file is readable by its owner only |
+| 11 | the DACL also grants Authenticated Users | the private key file is readable by its owner only |
+| 12 | the driver says the passphrase is unsupported and writes the key anyway | no private key was written for the refused passphrase |
+| 13 | the driver overwrites an existing private key | the existing private key was left alone |
+
+All fourteen turn the gate red.
+
+Number 12 is the dangerous one, and it is the reason the gate checks the
+**bytes on disk** rather than the refusal message: a driver that prints "a
+passphrase is not supported" and then writes the key anyway is exactly the
+failure this loop exists to prevent, with an extra sentence in front of it.
+
+### Two of the mutations were EQUIVALENT, and one of them was pointing the wrong way
+
+The first run of the suite was 12 CAUGHT and 2 MISSED, and **neither of the
+two misses was a defect in the code**.
+
+**The first miss was an equivalent mutation.**  "the `.pub` line keeps the
+base64 padding" cannot fail, and the reason is arithmetic: an ed25519 public
+key blob is **51 bytes** (15 for the key type, 4 + 32 for the key), 51 is a
+multiple of 3, and so its base64 **never has a `=` in it at all**.  There is
+nothing to strip on that line, for this key type.  The padding rule bites
+somewhere else -- the fingerprint, whose SHA-256 is 32 bytes, and 32 is *not*
+a multiple of 3 -- so the mutation moved there, and the gate had to be
+tightened to catch it: the fingerprint regex used to stop at the `=`, so a
+fingerprint with its padding still compared equal to one without.
+
+**The second miss was pointing the wrong way.**  The mutation inverted the
+`if (!SetFileSecurityW(...))`, and the inversion does the opposite of what
+the label said: the ACL **was** installed, and the caller was told it had
+**failed**.  It was caught -- by "our ssh_keygen wrote a .pub file", because
+the driver stops before writing it -- but not by the check that was named.
+The dangerous direction is the other one: the call never happens and the
+caller is told it did.  That version is caught by the ACL check and by
+OpenSSH itself, and neither of them can see the other one.
+
+The general lesson is the one this repository already has, in a new place:
+**a mutation that cannot fail is not evidence, and a mutation that fails for
+the wrong reason is not the mutation you meant to write.**  The first one is
+found by the runner (it reports MISSED); the second one is only found by
+reading what the gate said the failure was -- which is why the runner prints
+the FAIL lines under a MISSED mutation.
+
+### The unit test vector is OpenSSH's own file
+
+The bytes in `src/keyfile/keyfile_test.mbt` are not hand-made.  They are what
+a real `ssh-keygen -t ed25519` produced, read back field by field, so the
+test asserts that **the file this repository writes is the file OpenSSH
+writes**.
+
+The seed is fixed (`19ef1c43...e374e9`), so the key is fixed, so the file is
+fixed, and the assertion is one hex string of 484 characters -- 242 bytes --
+that a reader can check by eye against the layout above.  The test needs no
+entropy source, so it compiles and passes on all four targets, which is what
+keeps `src/keyfile` reportable by the coverage tool.
+
+### The gaps this loop does not close
+
+* **No encrypted private keys.**  A file with a passphrase has
+  `ciphername != "none"` and a real KDF, and this repository does not implement
+  `bcrypt_pbkdf` or AES-CTR.  The reader says `Unsupported` for such a file,
+  which is the honest answer: the file is fine, this reader does not do that
+  part of it.  The writer refuses to produce one.
+* **One key type.**  `ed25519` only.  RSA, ECDSA, the FIDO/SK types and
+  ML-DSA are all refused by name.
+* **`cmd/ssh_keygen` only makes keys.**  OpenSSH's `ssh-keygen` also has `-y`
+  (print the public key of a private key), `-l` (print a fingerprint) and `-b`
+  (print the public key blob).  The reader in `src/keyfile` can do the first
+  two; the driver does not expose them yet.
+* **`src/keyperm` is Windows-only.**  On a POSIX system the exclusive create
+  mode is what makes the file private, and there is no ACL to set.
+* **`src/rng` has a third kind of caller now.**  The seed and the check word
+  come from it, and both are secrets in the sense that matters: a repeated
+  seed is a repeated key, and a repeated check word makes two key files look
+  alike.
+* **`ssh-add` and `ssh-copy-id` are still missing**, so the key this loop
+  makes still has to be carried around by hand.
+
+### A stub that ignores its argument is a SAST finding, not a style question
+
+`src/keyperm`'s stub has to have the same signature as the native half, so
+it takes a `path` it cannot act on -- there is no file system on the browser
+to protect.  The first version wrote:
+
+```moonbit
+pub fn protect(path : String) -> Int32 {
+  -1
+}
+```
+
+and the Loop #66 SAST gate caught it: `unused_value` at
+`src/keyperm/keyperm_stub.mbt:12`.  The fix is the convention the repository
+already has (`src/rng/rng_wasm.mbt` does the same thing for the same
+reason):
+
+```moonbit
+pub fn protect(path : String) -> Int32 {
+  ignore(path)
+  -1
+}
+```
+
+The point is not the warning.  The point is that **a gate which is red for a
+reason you do not understand is a gate you cannot trust**, and this one had
+been green in every run before Loop #85 -- because nothing had added a
+package with a stub until now.  The warning was not about `keyperm`; it was
+about the fact that the gate had never been asked this question.
+
+### The mutation anchors drifted again, and `moon fmt` is the reason
+
+`moon fmt` moved three of the fourteen anchors, in exactly the ways it moved
+Loop #84's:
+
+* it rewrapped the magic's byte array onto **one** line, so the anchor that
+  ended in `0x76, 0x31, 0x00,` no longer matched;
+* it put the `println`'s argument on **its own** line, so a two-line anchor
+  became a five-line one;
+* it pulled the `create_mode` argument up onto the call's line.
+
+The fix is the rule this repository already has -- **copy the anchor out of
+the file, do not write it from memory** -- and the check that the anchors
+are still unique has to run AFTER `moon fmt`, not before it.
+
+---
+
 
 

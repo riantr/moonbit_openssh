@@ -1,0 +1,13 @@
+import {
+  "moonbitlang/core/env",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "openssh/openssh_moonbit/src/keyfile",
+  "openssh/openssh_moonbit/src/keyperm",
+}
+
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+native",
+)

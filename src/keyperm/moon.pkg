@@ -1,0 +1,41 @@
+///|
+/// Loop #85: making a private key file private.
+///
+/// A private key file that other users can read is not a private key
+/// file.  OpenSSH says so out loud -- its `ssh-keygen -y` refuses to
+/// read a key whose permissions are too open, with the message
+/// "Permissions for '...' are too open.  It is required that your private
+/// key files are NOT accessible by others." -- and it is right.
+///
+/// This package exists because writing the file is not enough:
+/// **a file created on Windows inherits the directory's ACL**, and in a
+/// normal user directory that ACL lets `Authenticated Users` read it.
+/// So a key written by `cmd/ssh_keygen` would be a key that OpenSSH
+/// refuses to use and that any other process on the machine could read.
+///
+/// The fix here is the Windows one, because Windows is where this
+/// repository runs: the file's inherited ACL is replaced by one that grants
+/// the owner alone, with `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+/// and `SetFileSecurityW` -- `keyperm.c` says why it took six attempts to
+/// get there.
+///
+/// On POSIX the exclusive create mode is what makes a file private, and
+/// there is no ACL to set; the js and wasm targets have no way to protect a
+/// file at all, and `protect` says so there instead of pretending.
+///
+/// **A failure to tighten is a failure, not a warning.**  The caller is
+/// writing a secret; a key file that was written and could not be
+/// protected is a key file that must not be reported as done.  So
+/// `protect` reports what happened and the driver says so.
+import {
+}
+
+pkgtype(kind: "library")
+
+options(
+  native_stub: [ "keyperm.c" ],
+  targets: {
+    "keyperm_native.mbt": [ "native" ],
+    "keyperm_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+)

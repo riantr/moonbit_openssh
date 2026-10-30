@@ -1,0 +1,43 @@
+// Loop #85: the OpenSSH private key file format -- openssh-key-v1.
+//
+// The file is the one OpenSSH writes since 7.8 and the one every other
+// implementation reads.  Its layout, from OpenSSH's own source
+// (sshkey.c sshkey_private_to_blob2, line 2832, and its reader
+// private2_decrypt, line 3032):
+//
+//   "openssh-key-v1\0"          the magic, AUTH_MAGIC
+//   cstring  ciphername        "none" when there is no passphrase
+//   cstring  kdfname           "none" when there is no passphrase
+//   string   kdfoptions        empty when the KDF is "none"
+//   uint32   number of keys    always 1 here
+//   string   publickey blob    the wire form of the public key
+//   string   encrypted         the block below, ciphered (here: not)
+//
+// and inside the "encrypted" block:
+//
+//   uint32   check             the same random value twice
+//   uint32   check
+//   string   key type          "ssh-ed25519"
+//   string   public key        32 bytes
+//   string   private key       64 bytes: the seed, then the public key
+//   string   comment
+//   padding  1, 2, 3, ...      up to the cipher's block size
+//
+// The whole thing is base64, wrapped at 70 columns, between the two
+// "-----BEGIN/END OPENSSH PRIVATE KEY-----" markers.
+//
+// A "cstring" and a "string" are the SAME wire form: a uint32 length
+// followed by the bytes.  The name "cstring" means "a string whose contents
+// contain no NUL" -- it does NOT mean "NUL-terminated", which is the
+// natural reading and is wrong by one byte per field.  The file this
+// repository writes is 242 bytes; the other reading produces 244 and no
+// reader accepts it.  The layout is written out in full here rather than
+// described in prose because the one thing everybody gets wrong about it is
+// exactly this.
+import {
+  "moonbitlang/core/encoding/base64",
+  "openssh/openssh_moonbit/src/ed25519",
+  "openssh/openssh_moonbit/src/rng",
+  "openssh/openssh_moonbit/src/sha256",
+  "openssh/openssh_moonbit/src/sshwire",
+}

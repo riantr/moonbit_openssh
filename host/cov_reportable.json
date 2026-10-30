@@ -109,6 +109,16 @@
       "report": true
     },
     {
+      "package": "src/keyfile",
+      "test_files": [
+        "keyfile_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 34,
+      "files_reported": 3,
+      "report": true
+    },
+    {
       "package": "src/khfile",
       "test_files": [
         "store_test.mbt"
@@ -219,6 +229,7 @@
     "src/kexc25519",
     "src/kexdh",
     "src/kexflow",
+    "src/keyfile",
     "src/knownhosts",
     "src/poly1305",
     "src/rng",
