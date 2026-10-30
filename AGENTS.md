@@ -8602,6 +8602,61 @@ The fix is the rule this repository already has -- **copy the anchor out of
 the file, do not write it from memory** -- and the check that the anchors
 are still unique has to run AFTER `moon fmt`, not before it.
 
+### The gates tier was a TREE, and it had 1m36s of headroom left
+
+Loop #85's own run was green -- GitHub run 40995593926, `success`, 58m33s --
+and the `gates` job inside it took **58m24s against a 60-minute cap**.  One
+more loop would have taken it over, and the failure would have been a job
+timeout: a red step with a name and no reason.
+
+The cause was not the work.  Five gates -- loop81 through loop85 -- each run a
+"regression" section that re-runs the gates before them, and the members were
+spawned **without** `--skip-regression`, so each member ran its own chain as
+well:
+
+```
+loop85 -> loop84 -> loop83 -> loop82 -> loop81 -> loop80
+          -> loop83 -> ...                    -> loop79
+```
+
+That is not a chain, it is a tree, and the local CI's own timings show what
+it costs:
+
+| gate | time in the CI tier |
+|---|---|
+| `verify_loop78.mjs` | 8.2 s |
+| `verify_loop79.mjs` | 23.4 s |
+| `verify_loop80.mjs` | 48.7 s |
+| `verify_loop81.mjs` | 85.5 s |
+| `verify_loop82.mjs` | 176.9 s |
+| `verify_loop83.mjs` | 391.1 s |
+| `verify_loop84.mjs` | 644.3 s |
+| `verify_loop85.mjs` | **1181.6 s** |
+
+Nearly half the tier, in one gate.  The fix is one argument: spawn the
+members **with** `--skip-regression`, so the chain is one level deep.
+
+**Nothing is lost, and it is worth being precise about why**, because the
+obvious objection is "the nested run is there to catch something":
+
+* every member of every chain is **also** a gate the CI engine runs directly
+  (`ci/ci.py --tiers gates` runs every `host/verify_loop*.mjs` that is not a
+  peer gate), so nothing stops being checked;
+* the reason the nested run exists -- a gate that leaves state behind that
+  breaks an EARLIER gate -- is **preserved**: the members still run AFTER the
+  parent gate has finished its own work.  What goes away is only the
+  re-checking of the members' own members, which is the same work the engine
+  does anyway.
+
+And this was **not a new idea**: `verify_loop36.mjs:409`, `37:499` and
+`38:401` have always spawned their nested scripts with `--skip-regression`.
+The gates tier never learned the convention from them.
+
+`host/patch_nested_regression.py` makes the change, with `--check` to report
+and `--apply` to write.  The `gates` job's cap went from 60 to 90 minutes at
+the same time -- the cap's job is to turn "the runner hung" into a red step
+with a name, not to be a target -- and it is a bound, not a prediction.
+
 ---
 
 

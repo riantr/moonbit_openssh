@@ -400,8 +400,17 @@ async function main() {
   // ------------------------------------------------------------- regression --
   if (!SKIP_REGRESSION) {
     section("regression: the earlier loops must not move");
-    for (const label of ["loop78", "loop79", "loop80"]) {
-      const r = spawnSync("node", [`host/verify_${label}.mjs`], { cwd: ROOT, encoding: "utf8", errors: "replace" });
+    // The members are spawned with `--skip-regression`, so this chain is one
+  // level deep instead of a tree.  Without it, each member ran its own chain
+  // as well: loop85 re-ran loop84, which re-ran loop83, and so on, and the
+  // gates tier grew exponentially -- 1181.6s for loop85 alone, against a
+  // 60-minute job cap that the whole tier was using up.  Nothing is lost:
+  // every member is also a gate the CI engine runs directly, and the members
+  // still run AFTER this gate's own work, so a gate that leaves state behind
+  // that breaks an earlier gate is still caught.  verify_loop36/37/38 have
+  // always done it this way.
+  for (const label of ["loop78", "loop79", "loop80"]) {
+      const r = spawnSync("node", [`host/verify_${label}.mjs`, "--skip-regression"], { cwd: ROOT, encoding: "utf8", errors: "replace" });
       const t = norm(`${r.stdout || ""}${r.stderr || ""}`);
       const m = t.match(/(\d+)\/(\d+) checks/);
       ok(`${label} harness still green`, r.status === 0 && t.includes("PASS"),

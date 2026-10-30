@@ -45,7 +45,19 @@ jobs:
   gates:
     name: gates
     runs-on: windows-latest
-    timeout-minutes: 60
+    # 90 minutes, not 60.  Measured: the gates tier took 58m24s on run
+    # 40995593926 (Loop #85) against the old 60-minute cap -- 1m36s of
+    # headroom, with one more gate's nested regression still to come.
+    #
+    # The cost was not the work; it was the nested regression chains running
+    # as a TREE rather than a chain (see host/patch_nested_regression.py and
+    # AGENTS.md, Loop #85).  That fix took the tier back down; this cap is
+    # the headroom for what comes next.
+    #
+    # The cap stays, because its job is to turn "the runner hung" into a red
+    # step with a name, rather than a 6-hour job timeout.  It is a bound,
+    # not a target.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
