@@ -6,7 +6,7 @@
 ///   private key file at all.
 ///
 ///   This driver is the whole of `ssh-keygen` for the one key type that
-///   works: ed25519, unencrypted.
+///   works: ed25519.
 ///
 ///   The options are OpenSSH's, and only the ones that mean something here:
 ///
@@ -14,13 +14,17 @@
 ///                  to it, with `.pub` appended)
 ///     -t <type>    the key type; only `ed25519` is supported
 ///     -C <comment> the comment to put in both files
-///     -N <pass>    the passphrase; only the empty one is supported
+///     -N <pass>    the passphrase; the empty one means no passphrase
+///     -a <rounds>  how many KDF rounds to use when there is one
 ///     -q           quiet: do not print the fingerprint lines
 ///
-///   The passphrase is refused rather than ignored.  A tool that accepts
-///   `-N secret` and writes an UNENCRYPTED key would be a way to lose a
-///   secret quietly, and the whole point of this file is that the secret
-///   is really protected.  So `-N` with a non-empty value is an error.
+///   **Loop #86 changed the passphrase.**  Before it, `-N` with a
+///   non-empty value was REFUSED, because there was no `bcrypt_pbkdf`
+///   here and a tool that accepts `-N secret` and writes an UNENCRYPTED
+///   key would be a way to lose a secret quietly.  Now there is a KDF,
+///   so the passphrase is honoured: the key file is enciphered with
+///   AES-256-CTR under a key derived from the passphrase, and OpenSSH
+///   reads it back.
 ///
 ///   The private key file is written with the owner's permissions only.
 ///   On Windows there are no POSIX permission bits to set, so the mode is
@@ -33,6 +37,7 @@ async fn main {
   let mut key_type = "ed25519"
   let mut comment = ""
   let mut passphrase = ""
+  let mut rounds = @keyfile.DEFAULT_ROUNDS
   let mut quiet = false
   let mut i = 1
   while i < args.length() {
@@ -49,6 +54,9 @@ async fn main {
     } else if a == "-N" && i + 1 < args.length() {
       i = i + 1
       passphrase = args[i]
+    } else if a == "-a" && i + 1 < args.length() {
+      i = i + 1
+      rounds = parse_rounds(args[i])
     } else if a == "-q" {
       quiet = true
     } else {
@@ -65,9 +73,14 @@ async fn main {
     println("ssh_keygen: only -t ed25519 is supported, not " + key_type)
     return
   }
-  if passphrase != "" && passphrase != "\"\"" {
+  if rounds < 1 {
+    println("ssh_keygen: -a <rounds> must be at least 1")
+    return
+  }
+  if rounds > @keyfile.MAX_ROUNDS {
     println(
-      "ssh_keygen: a passphrase is not supported; the key would not be encrypted",
+      "ssh_keygen: -a <rounds> must not be more than " +
+      @keyfile.MAX_ROUNDS.to_string(),
     )
     return
   }
@@ -78,7 +91,26 @@ async fn main {
   // random is that two key files do not look alike.
   let check_bytes = random_check_bytes()
   let check = check_word(check_bytes)
-  let priv_text = @keyfile.private_file_text(pair, comment, check)
+  let priv_text = if passphrase == "" {
+    @keyfile.private_file_text(pair, comment, check)
+  } else {
+    // The salt is random too, and it goes into the file so that the
+    // reader can derive the same key.  Sixteen bytes, from the same
+    // source as the seed.
+    let salt = @keyfile.random_salt()
+    let text = @keyfile.private_file_text_encrypted(
+      pair, comment, check, passphrase, salt, rounds,
+    )
+    if text == "" {
+      // The KDF refused the passphrase -- an empty one is the only
+      // thing it refuses, and this branch is here so that a failure is
+      // a sentence and not a file that claims to be encrypted and is
+      // not.
+      println("ssh_keygen: the passphrase could not be used")
+      return
+    }
+    text
+  }
   let pub_text = @keyfile.public_file_text(pair, comment)
   let priv_path = path
   let pub_path = path + ".pub"
@@ -113,13 +145,48 @@ async fn main {
 }
 
 ///|
+/// The number of KDF rounds, from the `-a` option.
+///
+/// OpenSSH's `ssh-keygen` takes the number as a decimal number and
+/// refuses anything that is not one.  A number that is not a number at
+/// all is a refusal here too, and so is a number below one -- the KDF
+/// has nothing to do with no rounds.
+///
+/// **The number is capped as it is read.**  A count of thirty digits
+/// does not fit in an `Int32`, and an `Int32` that wraps around lands
+/// on a small number that looks perfectly legal -- so a request for
+/// two billion rounds could arrive as twenty-four and be written into
+/// the file as twenty-four.  Stopping at the cap turns every too-big
+///
+///
+/// number into the one refusal, which is the honest answer.
+fn parse_rounds(text : String) -> Int32 {
+  let mut n = 0
+  let mut seen = false
+  for i = 0; i < text.length(); i = i + 1 {
+    let c = text[i]
+    if c < '0' || c > '9' {
+      return 0
+    }
+    seen = true
+    if n > @keyfile.MAX_ROUNDS {
+      return @keyfile.MAX_ROUNDS + 1
+    }
+    n = n * 10 + (c.to_int() - '0'.to_int())
+  }
+  if !seen {
+    return 0
+  }
+  n
+}
+
+///|
 /// Four random bytes for the check word.
 ///
 /// The check word is a random word that is written twice into the private
 /// block, so that a reader can tell whether the file was encrypted with
-/// the passphrase it thinks it was.  Here there is no encryption, so the
-/// word only has to be random enough that two key files do not look
-/// alike.
+/// the passphrase it thinks it was.
+///
 ///
 /// It comes from `src/rng`, the same source as the seed.
 fn random_check_bytes() -> FixedArray[Byte] {

@@ -24,6 +24,7 @@
 /// nothing has to be re-derived.
 
 ///|
+///
 /// A key pair, and the two halves of it that go into different files.
 ///
 /// The seed is the secret.  The public key is the public half.  The
@@ -89,6 +90,43 @@ pub fn private_file_text(
   check : UInt32,
 ) -> String {
   let blob = ed25519_private_blob(pair.pk, pair.sk, comment, check)
+  encode_pem(blob)
+}
+
+///|
+/// The text of an ENCRYPTED private key file for this key pair.
+///
+/// This is the same file as `private_file_text`, enciphered.  The salt
+/// and the round count are parameters rather than being drawn here,
+/// because the drawing is the part that needs an entropy source and
+/// the encoding is the part that does not -- the same split as the
+/// seed and `derive_ed25519`.
+///
+/// **An empty string means the derivation failed.**  The KDF refuses an
+/// empty passphrase, and there is then no key to encipher with.  An
+/// empty string is returned rather than a file with an empty private
+/// section, so that a caller cannot write a file that claims to be
+/// encrypted and is not.
+pub fn private_file_text_encrypted(
+  pair : Ed25519KeyPair,
+  comment : String,
+  check : UInt32,
+  passphrase : String,
+  salt : FixedArray[Byte],
+  rounds : Int32,
+) -> String {
+  let blob = ed25519_private_blob_encrypted(
+    pair.pk,
+    pair.sk,
+    comment,
+    check,
+    passphrase,
+    salt,
+    rounds,
+  )
+  if blob.length() == 0 {
+    return ""
+  }
   encode_pem(blob)
 }
 

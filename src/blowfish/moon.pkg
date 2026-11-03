@@ -1,0 +1,6 @@
+///| Blowfish -- the block cipher underneath OpenSSH's bcrypt_pbkdf.
+///
+///| This package has no dependencies at all.  It is a cipher and a key
+///| schedule and nothing else, and keeping it that way means it can be
+///| tested on its own terms: the tests here are about Blowfish, not about
+///| the KDF that uses it.

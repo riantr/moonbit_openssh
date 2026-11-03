@@ -8659,5 +8659,489 @@ with a name, not to be a target -- and it is a bound, not a prediction.
 
 ---
 
+## Loop #86: the key can be ENCRYPTED -- `bcrypt_pbkdf` and AES-256-CTR
 
+### What was missing
 
+Loop #85 made the client able to MAKE a key, and it **refused** a passphrase.
+The refusal was not laziness; it was the honest answer to a question this
+repository could not yet answer.  There was no `bcrypt_pbkdf` here, and a
+tool that accepts `-N secret` and writes an UNENCRYPTED key is a way to lose
+a secret quietly.
+
+So Loop #86 adds the missing pieces:
+
+| package | what it is |
+|---|---|
+| `src/blowfish` | the cipher: the pi constants, the Feistel function, both key schedules, the keystream reader |
+| `src/bcrypt_pbkdf` | OpenSSH's KDF: the bcrypt hash and the PBKDF2-shaped derivation around it |
+| `src/keyfile` (grown) | the encrypted half of `openssh-key-v1`: the KDF options, the cipher, and a reader that needs a passphrase |
+
+and `cmd/ssh_keygen` stops refusing and starts encrypting.
+
+### The constants are pi, and that is checkable
+
+Blowfish's P-array and S-boxes are the hexadecimal expansion of the
+fractional part of pi.  That is a property of the **algorithm**, not of any
+one implementation -- OpenBSD's `blowfish.c` says so in a comment and so does
+the original Blowfish paper.
+
+So the constants are not "whatever OpenSSH's C file says".  They are pi, and
+that can be CHECKED.  `host/blowfish_pi.py` does two independent things and
+compares them:
+
+1. it reads the 1042 words out of OpenSSH's `openbsd-compat/blowfish.c`;
+2. it computes pi to 8336 hex digits with mpmath and takes the digits from
+   **there**.
+
+```
+$ python host/blowfish_pi.py --check
+OK  1042 words agree with pi (computed to 8336 hex digits)
+    P[0]=0x243f6a88 P[17]=0x8979fb1b
+    S[0][0]=0xd1310ba6 S[3][255]=0x3ac372e6
+```
+
+If the two agree, the constants are pi -- which is a much stronger claim than
+"the file and our port agree", because it does not depend on OpenSSH being
+right.
+
+**Two traps in the extraction, both paid for in full:**
+
+* the C struct is `u_int32_t S[4][256]` FIRST and `u_int32_t P[18]` SECOND,
+  because that is the layout; pi's order is the P-array first and the
+  S-boxes after it.  Reading the file as if it were in pi's order compares
+  the **wrong words**;
+* hex -> decimal precision is a factor of **1.2041**, not its reciprocal
+  (0.302), and a digit-at-a-time `x *= 16` loop accumulates rounding until
+  the digits come out as zeros -- measured: the loop gave zeros from word
+  265 on.  The fractional part has to be scaled by `16**8336` and truncated
+  **once**.
+
+### The cursor: the one thing that is easy to get wrong
+
+`Blowfish_stream2word` hands back a *cursor*, and the cursor is a position
+in the **key** stream that is then reused as a position in the **salt**
+stream.  Where it is reset is the caller's business, and the C's answer is
+surprising in both directions:
+
+```c
+	j = 0;                              /* the key phase   */
+	for (i = 0; i < BLF_N + 2; i++)
+		c->P[i] = c->P[i] ^ Blowfish_stream2word(key, keybytes, &j);
+
+	j = 0;                              /* the salt phase  */
+	for (i = 0; i < BLF_N + 2; i += 2) { ... }
+
+	for (i = 0; i < 4; i++) {            /* the S-box phase */
+		for (k = 0; k < 256; k += 2) { ... }   /* j is NOT reset */
+	}
+```
+
+The cursor **is** reset between the key phase and the salt phase, and is
+**not** reset before the S-boxes -- so the S-boxes are salted with the salt
+starting at **offset 8**, not at offset 0.  A port that "tidies up" the
+cursor produces a key schedule that is subtly wrong and never matches
+anything, with no error message anywhere: just a key that does not open.
+
+There is a second subtlety in the same function: the cursor it returns can
+be **equal to the length of the buffer**.  The wrap happens when a byte is
+READ, not when the word is finished, so a word that ends on the last byte
+hands back the buffer's length and the next call wraps it.  Normalising it
+(`j % n`) reads the same bytes and is not the same function, because the
+cursor is a visible output.  The C harness prints it, the test asserts it,
+and the mutation suite flips it.
+
+### The KDF is not PBKDF2, and the difference is the point
+
+OpenSSH's own comment on `bcrypt_pbkdf` says why the output is scattered:
+
+> One modification from official pbkdf2.  Instead of outputting key material
+> linearly, we mix it.  pbkdf2 has a known weakness where if one uses it to
+> generate (e.g.) 512 bits of key material for use as two 256 bit keys, an
+> attacker can merely run once through the outer loop, but the user always
+> runs it twice.  Shuffling output bytes requires computing the entirety of
+> the key material to assemble any subkey.
+
+So byte `i` of a block goes to `i * stride + (count - 1)` of the key, not to
+`i`.  A KDF that scatters linearly is still a KDF, still produces a
+well-formed file, and is still read back correctly -- it is just the weakness
+OpenSSH removed, and nothing about the file says so.  It is mutation #8.
+
+The rest of the construction, for the record:
+
+* the passphrase is collapsed with SHA-512 **once**, at the start;
+* the salt is hashed together with a **big-endian** counter;
+* the bcrypt hash is: one salted expansion (`expand_state`), then **64**
+  rounds of an unsalted expansion (`expand0_state`), each round with the
+  salt hash and then with the password hash, and then **64** encryptions of
+  a 32-byte magic string;
+* the magic string is `"OxychromaticBlowfishSwatDynamite"` -- exactly 32
+  bytes, so it is exactly eight whole words and needs no terminator;
+* the eight words go out **little-endian**.
+
+### The KDF options: the salt comes FIRST
+
+```c
+	if ((r = sshbuf_put_string(kdf, salt, SALT_LEN)) != 0 ||
+	    (r = sshbuf_put_u32(kdf, rounds)) != 0)
+```
+
+`kdfoptions` is a **length-prefixed salt** and then a **plain four-byte
+word**, in that order -- and OpenSSH's reader agrees
+(`sshbuf_get_string` then `sshbuf_get_u32`).  It is easy to assume the
+other order, and the assumption produces a file of exactly the right SIZE
+and exactly the wrong CONTENT, which no reader accepts.
+
+`SALT_LEN` is 16 and `DEFAULT_ROUNDS` is 24, and a real `ssh-keygen` writes
+both.  The gate checks that our file has the same numbers.
+
+### The passphrase is BYTES, not characters
+
+OpenSSH hashes the passphrase as a C string: `strlen(passphrase)` bytes of
+it, and no terminator.  What matters is therefore the bytes, and a
+passphrase that is not ASCII has to be encoded the same way on both sides.
+
+UTF-8 is that encoding here, via `@encoding/utf8.encode`.  The tempting
+shortcut -- taking the low byte of each character -- is right for ASCII and
+silently wrong for everything else, and a passphrase that derives a
+different key on the two sides is a passphrase the user cannot get past.
+
+MoonBit's `String::length()` counts **characters**, not bytes, and
+`String::to_bytes()` is deprecated and returns **UTF-16LE** (six bytes for
+`"aé中"`, where UTF-8 is also six but they are not the same six).  The
+deprecation notice points at `@encoding/utf8.encode`, which is right.
+
+### The reader has FOUR answers, and they are four different things
+
+Loop #85's reader had three.  It has four now, and the new one is the one
+that matters most in practice:
+
+| answer | when |
+|---|---|
+| `Ed25519` | the file was opened and it is a key |
+| `Malformed` | the file is not a key file at all |
+| `Unsupported` | the file is a key file this reader cannot open -- another key type, another cipher, or an encrypted file read with no passphrase |
+| `WrongPassphrase` | the file WAS deciphered and the check words did not match |
+
+`WrongPassphrase` is not the same as `Malformed`: the file is perfectly
+good, the reader simply was not given the key it needs.  The check words
+are the mechanism -- they are the same word twice, and a wrong passphrase
+makes the two of them differ.  **There is no MAC**; the check words are the
+tag.
+
+The reader also checks that the public key in the envelope is the public key
+of the secret key in the file, which OpenSSH does too (`sshkey.c:3214`).
+
+### The oracle is OpenSSH's OWN C code
+
+`verify_c/blowfish_ref.c` and `verify_c/bcrypt_pbkdf_ref.c` are OpenSSH's
+`openbsd-compat/blowfish.c` and `openbsd-compat/bcrypt_pbkdf.c`, copied here
+with **three include lines and one `#define` changed** and nothing else.
+`host/blowfish_ref.py --check` proves that the copies still match the
+source, and the SHA-512 they need is OpenBSD's real `sha2.c`, which was
+already in this repository.
+
+```
+verify_c/blowfish_shim.h   the three things OpenSSH's headers would have:
+                           the u_int* typedefs, blf_ctx (copied verbatim
+                           out of OpenSSH's own blf.h), and four libc shims
+verify_c/blowfish_harness.c  picks the inputs and prints the answers
+verify_c/build_blowfish.bat  the tenth build script, with the same
+                           compiler-resolution rule as the other nine
+```
+
+The harness prints the vectors and `host/blowfish_kat.py --check` proves
+that the constants the MoonBit tests assert are those vectors.
+
+### No hex string in this loop was typed by hand, and three were
+
+The first draft of `src/blowfish/blowfish_test.mbt` had **three** wrong
+constants, and every one of them was a hand-transcription error:
+
+* a 144-character hex string split in the wrong place, so the expected
+  P-array was off by one **word**;
+* the same, again, in the unsalted schedule;
+* a key that counted **up** from 255 where the C harness's key counts
+  **down** from 255.
+
+All three looked like implementation bugs and all three were the test's
+fault.  The fix was not "be more careful"; it was to stop typing:
+
+* `host/blowfish_kat.py --check` reads the C harness's output and checks
+  every constant the committed tests assert **against it** -- the
+  direction that catches mistakes.  It found all three;
+* `host/openssh_key_vector.py` reads a REAL OpenSSH private key file and
+  prints its fields, which is where the unit test's vector comes from.
+
+A vector that is off by one word looks exactly like a vector that is right.
+That is worth a tool.
+
+### The gate's other oracle is OpenSSH itself
+
+A file format is a contract with the program everybody else has to read, and
+only the program can say whether the contract is kept.  The gate does both
+directions:
+
+* **OpenSSH writes, we read.**  A real `ssh-keygen -t ed25519 -N "..."`
+  file is embedded in `src/keyfile/keyfile_test.mbt` -- the whole file, base64
+  and all -- and the test opens it with its passphrase and gets back the key
+  that is in it.
+* **We write, OpenSSH reads.**  The gate makes an encrypted key with our
+  tool and then has the real `ssh-keygen` open it.
+
+**The non-interactive trick.**  `ssh-keygen -y` asks for the passphrase on
+the terminal, and a gate has no terminal.  `ssh-keygen -p -P <pass> -N ""`
+does the same job without one: it opens the file with the passphrase given
+on the command line and writes it back with an empty passphrase, and if the
+passphrase was wrong it says `incorrect passphrase supplied to decrypt
+private key` and leaves the file alone.  The file is then read with
+`ssh-keygen -y`, which needs no passphrase.
+
+**The argument array has to be exact.**  An empty passphrase is an empty
+string and has to survive as one.  PowerShell drops an empty argument
+entirely, and then `ssh-keygen -N "" -f file` reads the `-f` as the
+passphrase and complains about "too many arguments".  `spawnSync` has no
+shell, so the array is what the program sees -- which is why the gate is
+Node and not PowerShell.
+
+**The copy needs its ACL fixed.**  OpenSSH REFUSES a private key file that
+other users can read, and it says so.  A plain file copy on Windows
+inherits the **directory's** ACL, so the probe copy has to be given the
+same treatment the original got (`icacls /inheritance:r /grant:r`).
+
+### The round count in the file is FOUR BYTES, and it is untrusted input
+
+This one was found by the mutation suite rather than by reading the code, and
+it is worth the whole story.
+
+The mutation "the KDF options put the rounds before the salt" swapped two
+lines in the **writer**.  The file it produced was the right SIZE and the
+wrong CONTENT -- and the **reader** read the salt out of the first four
+bytes and the round count out of the next four, which gave it a round count
+of **0x00010203 = 66051**.  `bcrypt_pbkdf` does not mind a round count of
+66051: it does 66051 bcrypt hashes, each of which is about 67,000 Blowfish
+block encryptions, and that is a computation measured in **hours**.
+
+The mutation suite did not report "the mutation was missed".  It **hung**,
+with `keyfile.blackbox_test` burning CPU, and it took three processes to
+kill by hand.
+
+The fix is not a faster KDF.  The fix is that **the round count in the file
+is not obeyed**:
+
+| | |
+|---|---|
+| OpenSSH's `ssh-keygen -a` | accepts 1 .. `INT_MAX` (`ssh-keygen.c:3503`) |
+| OpenSSH's reader | takes whatever the file says (`sshkey.c:3110`) and hands it straight to the KDF |
+| here | `MAX_ROUNDS` = 256, in `src/keyfile`, on both sides |
+
+A private key file is untrusted input: it arrives over the network, out of a
+tarball, in the mail.  A reader that obeys the round count in the file is a
+reader that can be made to stop.
+
+**256 is a measured number.**  One bcrypt round costs about forty
+milliseconds in this implementation, so the cap is a little over ten seconds
+of work; the same derivation in OpenSSH's C is a hundred times faster, so a
+number that is absurd here is merely slow there.  The cap is set for THIS
+implementation, which is the one that has to finish.
+
+**The cap is in the file layer, not in the KDF.**  `src/bcrypt_pbkdf` is a
+faithful port and keeps OpenSSH's own rule (one round or more); the cap
+lives in `src/keyfile`, where the number comes from a file or from a
+person.  Two places check it -- the reader and the derivation -- because
+the reader's check is the one that sees a file and the derivation's is what
+stands between a number from anywhere and a computation that never finishes.
+
+**The driver's `-a` is capped too, and the number is capped as it is
+read.**  A count of thirty digits does not fit in an `Int32`, and an `Int32`
+that wraps around lands on a small number that looks perfectly legal:
+`4294967320` is `2^32 + 24`, and without the check it would be written into
+the file as **24**.  The gate checks that exact number.
+
+### The comment is TEXT, and text has an encoding
+
+The comment in a private key file is text.  The writer wrote it one byte per
+character -- `out[i] = s[i].to_byte()` -- which is right for ASCII and
+silently wrong for everything else, because it keeps one byte and throws the
+rest of the encoding away.  A comment of one accented letter went into the
+file as one byte and came back as a different character.
+
+The reader had the matching bug in the other direction: it decoded bytes one
+at a time into characters, which is Latin-1, and it could not read UTF-8 at
+all.
+
+Both are fixed by using UTF-8 on both sides -- `@utf8.encode` on the way out
+and `@utf8.decode_lossy` on the way in -- and the test is a comment outside
+ASCII that has to come back exactly as it went in, on the plain path and on
+the encrypted path.
+
+**Two fields had to stop going through `String` altogether.**  The KDF
+options and the public key blob in the envelope are BINARY: the salt is
+sixteen bytes of `arc4random` and the public key is 32 bytes of curve
+point.  They were being read as strings and converted back byte by byte,
+which happened to be lossless -- but only because the reader's decode was
+Latin-1.  Fix the decode and those two fields would have been mangled, so
+they are read as bytes now, which is what they are.  **A field that is bytes
+and a field that is text are different things and should not go through the
+same function.**
+
+**One thing this does not fix, and cannot.**  OpenSSH stores the comment as
+the raw bytes it was given, and on a Windows console those bytes are in the
+console's code page, not UTF-8.  A comment OpenSSH wrote on a non-UTF-8
+locale comes back with replacement characters -- the file still opens, and
+the key is still right.  The decode is lossy on purpose.
+
+### A gate that hangs is worse than a gate that is wrong, and so is a gate that dies
+
+There are two ways a gate can stop talking, and **both of them happened
+in this loop**.
+
+**It can hang.**  The gate's `moon()` helper called `spawnSync` with no
+timeout, so it waited for the child for as long as the child wanted to
+run.  When the round-count bug was live, the gate waited for hours and
+reported nothing at all.
+
+**It can die.**  The mutation "the driver writes an unencrypted key when
+given a passphrase" came back MISSED -- and the gate was not wrong, it
+was **DEAD**.  The mutated driver writes a file whose KDF options are
+empty, and the gate's `parseKdfOptions` read a four-byte length out of
+an empty buffer, which throws.  The gate stopped at that line and
+printed nothing more, and the mutation suite read the absence of a FAIL
+line as "the gate did not notice" -- when in fact the gate had stopped
+running at all.
+
+So two rules, and the second is the general one:
+
+* every `spawnSync` in a gate needs a timeout, and **a timeout has to be
+  a FAILURE with a reason**, not a silent skip: "the test never finished"
+  is a failure of the test, and a red gate with no reason is a rumour --
+  the reader has no way to tell "the round trip broke" from "the
+  toolchain did not run";
+* **the gate itself must not be able to die quietly.**  `main()` is
+  wrapped, so an exception anywhere in it is reported in the same
+  PASS/FAIL vocabulary as everything else, with the reason, and the
+  process exits non-zero.  **"Nothing" is not a verdict.**
+
+And the reader of a gate has to be able to tell the two apart: "the gate
+says no" is a FAIL line, "the gate stopped" is a *missing* line, and only
+the first one is evidence.  A mutation that is MISSED has to be
+investigated before it is believed -- the first question is not "is the
+gate right?" but "did the gate run?".
+
+### After editing a file, look at `git diff` for comment churn
+
+The doc comments on disk are `///` lines: a standalone `///|` is the header
+of a block, a standalone `///` is a separator inside one, and the text lines
+are `/// text`.  **The reading tool renders a `///` block as `///|` lines
+with blank lines between them**, and a file that is written back from that
+rendering keeps the rendering.
+
+Editing `src/keyfile/parse.mbt` that way rewrote about three hundred lines
+of the Loop #85 documentation and buried the change under a wall of
+comments that say nothing about it.  `src/keyfile/blob.mbt` came out clean,
+which is the confusing part: the churn depends on how the file was written
+back, not on what was changed.
+
+So the rule is not "use this tool" but **"look at the diff"**.  After
+editing, `git diff` has to show the change and not the neighbourhood.  When
+it shows the neighbourhood, the fix is a one-off script that applies the
+inverse transform -- `///| text` back to `/// text`, the in-block blank lines
+back out, and a standalone `///|` back to `///` unless it starts a block --
+and then the diff shows the change again.
+
+The repository has both styles in it, so nothing breaks either way; a
+reviewer just cannot see the change through three hundred lines of
+reshuffled prose.
+
+### The mutation suite grew to 21
+
+Five more mutations came out of the two fixes above:
+
+| mutation | what it proves |
+|---|---|
+| the round cap is smaller than the round count OpenSSH writes | the cap is not so small that it refuses ordinary files |
+| the reader does not cap the round count | the reader's half of the cap is load-bearing |
+| the derivation does not cap the round count | the derivation's half is load-bearing too |
+| the comment is written one byte per character | the writer's half of the encoding |
+| the reader decodes the comment one byte at a time | the reader's half |
+
+**The hostile round count in the tests is `MAX_ROUNDS + 1`, not two
+billion.**  The cap is one comparison, so a count of 257 proves it as well as
+a count of two billion does -- and if the cap were ever removed the test
+would take a few seconds and FAIL, where a count of two billion would make
+it hang.  A test that hangs when the defect is present is worse than a test
+that fails.
+
+### The gaps this loop does not close
+
+* **`cmd/ssh_keygen` still only makes keys.**  It does not read them: the
+  reader in `src/keyfile` can do `-y` and `-l`, and the driver does not
+  expose them.  This is the next obvious gap and it is what the client's
+  `ssh` needs.
+* **One key type, one cipher, one KDF.**  `ed25519` only; `aes256-ctr` and
+  `bcrypt` only.  OpenSSH also writes `aes256-gcm@openssh.com` with
+  `bcrypt`, and `chacha20-poly1305@openssh.com`.
+* **`-a` is accepted but the rounds are not a secret.**  A passphrase
+  derived in 24 rounds is 24 rounds of work; OpenSSH's own default, and
+  nothing here argues with it.  The count is capped at 256, because the
+  count is read out of a file as often as it is typed on a command line,
+  and a file is untrusted input.
+* **The passphrase is on the command line**, which is what OpenSSH does and
+  is visible to anybody who can read the process list.
+* **`ssh-add` and `ssh-copy-id` are still missing**, so a key that is now
+  encrypted has to be carried around and typed by hand.
+* **The KDF is slow on purpose.**  One bcrypt hash is about 67,000 Blowfish
+  block encryptions; a 24-round derivation is about 1.6 million.  That is the
+  price of the KDF, and it is why the tests use 4 rounds and the real files
+  use 24.
+
+---
+
+### The OpenSSH tree is a PROBE, not a path
+
+`verify_loop71` refused this loop's two new scripts for naming one
+developer's OpenSSH checkout, and it was right.  A path written into code
+is a promise that the code works on the machine it was written on, and the
+promise does not travel to a clone.
+
+The location now lives in one file, `host/openssh_src.py`:
+
+```python
+# machine-path-exempt: each entry below is a CANDIDATE location, probed in
+# order until one exists.  ...
+CANDIDATES = [
+    r"E:\src\moon\openssh-C",
+    r"C:\src\openssh-C",
+]
+```
+
+`OPENSSH_SRC` comes first and overrides the list, which is the only way to
+point at a tree on a path nobody guessed.  When no candidate exists the
+failure names **every** one of them, because "the tree is not here" is not
+an explanation and "the tree is not here, and here is everywhere I looked"
+is.
+
+**"The tree is not here" is an EXIT CODE (3), not an error string.**
+The gate that asks the question has to be able to tell "I could not check
+this here" from "the check failed".  A caller that recognises absence by
+matching text is one edit away from reporting a real mismatch as a skip --
+and a skip that is reported as a pass is worse than a failure, because it
+is invisible.
+
+The same rule settled the other gate this loop turned red.
+`verify_loop85` asserted that a passphrase is REFUSED; that was Loop #85's
+contract and Loop #86 changed the contract on purpose, because the KDF
+exists now.  When a contract moves, the gate moves with it, and the new
+claim has to be a **stronger** one:
+
+| | Loop #85 said | Loop #86 says |
+|---|---|---|
+| the passphrase | is refused | is honoured |
+| the file | is not written | is written |
+| the cipher name | -- | `aes256-ctr` |
+| the KDF name | -- | `bcrypt` |
+| OpenSSH without the passphrase | -- | cannot open it (exit 255) |
+
+The last row is the one that matters.  A file that says `aes256-ctr` and
+opens anyway would be worse than one that says `none`, because the user
+has been told it is protected.

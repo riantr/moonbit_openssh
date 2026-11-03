@@ -47,7 +47,8 @@
 //       inherits the directory's ACL, and OpenSSH refuses to read a
 //       private key that "Authenticated Users" can read.
 //
-//   G4  the tool's own behaviour: a refused passphrase, a refused key
+//   G4  the tool's own behaviour: an HONOURED passphrase (Loop #86 made
+//       it an encryption, and the claim moved with it), a refused key
 //       type, and a refusal to overwrite an existing private key.
 //
 //   G5  the random part: two keys are different, and the public key in
@@ -63,7 +64,7 @@
 // fails -- a gate that cannot check its claim must not report success.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -373,14 +374,60 @@ async function main() {
   section("G4: the tool refuses what it cannot do");
   // -------------------------------------------------------------------------
 
-  // A passphrase it cannot honour.  Accepting it and writing an
-  // UNENCRYPTED key would be a way to lose a secret quietly.
+  // A passphrase it CAN honour.
+  //
+  // Loop #85 refused one, and the refusal was the honest answer to a
+  // question this repository could not yet answer: there was no
+  // `bcrypt_pbkdf` here, and a tool that accepts `-N secret` and writes
+  // an UNENCRYPTED key is a way to lose a secret quietly.  Loop #86
+  // added the KDF, so the refusal became an encryption -- and the claim
+  // this gate makes about a passphrase changed with it.
+  //
+  // The new claim has to be a STRONGER one, not a weaker one: the file
+  // is written, it names the encrypted form, and OpenSSH cannot open it
+  // without the passphrase.  That last one is the claim that matters --
+  // a file that says "aes256-ctr" and opens anyway would be worse than
+  // one that says "none", because the user is told it is protected.
   const dir4 = freshDir("refuse");
   const withPass = ourKeygen(["-f", path.join(dir4, "id"), "-N", "secret", "-C", "x"]);
-  ok("a passphrase is refused", withPass.code !== 0 || withPass.out.includes("not supported"),
-    withPass.out.trim().slice(0, 200));
-  ok("no private key was written for the refused passphrase",
-    !existsSync(path.join(dir4, "id")));
+  ok("a passphrase is honoured", withPass.code === 0 &&
+    existsSync(path.join(dir4, "id")), withPass.out.trim().slice(0, 200));
+
+  if (existsSync(path.join(dir4, "id"))) {
+    // The names in the header.  The magic is 15 bytes including its NUL,
+    // so the cipher name starts at 19 and the KDF name at 33.
+    const passBody = readFileSync(path.join(dir4, "id"), "utf8")
+      .split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    const passBlob = Buffer.from(passBody.slice(1, -1).join(""), "base64");
+    ok("the file names the aes256-ctr cipher",
+      passBlob.subarray(19, 29).toString("latin1") === "aes256-ctr",
+      passBlob.subarray(19, 29).toString("latin1"));
+    ok("the file names the bcrypt KDF",
+      passBlob.subarray(33, 39).toString("latin1") === "bcrypt",
+      passBlob.subarray(33, 39).toString("latin1"));
+
+    // And OpenSSH cannot open it without the passphrase.  `ssh-keygen -y`
+    // would ask for the passphrase on the terminal, and a gate has no
+    // terminal, so the probe is `ssh-keygen -p -P <wrong> -N ""`: it
+    // opens the file with the passphrase given on the command line and
+    // says so when the passphrase is wrong.
+    //
+    // The probe is a COPY, because OpenSSH refuses a private key file
+    // that other users can read, and a plain copy on Windows inherits
+    // the DIRECTORY's ACL rather than the file's.
+    const probe = path.join(dir4, "id.probe");
+    copyFileSync(path.join(dir4, "id"), probe);
+    const probeUser = process.env.USERNAME || process.env.USER;
+    if (probeUser) {
+      spawnSync("icacls", [probe, "/inheritance:r", "/grant:r", `${probeUser}:(F)`],
+        { encoding: "utf8", errors: "replace", timeout: 60000 });
+    }
+    const wrongPass = keygen(SSH_KEYGENS[0],
+      ["-p", "-P", "not the passphrase", "-N", "", "-f", probe]);
+    ok("OpenSSH cannot open the encrypted file without the passphrase",
+      wrongPass.code !== 0 && /passphrase/i.test(wrongPass.out),
+      `exit ${wrongPass.code}: ${wrongPass.out.trim().slice(0, 200)}`);
+  }
 
   // A key type it does not implement.
   const wrongType = ourKeygen(["-f", path.join(dir4, "id2"), "-t", "rsa", "-C", "x"]);

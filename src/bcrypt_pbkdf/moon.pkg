@@ -1,0 +1,10 @@
+///| Loop #86: `bcrypt_pbkdf` -- the KDF OpenSSH uses for encrypted private keys.
+///
+///| The dependency on `src/sha512` is real: `bcrypt_pbkdf` collapses the
+///| passphrase with SHA-512 before it does anything else, and hashes the
+///| salt on every round.  The dependency on `src/blowfish` is the
+///| cipher itself.
+import {
+  "openssh/openssh_moonbit/src/blowfish",
+  "openssh/openssh_moonbit/src/sha512",
+}

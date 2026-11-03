@@ -12,6 +12,26 @@
       "report": true
     },
     {
+      "package": "src/bcrypt_pbkdf",
+      "test_files": [
+        "bcrypt_pbkdf_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 2,
+      "files_reported": 1,
+      "report": true
+    },
+    {
+      "package": "src/blowfish",
+      "test_files": [
+        "blowfish_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 1,
+      "files_reported": 1,
+      "report": true
+    },
+    {
       "package": "src/bpacket",
       "test_files": [
         "bpacket_test.mbt",
@@ -114,8 +134,8 @@
         "keyfile_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 34,
-      "files_reported": 3,
+      "uncovered_lines": 58,
+      "files_reported": 5,
       "report": true
     },
     {
@@ -220,6 +240,8 @@
   ],
   "reportable": [
     "src/aead",
+    "src/bcrypt_pbkdf",
+    "src/blowfish",
     "src/bpacket",
     "src/chacha",
     "src/ed25519",
