@@ -9309,3 +9309,104 @@ a file the harness owns -- "null attempts", "no transcript", "the client
 saw nothing" -- the first thing to ask is whether the harness killed its
 own peer too early, and the answer has to come from the peer's exit
 status, not from a number in the gate.
+
+---
+
+## Loop #86, follow-up: the CI cache restored the toolchain and undid the install
+
+Pushing the Loop #86 follow-up made GitHub Actions red.  Not in the gates:
+in a **setup step**, before a single gate ran.
+
+    Write-Error: moon install moonbit-community/proton_cli@0.3.4 exited -1
+    Error: Failed when discovering packages
+    Caused by:
+        Unable to read `moon.pkg` for module
+        'moonbitlang/core@0.10.16+b1a0e846e (stdlib)' package
+        'async/external_loop_integration' at path
+        'C:\Users\runneradmin\.moon\lib\core\async\external_loop_integration',
+        error: Conditional imports are not yet supported by the build system.
+
+The first question about a red CI that says nothing about this repository's
+code is whether the toolchain that ran is the toolchain that was installed.
+Here it was not, and the log said so if you read it in the right order:
+
+    07:41:25  Set up MoonBit      moon 0.1.20261104, stdlib core 0.10.20
+    07:41:52  Set up MoonBit      "moon 0.1.20261104 (940aa18 2026-11-04)"
+    07:41:58  Cache MoonBit deps  Cache hit, ~116 MB
+    07:42:06  Cache MoonBit deps  "Cache restored successfully"
+    07:42:12  Provision the CEF   moon install fails
+
+The setup step printed `moon 0.1.20261104` -- the toolchain it had just
+installed.  Four seconds later the cache restored `~/.moon` from the
+2026-10-30 run, which is **moon 0.1.20261012 and core 0.10.16+b1a0e846e**,
+and the job carried on with those.  The version in the log was a statement
+about the install; the version that ran was a different one, and nothing in
+the workflow said so.
+
+`core 0.10.16+b1a0e846e` is the standard library that belongs to moon
+0.1.20261012.  That standard library's
+`async/external_loop_integration/moon.pkg` has conditional imports
+(`import { ... } for "test"`, under `#cfg(target="native")`), and the
+0.1.20261012 build system cannot read those -- so `moon install`, which
+discovers packages before it does anything else, died on a standard library
+package it was never going to install.
+
+### What was checked, and how the diagnosis was reached
+
+The failure text names three versions, and the first reading of it is that
+the toolchain is simply broken upstream.  It is not, and the way to know is
+to rebuild the runner's state locally instead of reasoning about it:
+
+* The install script (`cli.moonbitlang.com/install/powershell.ps1`) fetches
+  the CLI from `binaries/$Version/` and the standard library from
+  `cores/core-$Version.zip` -- so the core is pinned to the same `$Version`
+  as the CLI, and `$Version` is `latest` by default.
+* `cores/core-latest.zip` carries **core 0.10.20+65efd5b93**, which is
+  the same version the runner's own compiler reported
+  (`moonc v0.10.20+65efd5b93`).  The runner was running core **0.10.16**,
+  which is not that.
+* In an isolated `MOON_HOME` -- the same download, the same
+  `moon update`, the same `moon install` -- the core stayed at 0.10.20 and
+  `moon install` got **past** package discovery, failing only on a missing
+  `bigint.mi` bundle artifact that the install script's own
+  `moon.exe bundle` step creates.  The installer had not run that step in
+  the reproduction; nothing about core 0.10.20 was broken.
+* The `Cache MoonBit dependencies` step logged `Cache hit for:
+  moonbit-Windows-3161bb9...`, `Cache Size: ~116 MB`, `Cache restored
+  successfully`, `Cache restored from key: moonbit-Windows-3161bb9...` --
+  at 07:41:58, i.e. after the install and before the failure.
+
+So the cache was the thing that made the runner disagree with itself.
+
+### The fix
+
+`~/.moon` **is** the toolchain: moon.exe, moonc, the native backend and the
+bundled standard library.  Caching it means a run can restore an older moon
+than the one it just installed, and an older moon and an older standard
+library do not agree about file formats.  The cache now holds `.mooncakes`
+only -- the downloaded third-party packages, which is the expensive part;
+the toolchain is downloaded unconditionally by the setup step either way, so
+caching it saved nothing and cost a wrong toolchain.
+
+The cache step also moved **before** "Set up MoonBit".  With the toolchain
+out of the cache the order no longer matters, but a cache that runs after an
+installer is a cache that can shadow the installer, and the ordering that
+makes that impossible is worth having.
+
+And the CEF step now prints `moon version --all` **in the step that uses
+it**.  The setup step prints the version it installed; a step that names
+the version it ran is a step whose failures can be read.
+
+### The rule this makes explicit
+
+**A cache that overlaps an installer must not be able to outlive it, and a
+version printed by one step is not evidence about another.**  Both halves
+were true here and together they made a four-second gap invisible: the log
+named one toolchain and the job used another.
+
+This is the fourth time in this repository that the plumbing ate a correct
+fix -- Loop #69's twelve lines, Loop #70's `.loop70/` outside the upload
+path, the artifact uploader's dotfile rule, and now the cache.  The shape
+is always the same: the thing that was supposed to make the work cheaper
+or more reliable is the thing that silently undid it, and it undid it in a
+way that looked like a defect in the subject.

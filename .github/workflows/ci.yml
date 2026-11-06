@@ -118,17 +118,57 @@ jobs:
       - name: Install the Playwright browser
         run: npx playwright install chromium
 
-      - name: Set up MoonBit
-        uses: ./.github/actions/setup-moonbit
-
+      # Loop #87: this step used to cache `~/.moon` as well as `.mooncakes`,
+      # and it ran AFTER the toolchain was installed.  That is the same
+      # mistake twice over.
+      #
+      # `~/.moon` IS the toolchain: moon.exe, moonc, the native backend and
+      # the bundled standard library.  Caching it means a run can restore
+      # an OLDER moon than the one it just installed -- and the older moon
+      # and its older standard library do not agree about file formats.
+      #
+      # Measured on run 42182446883 (2026-11-06):
+      #
+      #   07:41:25  Set up MoonBit     moon 0.1.20261104, stdlib core 0.10.20
+      #   07:41:58  Cache hit          ~116 MB, "Cache restored successfully"
+      #   07:42:12  Provision the CEF  moon install fails:
+      #
+      #     Unable to read `moon.pkg` for module
+      #     'moonbitlang/core@0.10.16+b1a0e846e (stdlib)' package
+      #     'async/external_loop_integration' ... Conditional imports are not
+      #     yet supported by the build system.
+      #
+      # core 0.10.16+b1a0e846e is the standard library that belongs to
+      # moon 0.1.20261012 -- the one the 2026-10-30 run cached.  The
+      # toolchain the installer had just written was discarded four
+      # seconds earlier, and the version printed by the setup step
+      # ("moon 0.1.20261104") was a LIE: it named the toolchain that was
+      # installed, not the one that ran.  The engine's own `moon version`
+      # step never got to report, because the job died before it.
+      #
+      # Reproduced in an isolated MOON_HOME: the installer puts core
+      # 0.10.20 in place, `moon update` leaves it there, and `moon install`
+      # then gets PAST package discovery and fails only on a bundle
+      # artifact that the installer's own `moon bundle` step creates.
+      # Nothing about core 0.10.20 is broken -- the runner was not running
+      # it.
+      #
+      # So: cache the DEPENDENCIES, not the toolchain.  `.mooncakes` is the
+      # downloaded third-party packages and is the expensive part; the
+      # toolchain is downloaded unconditionally by the setup step either
+      # way, so caching it saved nothing and cost a wrong toolchain.
+      #
+      # The step also moves BEFORE "Set up MoonBit" so that a cache can
+      # never shadow the installer again, whatever it contains.
       - name: Cache MoonBit dependencies
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.moon
-            .mooncakes
+          path: .mooncakes
           key: moonbit-${{ runner.os }}-${{ hashFiles('moon.mod') }}
           restore-keys: moonbit-${{ runner.os }}-
+
+      - name: Set up MoonBit
+        uses: ./.github/actions/setup-moonbit
 
       - name: Update MoonBit dependencies
         run: moon update
@@ -201,6 +241,18 @@ jobs:
         timeout-minutes: 20
         run: |
           $ErrorActionPreference = 'Stop'
+          # Name the toolchain that is about to run, HERE, rather than trusting
+          # the version the setup step printed earlier.  Those are two
+          # different moments, and on run 42182446883 they were two different
+          # versions: the setup step printed the moon it had just installed,
+          # and a cache restore then replaced it.  A step that says which
+          # toolchain it used is a step whose failures can be read.
+          Write-Host "toolchain:"
+          moon version --all
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "moon version --all exited $LASTEXITCODE"
+            exit 1
+          }
           $binDir = "$env:USERPROFILE\.moon\bin"
           # Pinned to the version whose `cef requirements` matches the sha the
           # build resolves. See the comment above.
