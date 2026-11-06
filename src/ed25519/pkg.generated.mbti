@@ -2,15 +2,15 @@
 package "openssh/openssh_moonbit/src/ed25519"
 
 // Values
-pub fn be64_to_8(FixedArray[Byte], Int, UInt64) -> Unit
+pub fn be64_to_8(FixedArray[Byte], Int32, UInt64) -> Unit
 
-pub fn be8_to_64(FixedArray[Byte], Int) -> UInt64
+pub fn be8_to_64(FixedArray[Byte], Int32) -> UInt64
 
 pub fn big_sigma0(UInt64) -> UInt64
 
 pub fn big_sigma1(UInt64) -> UInt64
 
-pub let block_len : Int
+pub let block_len : Int32
 
 pub fn ch(UInt64, UInt64, UInt64) -> UInt64
 
@@ -60,7 +60,7 @@ pub fn ge_setneutral() -> FixedArray[FixedArray[UInt64]]
 
 pub fn ge_unpackneg_vartime(FixedArray[Byte]) -> (FixedArray[FixedArray[UInt64]], Bool)
 
-pub let hash_len : Int
+pub let hash_len : Int32
 
 pub let init_h : FixedArray[UInt64]
 
@@ -70,9 +70,9 @@ pub fn keypair_from_seed(FixedArray[Byte]) -> (FixedArray[Byte], FixedArray[Byte
 
 pub fn maj(UInt64, UInt64, UInt64) -> UInt64
 
-pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int, UInt64) -> Unit
+pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int32, UInt64) -> Unit
 
-pub fn rotr(Int, UInt64) -> UInt64
+pub fn rotr(Int32, UInt64) -> UInt64
 
 pub fn sc_2interleave2(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
 
@@ -90,7 +90,7 @@ pub fn sc_mul(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
 
 pub fn sc_to32bytes(FixedArray[UInt64]) -> FixedArray[Byte]
 
-pub fn sc_window3(FixedArray[UInt64]) -> FixedArray[Int]
+pub fn sc_window3(FixedArray[UInt64]) -> FixedArray[Int32]
 
 pub fn serialize_state(FixedArray[UInt64]) -> FixedArray[Byte]
 
@@ -104,7 +104,7 @@ pub fn small_sigma1(UInt64) -> UInt64
 
 pub fn transform(FixedArray[UInt64], FixedArray[UInt64]) -> Unit
 
-pub fn update(FixedArray[UInt64], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+pub fn update(FixedArray[UInt64], FixedArray[Byte], Int32, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int32, UInt64)
 
 pub fn verify(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> Bool
 

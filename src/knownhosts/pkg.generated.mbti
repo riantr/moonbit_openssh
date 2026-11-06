@@ -2,19 +2,35 @@
 package "openssh/openssh_moonbit/src/knownhosts"
 
 // Values
+pub fn append_line(String, String, String, FixedArray[Byte]) -> String
+
 pub fn b64_decode(String) -> FixedArray[Byte]?
 
-pub fn check_host_key(Array[KnownHostEntry], String, Int, FixedArray[Byte]) -> HostStatus
+pub fn check_host_key(Array[KnownHostEntry], String, Int32, FixedArray[Byte]) -> HostStatus
+
+pub fn check_host_key_cert(Array[KnownHostEntry], String, Int32, FixedArray[Byte], UInt64) -> CertCheckResult
 
 pub fn check_host_key_legacy(Array[KnownHostEntry], String, FixedArray[Byte]) -> HostStatus
 
-pub fn check_host_key_strict(Array[KnownHostEntry], String, Int, FixedArray[Byte], Bool) -> HostStatus
+pub fn check_host_key_strict(Array[KnownHostEntry], String, Int32, FixedArray[Byte], Bool) -> HostStatus
 
 pub fn check_host_key_strict_legacy(Array[KnownHostEntry], String, FixedArray[Byte], Bool) -> HostStatus
 
-pub fn hmac_sha1(FixedArray[Byte], FixedArray[Byte], Int) -> FixedArray[Byte]
+pub fn find_ca_entry(Array[KnownHostEntry], String, Int32, FixedArray[Byte]) -> KnownHostEntry?
+
+pub fn has_any_ca_entry(Array[KnownHostEntry], String, Int32) -> Bool
+
+pub fn has_line(String, String) -> Bool
+
+pub fn hmac_sha1(FixedArray[Byte], FixedArray[Byte], Int32) -> FixedArray[Byte]
+
+pub fn host_field(String, Int32) -> String
 
 pub fn is_hashed_host(String) -> Bool
+
+pub fn keyscan_host_field(String, Int32) -> String
+
+pub fn lowercase_ascii(String) -> String
 
 pub fn match_hashed_host(String, String) -> Bool
 
@@ -24,24 +40,34 @@ pub fn parse_base64_blob(String) -> FixedArray[Byte]?
 
 pub fn parse_file(String) -> Array[KnownHostEntry]
 
-pub fn parse_line(String, Int) -> KnownHostEntry?
+pub fn parse_line(String, Int32) -> KnownHostEntry?
 
-pub fn sha1(FixedArray[Byte], Int) -> FixedArray[Byte]
+pub fn sha1(FixedArray[Byte], Int32) -> FixedArray[Byte]
 
 // Errors
 
 // Types and methods
-pub struct HostSpec {
-  host_only : String
-  host_port : Int?
+pub(all) enum CertCheckResult {
+  Trusted
+  NoCaEntry
+  CaRejected(String)
 }
 
+pub struct HostSpec {
+  host_only : String
+  host_port : Int32?
+}
+
+#derive(Eq)
 pub(all) enum HostStatus {
   Ok
   Mismatch
   Unknown
+  CertAuthority
   InvalidEntry
-} derive(Eq)
+}
+pub fn HostStatus::equal(Self, Self) -> Bool
+pub fn HostStatus::not_equal(Self, Self) -> Bool
 
 pub(all) struct KnownHostEntry {
   marker : Marker
@@ -51,15 +77,54 @@ pub(all) struct KnownHostEntry {
   key_type : String
   key_blob : FixedArray[Byte]
   raw_line : String
-  linenum : Int
+  linenum : Int32
 }
 pub fn KnownHostEntry::key_type_str(Self) -> String
+pub fn KnownHostEntry::render(Self) -> String
+pub fn KnownHostEntry::to_line(String, String, FixedArray[Byte]) -> String
 
+pub(all) struct KnownHostsPolicy {
+  entries : Array[KnownHostEntry]
+  host_str : String
+  port : Int32
+  strict : Bool
+  now : UInt64
+}
+pub fn KnownHostsPolicy::at(Array[KnownHostEntry], String, Int32, Bool, UInt64) -> Self
+pub fn KnownHostsPolicy::decide(Self, FixedArray[Byte]) -> PinFailure?
+pub fn KnownHostsPolicy::from_text(String, String, Int32, Bool) -> Self
+pub fn KnownHostsPolicy::from_text_at(String, String, Int32, Bool, UInt64) -> Self
+pub fn KnownHostsPolicy::has_ca_anchor(Self) -> Bool
+pub fn KnownHostsPolicy::new(Array[KnownHostEntry], String, Int32, Bool) -> Self
+pub fn KnownHostsPolicy::skip() -> Self
+pub fn KnownHostsPolicy::verify(Self, FixedArray[Byte]) -> PinVerdict
+pub fn KnownHostsPolicy::verify_cert(Self, FixedArray[Byte]) -> PinVerdict
+
+#derive(Eq)
 pub(all) enum Marker {
   None
   CertAuthority
   Revoked
-} derive(Eq)
+}
+pub fn Marker::equal(Self, Self) -> Bool
+pub fn Marker::not_equal(Self, Self) -> Bool
+
+pub(all) enum PinFailure {
+  Mismatch(String)
+  Unknown(String)
+  CertAuthority(String, String)
+  CertUntrusted(String)
+  InvalidEntry
+}
+
+pub(all) enum PinVerdict {
+  Accept
+  Mismatch
+  Unknown
+  CertRejected(String)
+  CertUntrusted(String)
+  InvalidEntry
+}
 
 // Type aliases
 

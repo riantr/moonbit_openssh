@@ -1,0 +1,67 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "openssh/openssh_moonbit/src/aead"
+
+// Values
+pub fn add_block(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte], Bool) -> (UInt32, UInt32, UInt32, UInt32, UInt32)
+
+pub fn aead_decrypt(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]?
+
+pub fn aead_encrypt(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let block_len : Int32
+
+pub fn chacha_block(FixedArray[UInt32]) -> FixedArray[UInt32]
+
+pub fn clamp_key(FixedArray[Byte]) -> (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32)
+
+pub fn finalize(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let key_128_len : Int32
+
+pub let key_256_len : Int32
+
+pub let limb_count : Int32
+
+pub fn mul_mod(UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) -> (UInt32, UInt32, UInt32, UInt32, UInt32)
+
+pub let nonce_len : Int32
+
+pub fn poly1305_auth(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+
+pub let poly_block_len : Int32
+
+pub let poly_key_len : Int32
+
+pub let poly_tag_len : Int32
+
+pub fn quarterround(UInt32, UInt32, UInt32, UInt32) -> (UInt32, UInt32, UInt32, UInt32)
+
+pub fn rotl32(UInt32, Int32) -> UInt32
+
+pub let state_len : Int32
+
+pub fn u32_to_8_le(FixedArray[Byte], Int32, UInt32) -> Unit
+
+pub fn u8_to_32_le(FixedArray[Byte], Int32) -> UInt32
+
+// Errors
+
+// Types and methods
+pub struct ChaChaState {
+  // private fields
+}
+pub fn ChaChaState::new128(FixedArray[Byte]) -> Self
+pub fn ChaChaState::new256(FixedArray[Byte]) -> Self
+pub fn ChaChaState::process(Self, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn ChaChaState::set_iv(Self, FixedArray[Byte], counter? : UInt64) -> Self
+
+pub struct ChachaPolyCtx {
+  // private fields
+}
+pub fn ChachaPolyCtx::crypt(Self, UInt32, FixedArray[Byte], Int32, Int32, Bool) -> FixedArray[Byte]?
+pub fn ChachaPolyCtx::get_length(Self, UInt32, FixedArray[Byte]) -> UInt32
+pub fn ChachaPolyCtx::new64(FixedArray[Byte]) -> Self
+
+// Type aliases
+
+// Traits

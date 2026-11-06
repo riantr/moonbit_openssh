@@ -7,7 +7,7 @@ import {
 }
 
 // Values
-pub const KEX_COOKIE_LEN : Int = 16
+pub const KEX_COOKIE_LEN : Int32 = 16
 
 pub const KX_MSG_KEXINIT : Byte = b'\x14'
 
@@ -17,15 +17,35 @@ pub const KX_MSG_KEX_ECDH_REPLY : Byte = b'\x1f'
 
 pub const KX_MSG_NEWKEYS : Byte = b'\x15'
 
+pub fn check_proposal_runnable(Proposal) -> String?
+
+pub fn first_unrunnable_hostkey(String) -> String?
+
+pub fn first_unrunnable_kex(String) -> String?
+
 pub fn flow_on_reply(StartedFlow, FlowConfig, Proposal, FixedArray[Byte], FixedArray[Byte]) -> ReplyOutcome
 
 pub fn flow_start(FlowConfig, Proposal) -> StartedFlow
+
+pub fn is_cert_hostkey_alg(String) -> Bool
+
+pub fn is_pseudo_kex_alg(String) -> Bool
+
+pub fn is_runnable_hostkey(String) -> Bool
+
+pub fn is_runnable_kex(String) -> Bool
 
 pub fn kexinit_payload(FixedArray[Byte], Proposal) -> FixedArray[Byte]
 
 pub fn negotiate(Proposal, PeerKexInit) -> Result[Negotiated, NegotiationError]
 
 pub fn parse_kexinit(FixedArray[Byte]) -> PeerKexInit?
+
+pub fn policy_gated_hostkey_names(String) -> Array[String]
+
+pub fn runnable_hostkey_names() -> Array[String]
+
+pub fn runnable_kex_names() -> Array[String]
 
 // Errors
 
@@ -43,12 +63,14 @@ pub(all) struct FlowConfig {
   client_seed : FixedArray[Byte]
   strict_kex : Bool
   hostname : String
-  host_port : Int
+  host_port : Int32
   knownhosts_entries : Array[@knownhosts.KnownHostEntry]
 }
-pub fn FlowConfig::make(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], Bool, String, Int, Array[@knownhosts.KnownHostEntry]) -> Self
+pub fn FlowConfig::make(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], Bool, String, Int32, Array[@knownhosts.KnownHostEntry]) -> Self
 
 pub(all) enum FlowError {
+  AlgorithmNotRunnable(String)
+  CipherNotRunnable(String)
   ProtocolError
   NoAgreement(NegotiationError)
   HostkeyInvalid
@@ -56,6 +78,7 @@ pub(all) enum FlowError {
   SharedSecretInvalid
   HostKeyMismatch(String)
   HostKeyUnknown(String)
+  HostKeyCertAuthority(String)
 }
 
 pub(all) struct Negotiated {
@@ -63,6 +86,8 @@ pub(all) struct Negotiated {
   hostkey_alg : String
   cipher_ctos : String
   cipher_stoc : String
+  mac_ctos : String
+  mac_stoc : String
   comp_ctos : String
   comp_stoc : String
 }
@@ -71,6 +96,7 @@ pub(all) enum NegotiationError {
   NoKexAlg
   NoHostkeyAlg
   NoCipherAlg
+  NoMacAlg
   NoCompAlg
 }
 

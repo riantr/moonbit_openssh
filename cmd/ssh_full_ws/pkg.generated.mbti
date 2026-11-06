@@ -2,7 +2,7 @@
 package "openssh/openssh_moonbit/cmd/ssh_full_ws"
 
 // Values
-pub fn ssh_client_full_unencrypted_ws(String, String, String, String) -> (FixedArray[Byte], FixedArray[Byte], String, Int, Int)
+pub fn ssh_client_full_unencrypted_ws(String, String, String, String) -> (FixedArray[Byte], FixedArray[Byte], String, Int32, Int32)
 
 // Errors
 

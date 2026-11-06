@@ -2,11 +2,11 @@
 package "openssh/openssh_moonbit/cmd/sftp_test"
 
 // Values
-pub const CAPTURE_EXTENSIONS : Int = 6
+pub const CAPTURE_EXTENSIONS : Int32 = 6
 
 pub const CAPTURE_FIXTURE : String = "E:/src/moon/openssh_moonbit/.loop39/sftp"
 
-pub const CAPTURE_VERSION : Int = 3
+pub const CAPTURE_VERSION : Int32 = 3
 
 pub let cases : Array[Case]
 
@@ -28,13 +28,18 @@ pub(all) struct InbufCase {
   name : String
   feeds : Array[String]
   expect_packets : Array[String]
-  expect_pending : Int
+  expect_pending : Int32
   expect_failed : Bool
 }
 
 pub(all) struct Op {
-  kind : Int
+  kind : Int32
   path : String
+  path2 : String
+  payload : String
+  perms : Int32
+  atime : Int32
+  mtime : Int32
 }
 
 // Type aliases

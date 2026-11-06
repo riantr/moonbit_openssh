@@ -2,41 +2,41 @@
 package "openssh/openssh_moonbit/src/sha256"
 
 // Values
-pub fn be32_to_8(FixedArray[Byte], Int, UInt) -> Unit
+pub fn be32_to_8(FixedArray[Byte], Int32, UInt32) -> Unit
 
-pub fn be8_to_32(FixedArray[Byte], Int) -> UInt
+pub fn be8_to_32(FixedArray[Byte], Int32) -> UInt32
 
-pub let block_len : Int
+pub let block_len : Int32
 
-pub fn ch(UInt, UInt, UInt) -> UInt
+pub fn ch(UInt32, UInt32, UInt32) -> UInt32
 
-pub let hash_len : Int
+pub let hash_len : Int32
 
-pub let init_H : FixedArray[UInt]
+pub let init_H : FixedArray[UInt32]
 
-pub let k256 : FixedArray[UInt]
+pub let k256 : FixedArray[UInt32]
 
-pub fn maj(UInt, UInt, UInt) -> UInt
+pub fn maj(UInt32, UInt32, UInt32) -> UInt32
 
-pub fn pad(FixedArray[UInt], FixedArray[Byte], Int, UInt64) -> Unit
+pub fn pad(FixedArray[UInt32], FixedArray[Byte], Int32, UInt64) -> Unit
 
-pub fn rotr(Int, UInt) -> UInt
+pub fn rotr(Int32, UInt32) -> UInt32
 
-pub fn serialize_state(FixedArray[UInt]) -> FixedArray[Byte]
+pub fn serialize_state(FixedArray[UInt32]) -> FixedArray[Byte]
 
 pub fn sha256(FixedArray[Byte]) -> FixedArray[Byte]
 
-pub fn sigma0_big(UInt) -> UInt
+pub fn sigma0_big(UInt32) -> UInt32
 
-pub fn sigma0_small(UInt) -> UInt
+pub fn sigma0_small(UInt32) -> UInt32
 
-pub fn sigma1_big(UInt) -> UInt
+pub fn sigma1_big(UInt32) -> UInt32
 
-pub fn sigma1_small(UInt) -> UInt
+pub fn sigma1_small(UInt32) -> UInt32
 
-pub fn transform(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn transform(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn update(FixedArray[UInt], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+pub fn update(FixedArray[UInt32], FixedArray[Byte], Int32, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int32, UInt64)
 
 // Errors
 

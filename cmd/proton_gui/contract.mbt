@@ -46,12 +46,14 @@
 
 ///|
 /// `{"name": "<scenario>"}`
+#derive(ToJson, FromJson, Debug, Eq)
 pub(all) struct RunRequest {
   name : String
-} derive(ToJson, FromJson, Debug, Eq)
+}
 
 ///|
 /// What one scenario produced, rendered as text for the panel.
+#derive(ToJson, Debug, Eq)
 pub(all) struct RunReply {
   name : String
   intent : String
@@ -71,24 +73,26 @@ pub(all) struct RunReply {
   results : Array[String]
   /// the mismatches; empty when `pass`
   failures : Array[String]
-} derive(ToJson, Debug, Eq)
+}
 
 ///|
 /// The catalogue the page renders its buttons from.
+#derive(ToJson, Debug, Eq)
 pub(all) struct ListReply {
   scenarios : Array[String]
   /// scenario name -> what it is aimed at
   intents : Array[String]
-} derive(ToJson, Debug, Eq)
+}
 
 ///|
 /// The whole-suite verdict, so the page can show a single line.
+#derive(ToJson, Debug, Eq)
 pub(all) struct AllReply {
   total : Int32
   passed : Int32
   failures : Array[String]
   notes : Array[String]
-} derive(ToJson, Debug, Eq)
+}
 
 ///|
 pub fn reply_of(

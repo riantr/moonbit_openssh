@@ -82,13 +82,27 @@ desktop.ini
 # captures. Everything in here is derived; nothing here is source.
 .loop*/
 
-# === Deliberately untracked package interfaces ===
-# These two are generated for local convenience but are NOT part of the
-# source: they describe packages that also build for js/wasm, where the
-# generated interface drifts with the target. Every other pkg.generated.mbti
-# IS tracked.
-src/sshclient/pkg.generated.mbti
-src/wtlive/pkg.generated.mbti
+# === Generated package interfaces ===
+# The toolchain writes `pkg.generated.mbti` for EVERY package on EVERY
+# build. Measured on moon 0.1.20261102; the previous version wrote one
+# only for the packages `moon info` had been asked for, which is why
+# this list used to name two entries instead of one rule.
+#
+# The interfaces this repository treats as claims are TRACKED, and a
+# .gitignore does not untrack them: this rule only decides what happens
+# to the ones that are not tracked, which are the toolchain's per-build
+# output rather than part of the source.  Leaving them untracked and
+# unignored is not an option either -- 51 permanently dirty files, and
+# `ci/ci.py --tag` refuses to tag a dirty tree.
+#
+# The two entries this rule replaces -- src/sshclient and src/wtlive --
+# were excluded because "the generated interface drifts with the target".
+# That was a measurement, not an assumption, and it no longer
+# reproduces: built for native, js, wasm and wasm-gc in turn, all four
+# produce a byte-identical file (sha256 26f351b4850b and 88c147329e46).
+# A rule whose stated reason has stopped being true is a rule that
+# stops being reviewed, so it is gone rather than kept for its shape.
+**/pkg.generated.mbti
 
 # === Third-party vendored source (keep) ===
 # Do NOT ignore *.c, *.h, *.py, *.json in src/ and verify_c/ etc.

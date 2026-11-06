@@ -39,6 +39,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sshUser } from './ssh_user.mjs';
 import { waitForMitmReady } from "./mitm_ready.mjs";
+import { exitedWithin } from "./wt_browser.mjs";
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = join(root, ".loop54");
@@ -58,7 +59,6 @@ function bad(label, detail) {
   console.log(`  FAIL  ${label}${detail ? "  " + detail : ""}`);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function freePort() {
   return new Promise((res, rej) => {
@@ -103,8 +103,20 @@ async function stopMitm(m) {
   // Dependency order, not impatience: the child writes its transcript when the
   // session thread returns, so a kill before that leaves a file that says
   // nothing happened.
-  await sleep(2500);
-  if (m.proc.exitCode === null && m.proc.signalCode === null) m.proc.kill();
+  //
+  // "Wait for the session thread to return" is what the sentence above asks
+  // for, and waiting for the child to *leave* is how you observe that. A
+  // fixed sleep is a guess about how long the peer needs, and a guess loses on
+  // a loaded machine: the peer was killed 2.5 s in, while it was still
+  // writing, so the file on disk stayed zero bytes long and this gate
+  // reported "the peer saw null attempts" -- a client defect that was not
+  // there. The peer is entitled to its own `t.join(5)` before it writes, so
+  // the window has to be comfortably wider than that.
+  //
+  // The seven sibling gates (47--53) already wait for the exit instead of
+  // guessing; this gate and Loop #59 were the two that guessed. See
+  // host/wt_browser.mjs for the helper.
+  if (!(await exitedWithin(m.proc, 30000))) m.proc.kill();
 }
 
 function run(port, args) {

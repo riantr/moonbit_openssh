@@ -49,6 +49,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sshUser } from './ssh_user.mjs';
 import { waitForMitmReady } from "./mitm_ready.mjs";
+import { exitedWithin } from "./wt_browser.mjs";
 
 const root = resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORK = join(root, ".loop59");
@@ -69,7 +70,6 @@ function bad(label, detail) {
   console.log(`  FAIL  ${label}${detail ? "  " + detail : ""}`);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function cleanup() {
   for (const p of live.splice(0)) {
@@ -110,9 +110,11 @@ async function startPeer(tag) {
 }
 
 async function stopPeer(p) {
-  // The peer writes its transcript on the way out; give it that window.
-  await sleep(2500);
-  if (p.proc.exitCode === null && p.proc.signalCode === null) p.proc.kill();
+  // The peer writes its transcript on the way out, and only after its own
+  // session thread has returned. Waiting for the peer to *leave* observes
+  // that; a fixed sleep guesses it, and the guess loses on a loaded machine.
+  // See host/verify_loop54.mjs for the failure that guess produced.
+  if (!(await exitedWithin(p.proc, 30000))) p.proc.kill();
 }
 
 function run(args) {

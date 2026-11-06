@@ -2,11 +2,11 @@
 package "openssh/openssh_moonbit/src/kexc25519"
 
 // Values
-pub fn be32_to_8(FixedArray[Byte], Int, UInt) -> Unit
+pub fn be32_to_8(FixedArray[Byte], Int32, UInt32) -> Unit
 
-pub fn be8_to_32(FixedArray[Byte], Int) -> UInt
+pub fn be8_to_32(FixedArray[Byte], Int32) -> UInt32
 
-pub let block_len : Int
+pub let block_len : Int32
 
 pub fn build_exchange_input(ExchangeInputs, FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
@@ -16,77 +16,77 @@ pub fn c25519_shared_key_mpint(FixedArray[Byte], FixedArray[Byte]) -> FixedArray
 
 pub fn c25519_shared_key_raw(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]?
 
-pub fn ch(UInt, UInt, UInt) -> UInt
+pub fn ch(UInt32, UInt32, UInt32) -> UInt32
 
-pub fn derive_keys(FixedArray[Byte], FixedArray[Byte], Int) -> DerivedKeys
+pub fn derive_keys(FixedArray[Byte], FixedArray[Byte], Int32) -> DerivedKeys
 
-pub fn derive_single(Byte, Int, FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
+pub fn derive_single(Byte, Int32, FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
-pub fn fe_add(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn fe_add(FixedArray[UInt32], FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub let fe_len : Int
+pub let fe_len : Int32
 
-pub fn fe_mult(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn fe_mult(FixedArray[UInt32], FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn fe_mult121665(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn fe_mult121665(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn fe_select(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt], FixedArray[UInt], UInt) -> Unit
+pub fn fe_select(FixedArray[UInt32], FixedArray[UInt32], FixedArray[UInt32], FixedArray[UInt32], UInt32) -> Unit
 
-pub fn fe_square(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn fe_square(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn fe_squeeze(FixedArray[UInt]) -> Unit
+pub fn fe_squeeze(FixedArray[UInt32]) -> Unit
 
-pub fn fe_sub(FixedArray[UInt], FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn fe_sub(FixedArray[UInt32], FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn freeze(FixedArray[UInt]) -> Unit
+pub fn freeze(FixedArray[UInt32]) -> Unit
 
-pub let ge_len : Int
+pub let ge_len : Int32
 
-pub let hash_len : Int
+pub let hash_len : Int32
 
-pub let init_H : FixedArray[UInt]
+pub let init_H : FixedArray[UInt32]
 
-pub let k256 : FixedArray[UInt]
+pub let k256 : FixedArray[UInt32]
 
 pub fn kex_gen_hash(ExchangeInputs, FixedArray[Byte], FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
 pub fn kx_mpint(FixedArray[Byte]) -> FixedArray[Byte]
 
-pub fn mainloop(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn mainloop(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn maj(UInt, UInt, UInt) -> UInt
+pub fn maj(UInt32, UInt32, UInt32) -> UInt32
 
-pub let minusp : FixedArray[UInt]
+pub let minusp : FixedArray[UInt32]
 
-pub fn pad(FixedArray[UInt], FixedArray[Byte], Int, UInt64) -> Unit
+pub fn pad(FixedArray[UInt32], FixedArray[Byte], Int32, UInt64) -> Unit
 
 pub fn parse_reply(FixedArray[Byte]) -> KexReply?
 
 pub fn parse_sig(FixedArray[Byte]) -> Ed25519Sig?
 
-pub fn recip(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn recip(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn rotr(Int, UInt) -> UInt
+pub fn rotr(Int32, UInt32) -> UInt32
 
-pub let scalar_len : Int
+pub let scalar_len : Int32
 
-pub fn serialize_state(FixedArray[UInt]) -> FixedArray[Byte]
+pub fn serialize_state(FixedArray[UInt32]) -> FixedArray[Byte]
 
 pub fn sha256(FixedArray[Byte]) -> FixedArray[Byte]
 
 pub fn sig_is_ed25519(Ed25519Sig) -> Bool
 
-pub fn sigma0_big(UInt) -> UInt
+pub fn sigma0_big(UInt32) -> UInt32
 
-pub fn sigma0_small(UInt) -> UInt
+pub fn sigma0_small(UInt32) -> UInt32
 
-pub fn sigma1_big(UInt) -> UInt
+pub fn sigma1_big(UInt32) -> UInt32
 
-pub fn sigma1_small(UInt) -> UInt
+pub fn sigma1_small(UInt32) -> UInt32
 
-pub fn transform(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn transform(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
 
-pub fn update(FixedArray[UInt], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+pub fn update(FixedArray[UInt32], FixedArray[Byte], Int32, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int32, UInt64)
 
 pub fn x25519(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
@@ -102,7 +102,14 @@ pub struct DerivedKeys {
   mac_key_ctos : FixedArray[Byte]
   mac_key_stoc : FixedArray[Byte]
 }
-pub fn DerivedKeys::derive_keys_with_session(FixedArray[Byte], FixedArray[Byte], Int, FixedArray[Byte]) -> Self
+pub fn DerivedKeys::derive_keys_with_session(FixedArray[Byte], FixedArray[Byte], Int32, FixedArray[Byte]) -> Self
+pub fn DerivedKeys::enc_key_ctos(Self) -> FixedArray[Byte]
+pub fn DerivedKeys::enc_key_stoc(Self) -> FixedArray[Byte]
+pub fn DerivedKeys::iv_ctos(Self) -> FixedArray[Byte]
+pub fn DerivedKeys::iv_stoc(Self) -> FixedArray[Byte]
+pub fn DerivedKeys::mac_key_ctos(Self) -> FixedArray[Byte]
+pub fn DerivedKeys::mac_key_stoc(Self) -> FixedArray[Byte]
+pub fn DerivedKeys::session_id(Self) -> FixedArray[Byte]
 
 pub struct Ed25519Sig {
   alg_name : FixedArray[Byte]
@@ -130,8 +137,8 @@ pub fn KxBuf::new() -> Self
 pub fn KxBuf::put_bytes(Self, FixedArray[Byte]) -> Unit
 pub fn KxBuf::put_mpint(Self, FixedArray[Byte]) -> Unit
 pub fn KxBuf::put_string(Self, FixedArray[Byte]) -> Unit
-pub fn KxBuf::put_u32(Self, UInt) -> Unit
-pub fn KxBuf::put_u8(Self, UInt) -> Unit
+pub fn KxBuf::put_u32(Self, UInt32) -> Unit
+pub fn KxBuf::put_u8(Self, UInt32) -> Unit
 pub fn KxBuf::to_bytes(Self) -> FixedArray[Byte]
 
 // Type aliases

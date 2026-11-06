@@ -2,25 +2,85 @@
 package "openssh/openssh_moonbit/src/hostkey"
 
 // Values
-pub const MAX_BIGNUM_BYTES : Int = 2048
+pub const CA_PUB : String = "AAAAC3NzaC1lZDI1NTE5AAAAIPfAXCITZpnjH8qnict5ht7Nof2B/VP/xJKgnVFbsIQu"
 
-pub const MAX_SIGN_DATA_SIZE : Int = 1048576
+pub const CERT_SUFFIX : String = "-cert-v01@openssh.com"
 
-pub const RSA_MIN_MODULUS_BITS : Int = 1024
+pub const EXPIRED_CERT : String = "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIMnJVDZLlYrjk40SDS9ldng2aseiXjuxlE1odgIxxnvxAAAAIMbkxxyl9aoQgG+UxIQVbL2i73tHW2wMMhnT1ryJ0hOqAAAAAAAAAAAAAAACAAAAEGhvc3QuZXhhbXBsZS5jb20AAAANAAAACTEyNy4wLjAuMQAAAABeC3CAAAAAAF40TwAAAAAAAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIPfAXCITZpnjH8qnict5ht7Nof2B/VP/xJKgnVFbsIQuAAAAUwAAAAtzc2gtZWQyNTUxOQAAAECAVUghxdgOAlwqo5KGvoPBcuwrYz9cefzAPnHz4k6V0bFRiBYWb+x25eMkyZ9JFozB3Wto9BR9GBFWGvZyQZsK"
 
-pub fn be32_to_8(FixedArray[Byte], Int, UInt) -> Unit
+pub const EXPIRED_CERT_SIGNED_LEN : Int32 = 240
 
-pub fn be64_to_8(FixedArray[Byte], Int, UInt64) -> Unit
+pub const EXPIRED_CERT_VALID_AFTER : UInt64 = 1577808000
 
-pub fn be8_to_32(FixedArray[Byte], Int) -> UInt
+pub const EXPIRED_CERT_VALID_BEFORE : UInt64 = 1580486400
 
-pub fn be8_to_64(FixedArray[Byte], Int) -> UInt64
+pub const GOOD_CERT : String = "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIAdXsI6qga/dfv2DgFdZhMyfuH4POSOuwciUiD9rbTXBAAAAIMbkxxyl9aoQgG+UxIQVbL2i73tHW2wMMhnT1ryJ0hOqAAAAAAAAAAAAAAACAAAAEGhvc3QuZXhhbXBsZS5jb20AAAANAAAACTEyNy4wLjAuMQAAAABYAZC1AAAAAH2ZlrUAAAAAAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIPfAXCITZpnjH8qnict5ht7Nof2B/VP/xJKgnVFbsIQuAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEC4bUI6inkPNttdmWnL1kerqaw4l3m49Es9xpZfzP3L6r5IN7xxwAjv3Z0+EtIsTNxbhywxGixyY/Gjg5gYVucG"
+
+pub const GOOD_CERT_SIGNED_LEN : Int32 = 240
+
+pub const GOOD_CERT_VALID_AFTER : UInt64 = 1476497589
+
+pub const GOOD_CERT_VALID_BEFORE : UInt64 = 2107217589
+
+pub const HOST_PUB : String = "AAAAC3NzaC1lZDI1NTE5AAAAIMbkxxyl9aoQgG+UxIQVbL2i73tHW2wMMhnT1ryJ0hOq"
+
+pub const MAX_BIGNUM_BYTES : Int32 = 2048
+
+pub const MAX_SIGN_DATA_SIZE : Int32 = 1048576
+
+pub const NON_HOST_PRINCIPAL_CERT : String = "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAILD9wIRBiSswpCR0OG9U1rS5tFAlQ36AHyP9f66fWYUnAAAAIFVjTujivBhinTftFErubX4Dwq1hWC7vEuzSaAUNnC6AAAAAAAAAAAAAAAACAAAAC2xvb3A1My11c2VyAAAAEAAAAAVhbGljZQAAAANib2IAAAAAWAGQtgAAAAB9mZa2AAAAAAAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACD3wFwiE2aZ4x/Kp4nLeYbezaH9gf1T/8SSoJ1RW7CELgAAAFMAAAALc3NoLWVkMjU1MTkAAABAd9Qg+xZYpr8HggHzghWN+CLvt1oJjhe4397kSndfc3Ek3KQSPjAIzv+6cJNCEy4Q41ne7sX4erKNiEKMCqI0AA=="
+
+pub const NON_HOST_PRINCIPAL_CERT_SIGNED_LEN : Int32 = 238
+
+pub const NON_HOST_PRINCIPAL_CERT_VALID_AFTER : UInt64 = 1476497590
+
+pub const NON_HOST_PRINCIPAL_CERT_VALID_BEFORE : UInt64 = 2107217590
+
+pub const OTHER_PRINCIPAL_CERT : String = "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAICO4UBTkVYoIUF5pez/Dg1FkrxrT3Phm7ryScFVOVpzjAAAAIMbkxxyl9aoQgG+UxIQVbL2i73tHW2wMMhnT1ryJ0hOqAAAAAAAAAAAAAAACAAAAEGhvc3QuZXhhbXBsZS5jb20AAAAVAAAAEW90aGVyLmV4YW1wbGUuY29tAAAAAFgBkLYAAAAAfZmWtgAAAAAAAAAAAAAAAAAAADMAAAALc3NoLWVkMjU1MTkAAAAg98BcIhNmmeMfyqeJy3mG3s2h/YH9U//EkqCdUVuwhC4AAABTAAAAC3NzaC1lZDI1NTE5AAAAQJFr9gs/AzkhS84/vTf50UfikhwbWbhtwZI+uQfEO4TqzMv0N2OFQNOMcylAopdfYZus0mPmL6U82/x7xEkgiws="
+
+pub const OTHER_PRINCIPAL_CERT_SIGNED_LEN : Int32 = 248
+
+pub const OTHER_PRINCIPAL_CERT_VALID_AFTER : UInt64 = 1476497590
+
+pub const OTHER_PRINCIPAL_CERT_VALID_BEFORE : UInt64 = 2107217590
+
+pub const ROGUE_CA_CERT : String = "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIKSD+svfAuIVdUisVONbHSmMJl++SGzYgZhNcBT2OG2aAAAAIMbkxxyl9aoQgG+UxIQVbL2i73tHW2wMMhnT1ryJ0hOqAAAAAAAAAAAAAAACAAAAEGhvc3QuZXhhbXBsZS5jb20AAAANAAAACTEyNy4wLjAuMQAAAABYAZC2AAAAAH2ZlrYAAAAAAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIFmriclfIPb2axKKRT2Luxi1b3A67HSUbmCK3I+HKd3iAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEAAER1h6EPwBKgCy0uahI2thlYvHD1VPmiBE91fNrZC46L0rTQi+8LhSViHzLl10rO88Lcf18JMNNFhWdU+OX8H"
+
+pub const ROGUE_CA_CERT_SIGNED_LEN : Int32 = 240
+
+pub const ROGUE_CA_CERT_VALID_AFTER : UInt64 = 1476497590
+
+pub const ROGUE_CA_CERT_VALID_BEFORE : UInt64 = 2107217590
+
+pub const ROGUE_CA_PUB : String = "AAAAC3NzaC1lZDI1NTE5AAAAIFmriclfIPb2axKKRT2Luxi1b3A67HSUbmCK3I+HKd3i"
+
+pub const RSA_MIN_MODULUS_BITS : Int32 = 1024
+
+pub const SSH_CERT_TYPE_HOST : Int32 = 2
+
+pub const SSH_CERT_TYPE_USER : Int32 = 1
+
+pub const USER_CERT : String = "AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIF5hCL3OkbSatJq60dgdcpeSKL66QtM1nL6Ibm2DI54vAAAAIFVjTujivBhinTftFErubX4Dwq1hWC7vEuzSaAUNnC6AAAAAAAAAAAAAAAABAAAAC2xvb3A1My11c2VyAAAACQAAAAVhbGljZQAAAABYAZC2AAAAAH2ZlrYAAAAAAAAAggAAABVwZXJtaXQtWDExLWZvcndhcmRpbmcAAAAAAAAAF3Blcm1pdC1hZ2VudC1mb3J3YXJkaW5nAAAAAAAAABZwZXJtaXQtcG9ydC1mb3J3YXJkaW5nAAAAAAAAAApwZXJtaXQtcHR5AAAAAAAAAA5wZXJtaXQtdXNlci1yYwAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACD3wFwiE2aZ4x/Kp4nLeYbezaH9gf1T/8SSoJ1RW7CELgAAAFMAAAALc3NoLWVkMjU1MTkAAABAQvnRoOfVpKCwEfupGSKVTGRK89B12KddNYmTMm96MbE3JHAg1I1dY8IyZD3YyFFbWW6Gq142bEOucOgcwqTTAQ=="
+
+pub const USER_CERT_SIGNED_LEN : Int32 = 361
+
+pub const USER_CERT_VALID_AFTER : UInt64 = 1476497590
+
+pub const USER_CERT_VALID_BEFORE : UInt64 = 2107217590
+
+pub fn be32_to_8(FixedArray[Byte], Int32, UInt32) -> Unit
+
+pub fn be64_to_8(FixedArray[Byte], Int32, UInt64) -> Unit
+
+pub fn be8_to_32(FixedArray[Byte], Int32) -> UInt32
+
+pub fn be8_to_64(FixedArray[Byte], Int32) -> UInt64
 
 pub fn big_sigma0(UInt64) -> UInt64
 
 pub fn big_sigma1(UInt64) -> UInt64
 
-pub let block_len : Int
+pub let block_len : Int32
 
 pub fn ch(UInt64, UInt64, UInt64) -> UInt64
 
@@ -74,47 +134,61 @@ pub fn ge_setneutral() -> FixedArray[FixedArray[UInt64]]
 
 pub fn ge_unpackneg_vartime(FixedArray[Byte]) -> (FixedArray[FixedArray[UInt64]], Bool)
 
-pub let hash_len : Int
+pub let hash_len : Int32
 
-pub let init_H : FixedArray[UInt]
+pub let init_H : FixedArray[UInt32]
 
 pub let init_h : FixedArray[UInt64]
 
+pub fn is_cert_type_name(String) -> Bool
+
+pub fn is_verifiable_alg(String) -> Bool
+
 pub fn is_verified(VerifyResult) -> Bool
 
-pub let k256 : FixedArray[UInt]
+pub let k256 : FixedArray[UInt32]
 
 pub let k512 : FixedArray[UInt64]
 
 pub fn keypair_from_seed(FixedArray[Byte]) -> (FixedArray[Byte], FixedArray[Byte])
 
+pub fn looks_like_cert(FixedArray[Byte]) -> Bool
+
 pub fn maj(UInt64, UInt64, UInt64) -> UInt64
 
-pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int, UInt64) -> Unit
+pub fn pad(FixedArray[UInt64], FixedArray[Byte], Int32, UInt64) -> Unit
 
-pub fn rotr(Int, UInt64) -> UInt64
+pub fn parse_principals(FixedArray[Byte]) -> Array[String]?
 
-pub fn rsa_digest_of_keyname(String) -> Int?
+pub fn plain_type_is_supported(String) -> Bool
 
-pub fn rsa_digest_of_sigtype(String) -> Int?
+pub fn plain_type_of_cert(String) -> String
 
-pub let s256_block_len : Int
+pub fn presented_key(FixedArray[Byte], String) -> PresentedResult
 
-pub fn s256_ch(UInt, UInt, UInt) -> UInt
+pub fn rotr(Int32, UInt64) -> UInt64
 
-pub let s256_hash_len : Int
+pub fn rsa_digest_of_keyname(String) -> Int32?
 
-pub fn s256_maj(UInt, UInt, UInt) -> UInt
+pub fn rsa_digest_of_sigtype(String) -> Int32?
 
-pub fn s256_pad(FixedArray[UInt], FixedArray[Byte], Int, UInt64) -> Unit
+pub let s256_block_len : Int32
 
-pub fn s256_rotr(Int, UInt) -> UInt
+pub fn s256_ch(UInt32, UInt32, UInt32) -> UInt32
 
-pub fn s256_serialize_state(FixedArray[UInt]) -> FixedArray[Byte]
+pub let s256_hash_len : Int32
 
-pub fn s256_transform(FixedArray[UInt], FixedArray[UInt]) -> Unit
+pub fn s256_maj(UInt32, UInt32, UInt32) -> UInt32
 
-pub fn s256_update(FixedArray[UInt], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+pub fn s256_pad(FixedArray[UInt32], FixedArray[Byte], Int32, UInt64) -> Unit
+
+pub fn s256_rotr(Int32, UInt32) -> UInt32
+
+pub fn s256_serialize_state(FixedArray[UInt32]) -> FixedArray[Byte]
+
+pub fn s256_transform(FixedArray[UInt32], FixedArray[UInt32]) -> Unit
+
+pub fn s256_update(FixedArray[UInt32], FixedArray[Byte], Int32, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int32, UInt64)
 
 pub fn sc_2interleave2(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
 
@@ -132,7 +206,7 @@ pub fn sc_mul(FixedArray[UInt64], FixedArray[UInt64]) -> FixedArray[UInt64]
 
 pub fn sc_to32bytes(FixedArray[UInt64]) -> FixedArray[Byte]
 
-pub fn sc_window3(FixedArray[UInt64]) -> FixedArray[Int]
+pub fn sc_window3(FixedArray[UInt64]) -> FixedArray[Int32]
 
 pub fn serialize_state(FixedArray[UInt64]) -> FixedArray[Byte]
 
@@ -140,13 +214,13 @@ pub fn sha256(FixedArray[Byte]) -> FixedArray[Byte]
 
 pub fn sha512(FixedArray[Byte]) -> FixedArray[Byte]
 
-pub fn sigma0_big(UInt) -> UInt
+pub fn sigma0_big(UInt32) -> UInt32
 
-pub fn sigma0_small(UInt) -> UInt
+pub fn sigma0_small(UInt32) -> UInt32
 
-pub fn sigma1_big(UInt) -> UInt
+pub fn sigma1_big(UInt32) -> UInt32
 
-pub fn sigma1_small(UInt) -> UInt
+pub fn sigma1_small(UInt32) -> UInt32
 
 pub fn sign(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
@@ -156,20 +230,75 @@ pub fn small_sigma1(UInt64) -> UInt64
 
 pub fn transform(FixedArray[UInt64], FixedArray[UInt64]) -> Unit
 
-pub fn update(FixedArray[UInt64], FixedArray[Byte], Int, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int, UInt64)
+pub fn update(FixedArray[UInt64], FixedArray[Byte], Int32, UInt64, FixedArray[Byte]) -> (FixedArray[Byte], Int32, UInt64)
+
+pub fn verifiable_alg_names() -> Array[String]
 
 pub fn verify(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> Bool
+
+pub fn verify_host_cert(FixedArray[Byte], FixedArray[Byte], String, UInt64) -> CertVerdict
 
 // Errors
 
 // Types and methods
+pub(all) enum CertError {
+  NotACertificate(String)
+  Malformed
+  TrailingData
+  BadPrincipals
+  UnsupportedKeyType(String)
+}
+
+pub(all) enum CertFailure {
+  Malformed
+  CaNotPinned
+  CaSignatureInvalid
+  NotHostCertificate
+  NotYetValid
+  Expired
+  PrincipalMismatch
+  UnsupportedCriticalOption
+  InnerKeyUnsupported
+}
+
+pub(all) enum CertParseResult {
+  Parsed(HostCert)
+  Rejected(CertError)
+}
+
+pub(all) enum CertVerdict {
+  Trusted(HostKey)
+  Rejected(CertFailure)
+}
+
+pub(all) struct HostCert {
+  cert_type_name : String
+  key_type_name : String
+  nonce : FixedArray[Byte]
+  inner_key : FixedArray[Byte]
+  inner_key_blob : FixedArray[Byte]
+  serial : UInt64
+  cert_type : Int32
+  key_id : String
+  principals : Array[String]
+  valid_after : UInt64
+  valid_before : UInt64
+  critical_options : FixedArray[Byte]
+  extensions : FixedArray[Byte]
+  reserved : FixedArray[Byte]
+  sig_key : FixedArray[Byte]
+  signature : FixedArray[Byte]
+  signed_data : FixedArray[Byte]
+}
+pub fn HostCert::from_blob(FixedArray[Byte]) -> CertParseResult
+
 pub(all) enum HostKey {
   Ed25519Key(FixedArray[Byte])
   RsaKey(FixedArray[Byte], FixedArray[Byte])
-  EcdsaKey(Int, FixedArray[Byte])
+  EcdsaKey(Int32, FixedArray[Byte])
 }
 pub fn HostKey::agrees_with_alg(Self, String) -> Bool
-pub fn HostKey::describe(Self) -> (String, Int)
+pub fn HostKey::describe(Self) -> (String, Int32)
 pub fn HostKey::from_blob(FixedArray[Byte]) -> ParseResult
 pub fn HostKey::verify(Self, FixedArray[Byte], FixedArray[Byte]) -> VerifyResult
 pub fn HostKey::verify_with_alg(Self, FixedArray[Byte], FixedArray[Byte], String) -> VerifyResult
@@ -194,6 +323,18 @@ pub(all) enum KeyError {
 pub(all) enum ParseResult {
   Parsed(HostKey)
   Rejected(KeyError)
+}
+
+pub(all) struct PresentedKey {
+  key : HostKey
+  sig_alg : String
+  is_cert : Bool
+  cert_type_name : String
+}
+
+pub(all) enum PresentedResult {
+  Ready(PresentedKey)
+  Bad(KeyError)
 }
 
 pub(all) enum VerifyResult {

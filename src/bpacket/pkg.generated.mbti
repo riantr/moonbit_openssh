@@ -2,53 +2,77 @@
 package "openssh/openssh_moonbit/src/bpacket"
 
 // Values
-pub const AESCTR_BLOCK : Int = 16
+pub const AESCTR_BLOCK : Int32 = 16
 
-pub const HMAC_SHA256_LEN : Int = 32
+pub const HMAC_SHA256_LEN : Int32 = 32
 
-pub const MAX_PACKET_SIZE : Int = 262144
+pub const MAX_PACKET_SIZE : Int32 = 262144
 
-pub const MIN_PACKET_LENGTH : Int = 5
+pub const MIN_PACKET_LENGTH : Int32 = 5
 
 pub const MSG_NEWKEYS : Byte = b'\x15'
 
-pub fn add_block(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte], Bool) -> (UInt, UInt, UInt, UInt, UInt)
+pub fn add_block(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte], Bool) -> (UInt32, UInt32, UInt32, UInt32, UInt32)
 
-pub let block_len : Int
+pub fn authlen_for(String) -> Int32
 
-pub fn chacha_block(FixedArray[UInt]) -> FixedArray[UInt]
+pub let block_len : Int32
 
-pub fn clamp_key(FixedArray[Byte]) -> (UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt)
+pub fn chacha_block(FixedArray[UInt32]) -> FixedArray[UInt32]
 
-pub fn finalize(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn check_runnable(String, String) -> String?
 
-pub let key_128_len : Int
+pub fn cipher_needs_mac(String) -> Bool
 
-pub let key_256_len : Int
+pub fn clamp_key(FixedArray[Byte]) -> (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32)
 
-pub let limb_count : Int
+pub fn finalize(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte]) -> FixedArray[Byte]
 
-pub fn mul_mod(UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt, UInt)
+pub fn first_unrunnable_cipher(String) -> String?
 
-pub let nonce_len : Int
+pub fn first_unrunnable_mac(String) -> String?
+
+pub fn is_runnable_cipher(String) -> Bool
+
+pub fn is_runnable_mac(String) -> Bool
+
+pub let key_128_len : Int32
+
+pub let key_256_len : Int32
+
+pub let limb_count : Int32
+
+pub fn mul_mod(UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) -> (UInt32, UInt32, UInt32, UInt32, UInt32)
+
+pub let nonce_len : Int32
 
 pub fn poly1305_auth(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
-pub let poly_block_len : Int
+pub let poly_block_len : Int32
 
-pub let poly_key_len : Int
+pub let poly_key_len : Int32
 
-pub let poly_tag_len : Int
+pub let poly_tag_len : Int32
 
-pub fn quarterround(UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt)
+pub fn quarterround(UInt32, UInt32, UInt32, UInt32) -> (UInt32, UInt32, UInt32, UInt32)
 
-pub fn rotl32(UInt, Int) -> UInt
+pub fn rotl32(UInt32, Int32) -> UInt32
 
-pub let state_len : Int
+pub fn runnable_cipher_names() -> Array[String]
 
-pub fn u32_to_8_le(FixedArray[Byte], Int, UInt) -> Unit
+pub fn runnable_mac_names() -> Array[String]
 
-pub fn u8_to_32_le(FixedArray[Byte], Int) -> UInt
+pub fn selected_mac(String, String) -> String?
+
+pub let state_len : Int32
+
+pub fn transport_family(String) -> TransportFamily?
+
+pub fn transport_params(String, String) -> (Int32, Int32, Int32, Int32)
+
+pub fn u32_to_8_le(FixedArray[Byte], Int32, UInt32) -> Unit
+
+pub fn u8_to_32_le(FixedArray[Byte], Int32) -> UInt32
 
 // Errors
 
@@ -58,10 +82,10 @@ pub struct AesCtrMacCtx {
 }
 pub fn AesCtrMacCtx::counter(Self) -> FixedArray[Byte]
 pub fn AesCtrMacCtx::crypt(Self, FixedArray[Byte]) -> FixedArray[Byte]
-pub fn AesCtrMacCtx::mac(Self, UInt, FixedArray[Byte]) -> FixedArray[Byte]
-pub fn AesCtrMacCtx::mac_ok(Self, UInt, FixedArray[Byte], FixedArray[Byte]) -> Bool
+pub fn AesCtrMacCtx::mac(Self, UInt32, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn AesCtrMacCtx::mac_ok(Self, UInt32, FixedArray[Byte], FixedArray[Byte]) -> Bool
 pub fn AesCtrMacCtx::new(FixedArray[Byte], FixedArray[Byte], FixedArray[Byte]) -> Self
-pub fn AesCtrMacCtx::peek_len(Self, FixedArray[Byte]) -> UInt?
+pub fn AesCtrMacCtx::peek_len(Self, FixedArray[Byte]) -> UInt32?
 
 pub struct ChaChaState {
   // private fields
@@ -74,8 +98,8 @@ pub fn ChaChaState::set_iv(Self, FixedArray[Byte], counter? : UInt64) -> Self
 pub struct ChachaPolyCtx {
   // private fields
 }
-pub fn ChachaPolyCtx::crypt(Self, UInt, FixedArray[Byte], Int, Int, Bool) -> FixedArray[Byte]?
-pub fn ChachaPolyCtx::get_length(Self, UInt, FixedArray[Byte]) -> UInt
+pub fn ChachaPolyCtx::crypt(Self, UInt32, FixedArray[Byte], Int32, Int32, Bool) -> FixedArray[Byte]?
+pub fn ChachaPolyCtx::get_length(Self, UInt32, FixedArray[Byte]) -> UInt32
 pub fn ChachaPolyCtx::new64(FixedArray[Byte]) -> Self
 
 pub enum EmitResult {
@@ -90,14 +114,14 @@ pub(all) enum Mode {
 }
 
 pub enum PacketError {
-  BadLength(UInt)
-  AlignError(UInt)
+  BadLength(UInt32)
+  AlignError(UInt32)
   AuthFailed
   MacInvalid
-  BadPadlen(UInt)
-  PadOverflow(UInt)
+  BadPadlen(UInt32)
+  PadOverflow(UInt32)
   EmptyPayload
-  BadType(UInt)
+  BadType(UInt32)
   SeqnrWrapInitial
 }
 
@@ -106,21 +130,21 @@ pub struct RecvCtx {
 }
 pub fn RecvCtx::end_initial_kex(Self) -> Unit
 pub fn RecvCtx::in_initial_kex(Self) -> Bool
-pub fn RecvCtx::make(Mode, UInt, Bool, Bool) -> Self
+pub fn RecvCtx::make(Mode, UInt32, Bool, Bool) -> Self
 pub fn RecvCtx::new() -> Self
 pub fn RecvCtx::recv(Self, FixedArray[Byte]) -> RecvResult
-pub fn RecvCtx::seqnr(Self) -> UInt
+pub fn RecvCtx::seqnr(Self) -> UInt32
 pub fn RecvCtx::set_mode(Self, Mode) -> Unit
-pub fn RecvCtx::wire_len_from_header(Self, FixedArray[Byte]) -> Int?
+pub fn RecvCtx::wire_len_from_header(Self, FixedArray[Byte]) -> Int32?
 
 pub enum RecvEvent {
   NeedMore
-  Packet(UInt, Byte, FixedArray[Byte])
+  Packet(UInt32, Byte, FixedArray[Byte])
   Failed(PacketError)
 }
 
 pub struct RecvResult {
-  consumed : Int
+  consumed : Int32
   event : RecvEvent
 }
 
@@ -130,14 +154,19 @@ pub struct SendCtx {
 pub fn SendCtx::emit(Self, Byte, FixedArray[Byte], FixedArray[Byte]) -> EmitResult
 pub fn SendCtx::end_initial_kex(Self) -> Unit
 pub fn SendCtx::in_initial_kex(Self) -> Bool
-pub fn SendCtx::make(Mode, UInt, Bool, Bool) -> Self
+pub fn SendCtx::make(Mode, UInt32, Bool, Bool) -> Self
 pub fn SendCtx::new() -> Self
-pub fn SendCtx::seqnr(Self) -> UInt
+pub fn SendCtx::seqnr(Self) -> UInt32
 pub fn SendCtx::set_mode(Self, Mode) -> Unit
 
 pub struct SentPacket {
   frame : FixedArray[Byte]
   wire : FixedArray[Byte]
+}
+
+pub(all) enum TransportFamily {
+  AeadChachaPoly1305
+  MacEncryptAes128CtrHmacSha256
 }
 
 // Type aliases

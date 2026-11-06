@@ -2,23 +2,23 @@
 package "openssh/openssh_moonbit/src/poly1305"
 
 // Values
-pub fn add_block(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte], Bool) -> (UInt, UInt, UInt, UInt, UInt)
+pub fn add_block(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte], Bool) -> (UInt32, UInt32, UInt32, UInt32, UInt32)
 
-pub let block_len : Int
+pub let block_len : Int32
 
-pub fn clamp_key(FixedArray[Byte]) -> (UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt)
+pub fn clamp_key(FixedArray[Byte]) -> (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32)
 
-pub fn finalize(UInt, UInt, UInt, UInt, UInt, FixedArray[Byte]) -> FixedArray[Byte]
+pub fn finalize(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte]) -> FixedArray[Byte]
 
-pub let key_len : Int
+pub let key_len : Int32
 
-pub let limb_count : Int
+pub let limb_count : Int32
 
-pub fn mul_mod(UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt, UInt) -> (UInt, UInt, UInt, UInt, UInt)
+pub fn mul_mod(UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) -> (UInt32, UInt32, UInt32, UInt32, UInt32)
 
 pub fn poly1305_auth(FixedArray[Byte], FixedArray[Byte]) -> FixedArray[Byte]
 
-pub let tag_len : Int
+pub let tag_len : Int32
 
 // Errors
 

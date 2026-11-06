@@ -16,6 +16,7 @@ pub struct HostSpec {
 
 ///|
 /// known_hosts 行标记
+#derive(Eq)
 pub(all) enum Marker {
   /// 普通条目（无前缀标记）：主机密钥就是这一把
   None
@@ -31,7 +32,7 @@ pub(all) enum Marker {
   ///
   /// Loop #14 起强制语义:全表扫,不看主机名是否命中,命中即拒。
   Revoked
-} derive(Eq)
+}
 
 ///|
 /// Loop #66: `derive(Eq)` used to promote `Eq::{equal, not_equal}` to plain
@@ -43,6 +44,7 @@ pub extend Marker with Eq::{equal, not_equal}
 
 ///|
 /// 匹配结果
+#derive(Eq)
 pub(all) enum HostStatus {
   /// 命中且 key 匹配
   Ok
@@ -63,7 +65,7 @@ pub(all) enum HostStatus {
   CertAuthority
   /// entries 中有空指针或格式错误
   InvalidEntry
-} derive(Eq)
+}
 
 ///|
 /// Loop #66: same explicit promotion as `Marker` above.

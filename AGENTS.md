@@ -9145,3 +9145,167 @@ claim has to be a **stronger** one:
 The last row is the one that matters.  A file that says `aes256-ctr` and
 opens anyway would be worse than one that says `none`, because the user
 has been told it is protected.
+
+### The toolchain moved under us, and CI installs `latest`
+
+moon was upgraded from `0.1.20261012` to `0.1.20261102` **by another
+process on this machine**, not by this repository: the upgrade showed up
+as `moon.exe` vanishing from `~/.moon/bin` while a `moon upgrade` process
+was running, and every gate that needed the toolchain from that moment
+on failed in 0.3 s with
+
+    'moon' is not recognized as an internal or external command
+
+Four gates went red that way (`verify_loop68`, `76`, `78`, `79`).  None of
+them was a defect: they were the toolchain being replaced underneath a
+run.  The first thing to ask about a sudden `0.3 s` failure of several
+gates is **whether the gate ran at all**, not whether the gate is right.
+
+Two real consequences did come out of it, and both are permanent:
+
+#### 1. The derive syntax moved
+
+`} derive(Eq)` (a suffix on the closing brace) is now `#derive(Eq)` on
+the line ABOVE the declaration:
+
+```moonbit
+#derive(Eq)
+pub(all) enum Marker {
+  None
+  CertAuthority
+  Revoked
+}
+```
+
+Only two files in this repository used the old form --
+`src/knownhosts/entry.mbt` (2 sites) and `cmd/proton_gui/contract.mbt`
+(4 sites) -- and `moon fmt` rewrote exactly those two files and nothing
+else in the tree.  That is the measurement that keeps this small: the
+formatter's diff IS the scope of the migration, so the scope did not have
+to be guessed.
+
+`moon fmt --check` is a **qa-tier category**, and the CI installs moon
+with the default `version: latest`.  So a syntax change upstream breaks
+this repository's CI even though nobody touched the source: the runner
+picks up the new toolchain and the old spelling no longer parses.  This
+is the same lesson as the CRLF rule in `.gitattributes` -- a claim about
+the machine is not a rule, and "the toolchain stays where it was" is a
+claim, not a pin.
+
+The `pub extend Marker with Eq::{equal, not_equal)` lines survive the
+migration untouched, and so does the reason they exist: the promoted
+`Eq::{equal, not_equal}` methods are deprecated, and naming them keeps
+the call sites honest (Loop #66).
+
+#### 2. The toolchain writes an interface file for EVERY package
+
+`moon 0.1.20261012` wrote `pkg.generated.mbti` only for the packages
+`moon info` had been asked for, which is why this repository tracked 23
+of them and `.gitignore` named the two exceptions.  `0.1.20261102` writes
+one for **every** package on **every** build: 74 files on disk, 51 of
+them untracked.
+
+Two measurements decided what to do with them:
+
+* **They are stable across targets.**  Built for native, js, wasm and
+  wasm-gc in turn, `src/sha256`, `src/keyfile`, `src/sshclient` and
+  `src/wtlive` each produce a byte-identical file.  The two `.gitignore`
+  exceptions existed because "the generated interface drifts with the
+  target" -- that reason no longer reproduces, so the exceptions are
+  gone rather than kept for their shape.  A rule whose stated reason has
+  stopped being true is a rule that stops being reviewed.
+* **They embed constant VALUES, not only types.**  `moon info` writes
+  `pub const CAPTURE_FIXTURE : String = "E:/src/moon/openssh_moonbit/.loop39/sftp"`
+  into `cmd/sftp_test/pkg.generated.mbti` -- a machine path, in a
+  tracked file, from Loop #39.  That is why the untracked ones are
+  ignored rather than committed: an interface file is not an authored
+  claim, and committing 51 of them would commit 51 chances to write one
+  machine's directory into the repository.
+
+So `.gitignore` now carries ONE rule (`**/pkg.generated.mbti`) instead of
+two named exceptions.  A `.gitignore` does not untrack a file that is
+already tracked, so the 23 interfaces this repository does track stay
+tracked, and `git status` is clean again.
+
+#### The 23 tracked interfaces were STALE, and now they are not
+
+Refreshing them with the current toolchain added **114 declarations**
+and removed **none**.  `src/aead/pkg.generated.mbti` was an EMPTY file
+in the repository -- the package's entire interface, 24 declarations,
+was simply not in the committed copy.  `src/hostkey` was missing 39,
+`src/sftp` 14, `src/kexflow` 10, `src/bpacket` 12, `src/knownhosts` 11.
+
+Nothing in the source had changed to cause that; the files were written
+by an older toolchain and never refreshed afterwards, so they were
+**claims about the interface that were no longer true**.  The toolchain
+also re-spells `Int` and `UInt` as `Int32` and `UInt32` -- the same
+types, since MoonBit's `Int` is 32 bits -- which is a spelling change
+and not an API change, and the refresh was checked for exactly that:
+114 declarations added, 0 removed, 0 changed names.
+
+---
+
+## Loop #86, follow-up: a gate must not guess how long a peer takes to FINISH either
+
+Loop #79's follow-up fixed the *startup* half of this: a gate that waits a
+fixed number of milliseconds for a peer to come up loses the race on a
+loaded machine, and the loss reads like a protocol difference.  The
+shutdown half was never fixed, and it is the same mistake.
+
+`verify_loop54.mjs` and `verify_loop59.mjs` stopped their peers with
+
+    await sleep(2500);
+    if (m.proc.exitCode === null && m.proc.signalCode === null) m.proc.kill();
+
+`host/sftp_mitm.py` writes its transcript only AFTER its session thread
+returns -- `worker.join(timeout=120)` first, and in a control run
+`t.join(5)` before that -- so 2.5 s is a guess about a peer's shutdown,
+and the guess loses the same way the startup guess loses.  What the losing
+run produced was this:
+
+    FAIL  remembered  authenticated but the peer saw null attempts
+
+`.loop54/s2.json` was **zero bytes**.  The peer was killed mid-write, the
+gate read an empty file, `JSON.parse("")` threw, `readJson` returned
+null, and the gate printed "null attempts" -- a statement about the
+*client's* authentication that was entirely an artefact of the gate
+having killed its own peer.  A gate that reports the subject under test as
+broken because it raced its own harness is worse than a gate that simply
+fails, because it sends the next reader to the wrong module.
+
+The fix is the mirror image of Loop #79's: wait for the peer to SAY it is
+done.  `host/wt_browser.mjs` already had the helper, and seven sibling
+gates (47--53) already used it:
+
+    import { exitedWithin } from "./wt_browser.mjs";
+    ...
+    if (!(await exitedWithin(m.proc, 30000))) m.proc.kill();
+
+The child's exit IS the signal that the transcript is on disk: the file is
+written and closed before `main()` returns.  The 30 s window is not
+arbitrary -- the peer is entitled to its own `t.join(5)` before it
+writes, so the window has to be comfortably wider than that, and the
+`kill()` is only the backstop for a peer that never leaves at all.  The
+local `sleep` helper went with it: a dead `sleep` in a gate reads as
+"there is still a sleep somewhere in here", which is exactly the
+impression the change was meant to remove.
+
+**The assertion did not get weaker.**  `auth_attempts` must still be
+exactly 1, and the "remembered" step still has to authenticate from the
+file alone in a fresh process, with no `--kh-tofu` and no printed line.
+What changed is only how the gate waits: it observes the peer's exit
+instead of guessing at a duration.
+
+Measured after the change: loop54 16/16 on three consecutive runs, loop59
+7/7 on two.
+
+### The rule this makes explicit
+
+**A gate must not guess how long a peer takes to start, and it must not
+guess how long it takes to finish.**  Both guesses lose on a loaded
+machine, and both lose the same way: the symptom gets reported against
+the subject under test.  When a gate fails with a value that came out of
+a file the harness owns -- "null attempts", "no transcript", "the client
+saw nothing" -- the first thing to ask is whether the harness killed its
+own peer too early, and the answer has to come from the peer's exit
+status, not from a number in the gate.
