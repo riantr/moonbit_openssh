@@ -137,6 +137,23 @@ pub fn public_file_text(pair : Ed25519KeyPair, comment : String) -> String {
 }
 
 ///|
+/// The public key LINE for this key pair -- what `ssh-keygen -y` prints.
+///
+/// `public_file_text` is the text of a FILE, so it ends with a newline.
+/// A printed line is a different thing: the newline comes from the print
+/// itself, and a line that already had one would end with two.
+///
+/// The line is the one OpenSSH writes: the key type, the base64 of the
+/// public blob, and the comment -- with a space in front of the comment
+/// and only if the comment is not empty (`do_print_public`,
+/// ssh-keygen.c:790).  A key with no comment therefore has no trailing
+/// space, and that is what this produces.
+pub fn public_line_text(pair : Ed25519KeyPair, comment : String) -> String {
+  let text = encode_public_line(pair.pk, comment)
+  text[0:text.length() - 1].to_owned()
+}
+
+///|
 /// Four random bytes for the check word.
 ///
 /// The check word is a random word written twice into the private block,
@@ -159,8 +176,5 @@ pub fn random_check_bytes() -> FixedArray[Byte] {
 /// over the same blob -- but `src/hostkey` is above this package in the
 /// dependency graph, so it is repeated here rather than inverted.
 pub fn fingerprint_text(pair : Ed25519KeyPair) -> String {
-  let blob = ed25519_public_blob(pair.pk)
-  let digest = @sha256.sha256(blob)
-  let padded = @base64.encode(Bytes::from_array(digest))
-  "SHA256:" + strip_padding(padded)
+  fingerprint_of_blob(ed25519_public_blob(pair.pk))
 }

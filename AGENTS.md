@@ -9410,3 +9410,180 @@ path, the artifact uploader's dotfile rule, and now the cache.  The shape
 is always the same: the thing that was supposed to make the work cheaper
 or more reliable is the thing that silently undid it, and it undid it in a
 way that looked like a defect in the subject.
+---
+
+## Loop #87: ssh-keygen can READ a key -- `-l`, `-y`, `-P`, `-E`
+
+Loop #85 made this repository able to MAKE a key and Loop #86 made it able
+to ENCRYPT one.  Loop #87 makes it able to READ one:
+
+    ssh-keygen -l -f <key>       the fingerprint
+    ssh-keygen -y -f <key>       the public key
+    ssh-keygen -y -P <pass> -f <key>    the public key of an encrypted one
+    ssh-keygen -l -E <hash> -f <key>    the fingerprint in another hash
+
+### The judge is the real tool, and the comparison is byte for byte
+
+The gate (`host/verify_loop87.mjs`) runs the REAL `ssh-keygen` and this
+tool with the SAME arguments and compares **the exit status, stdout and
+stderr, byte for byte**.  Byte for byte, and not "the same information":
+
+* **stdout** including the line ending.  OpenSSH writes CRLF on Windows
+  and so does this tool.
+* **stderr**, which is stricter than it sounds.  OpenSSH runs every
+  message through `strnvis` with `VIS_SAFE|VIS_OCTAL` (log.c:69), so a
+  path in an error message has its backslashes **doubled**:
+
+        ssh-keygen: E:\\src\\moon\\nope: No such file or directory
+
+  A tool that prints single backslashes there is a tool whose error
+  output can never be compared with OpenSSH's byte for byte, and the day
+  somebody needs that comparison is the day it has to be exact.
+* **the exit status**, which is **255** for every failure.
+
+### The rules, read out of the real tool
+
+The rules below were measured, not guessed.  The script that measured them
+is `.loop87/probe_truth.py`, and the transcript it produces is the reason
+each of these is here:
+
+* **`-l` on a PRIVATE key file asks for the PUBLIC key first**
+  (authfile.c:269).  The `.pub` file beside it decides the fingerprint
+  AND the comment, and the passphrase is never needed.
+* **A `.pub` FILE whose line has no comment is given the FILE's NAME as
+  its comment** (authfile.c:238, `strdup(*cp ? cp : filename)`).  So
+  `ssh-keygen -l -f key` can print the path where `ssh-keygen -l -f
+  key.pub` prints `no comment` -- for the same key, in the same second.
+* **A `.pub` LINE whose comment is empty, or whose comment starts with
+  `#`, is given NO comment** (ssh-keygen.c:989).  That is a DIFFERENT rule
+  in a DIFFERENT place, and the two disagree.
+* **`no comment` and an EMPTY comment are different strings, and the
+  difference is a space**: one space and two.
+
+        256 SHA256:... no comment (ED25519)
+        256 SHA256:...  (ED25519)
+
+* **`-l` on an ENCRYPTED key needs no passphrase at all**: the public blob
+  of an `openssh-key-v1` file is in the clear.  The COMMENT of that key
+  is in the enciphered block, so it cannot be read, and OpenSSH prints
+  `no comment` for it.
+* **`-y` always opens the PRIVATE file**, so it needs the passphrase for
+  an encrypted one.
+* **The two failure messages are different messages**: `-l` on a missing
+  file says `ssh-keygen: <path>: No such file or directory` and `-y` says
+  `<path>: No such file or directory`, with no program name in the second
+  one.  The reason is in the source: one format string names the program
+  and the other does not.
+
+### The one divergence, stated rather than hidden
+
+**`-E md5` is REFUSED.**  OpenSSH supports it and this repository has no
+MD5, so the honest answer is a refusal rather than a fingerprint in the
+wrong form:
+
+    $ ssh_keygen -l -E md5 -f key
+    ssh_keygen: only -E sha256 is supported, not md5
+
+An algorithm that NEITHER tool knows (`-E bogus`) gets OpenSSH's own
+words, byte for byte:
+
+    Invalid hash algorithm "bogus"
+
+The distinction matters: "this tool cannot print that fingerprint" and
+"that algorithm does not exist" are different claims, and only the second
+one is OpenSSH's to make.
+
+### Three mistakes that the byte comparison caught, and a rule for each
+
+The first version of this loop was wrong in three ways, and every one of
+them was invisible to a test that checked "does it produce a
+fingerprint":
+
+1. **`print` does not exist in MoonBit.**  There is `println` and
+   `eprintln`, and no `print`; a program that wants to write a line
+   without a trailing newline has to cut the newline off itself.  The
+   compiler said so (`The value identifier print is unbound`) and the
+   fix was to add `public_line_text` to `src/keyfile` -- the FILE text
+   ends with a newline and the printed LINE does not.
+
+2. **The type of a key line was read with the wrong function.**  The
+   parser wanted "where does the key type END", and used the function
+   that answers "where does the next word START".  The two are
+   interchangeable in a reader that only cares about the position of
+   the blob, and they are not interchangeable here: the type came out
+   as the empty string, so every line was "not ed25519", and the tool
+   said "is not a public key file" about a perfectly good key.  The
+   blob had the same disease: read with `skip_blanks` instead of
+   `end_of_word`, the base64 came out as the empty string.
+
+   **A position in a line is either the start of a word or the end of
+   one, and asking for the wrong one gives a plausible number.**  Both
+   of these were found by the byte comparison and by nothing else.
+
+3. **A MoonBit program CAN choose its exit status.**  Loop #86's gate
+   says in a comment that "MoonBit's `main` has no way to set an exit
+   status", and that comment was wrong: `moonbitlang/core/env` has
+   `exit(Int32)`, and `@env.exit(255)` sets the status exactly.
+   `abort` is the other thing -- it raises a failure, and the status
+   that comes out of that is the runtime's, not the program's.
+
+   **A tool that fails with 0 is a tool whose failure a script cannot
+   see**, and a tool that says why on stdout is a tool whose output
+   cannot be told apart from a key.  So: the errors go to stderr and
+   the status is 255, which is what OpenSSH does.
+
+### Where the rules live
+
+The rules live in `src/` and the driver translates them:
+
+* `src/keyfile/public.mbt` -- `parse_public_line`, `fingerprint_line`,
+  `fingerprint_of_blob`, `public_of_private_file`,
+  `private_file_is_encrypted`.
+* `src/keyfile/log.mbt` -- `escape_log_text`, OpenSSH's `strnvis`.
+* `src/keyfile/pair.mbt` -- `public_line_text`.
+* `cmd/ssh_keygen/main.mbt` -- the dispatch, and the messages.
+
+**The parser reports the FACT and the caller applies the RULE.**  The
+parser says "the comment in this line is `x`" or "this line has no
+comment"; it never says "so the comment is the file name".  That is
+because OpenSSH has two rules and they disagree, and a package that
+picked one of them would be wrong half the time.
+
+### The gate, the mutations, and the tests
+
+* `host/verify_loop87.mjs` -- 56 checks, in seven sections: the
+  toolchain, the real OpenSSH being present, the byte-for-byte
+  comparison, the two-way round trip, the failures, the digest option,
+  and the rules visible in the output.
+* `host/loop87_mutations.py` -- 17 mutations, each naming the check that
+  has to go red because of it.  The check name is matched as a WHOLE
+  LINE, not as a prefix: the gate has checks called "-l on a private key"
+  and "-l on a private key whose comment is empty", and a prefix match
+  would call the second one a hit for the first.
+* `src/keyfile/public_test.mbt` -- 15 tests.  The fingerprint vector in
+  them was computed independently and then CHECKED AGAINST THE REAL
+  TOOL:
+
+        $ ssh-keygen -l -f k.pub
+        256 SHA256:VvxuUNEw8QPYQxk4kv+N/5t0DKHxwyE4iYP0soz3a34 e2e@loop87 (ED25519)
+
+### The rules this makes explicit
+
+* **A byte comparison is a stronger judge than a test that asks a
+  question.**  All three mistakes above passed every unit test that
+  existed at the time and failed the byte comparison immediately.
+
+* **`repr()` of bytes doubles the backslashes, and so does `vis`.**  The
+  transcript of a `repr()` cannot tell ONE backslash from TWO, so the
+  first reading of the error output was wrong -- and the fix for it was
+  to print the hex and the backslash RUNS, not to read the transcript
+  harder.  (On the same note: PowerShell renders a native command's
+  stderr as an error record and doubles the backslashes there too.  The
+  exact bytes of a Windows tool are read with Python's `subprocess`.)
+
+* **A position in a line is either the start of a word or the end of
+  one, and asking for the wrong one gives a plausible number.**
+
+* **Two rules in the same program that disagree are not a bug in the
+  reader; they are a fact about the thing being read.**  The reader's
+  job is to report the fact and let the caller choose the rule.
