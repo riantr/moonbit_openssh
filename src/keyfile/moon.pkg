@@ -44,3 +44,17 @@ import {
   "openssh/openssh_moonbit/src/sha256",
   "openssh/openssh_moonbit/src/sshwire",
 }
+
+// Loop #88: the rewrite tests that draw a salt or a check word need an
+// entropy source, and the wasm targets have none -- `src/rng` says so
+// on purpose.  Those tests are compiled only where there is one, which
+// is the same split `src/rng` makes for its own tests.
+//
+// Without the split, `moon test src/keyfile` on wasm would be a red
+// run -- and a red run that means "there is no entropy here", not "the
+// code is wrong".  A gate that has to be read for its meaning is a
+// gate that gets ignored.
+
+options(
+  targets: { "rewrite_rng_test.mbt": [ "native", "js" ] },
+)

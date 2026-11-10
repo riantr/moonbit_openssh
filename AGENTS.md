@@ -9588,3 +9588,323 @@ picked one of them would be wrong half the time.
 * **Two rules in the same program that disagree are not a bug in the
   reader; they are a fact about the thing being read.**  The reader's
   job is to report the fact and let the caller choose the rule.
+
+---
+
+## Loop #88: ssh-keygen can REWRITE a key -- `-p` and `-c`
+
+Loop #85 made this repository able to MAKE a key, Loop #86 gave the file
+a passphrase, and Loop #87 made it able to READ one.  What was left was
+the middle of the story:
+
+    ssh-keygen -p -N <new> -f <key>       a new passphrase
+    ssh-keygen -c -C <new> -f <key>       a new comment
+
+A key file that can be read but not written again is a key file that can
+be created once and then never changed -- and changing a key file is
+what those two options are for.
+
+### The rules, read out of the real tool
+
+Every rule below was MEASURED, not guessed.  The scripts that measured
+them are `.loop88/probe_truth.py`, `.loop88/probe_more.py` and
+`.loop88/probe_three.py`, and `.loop88/compare_keygen88.py` is what
+holds this tool to them -- **byte for byte, the exit status, stdout and
+stderr, against the real `ssh-keygen`**.
+
+* **`-p` prints `Key has comment '<comment>'` BEFORE it writes
+  anything**, and `Your identification has been saved with the new
+  passphrase.` after it.  The comment of a key with no comment is an
+  EMPTY comment and not an absent one, so the line reads
+  `Key has comment ''`.
+
+* **`-c` prints `Old comment: <comment>`** -- and then exactly one of
+
+      Comment '<new>' applied
+      Comment removed            (the new comment is empty)
+      No change to comment       (the comment is already the one asked
+                                  for -- and then NOTHING is written)
+
+  An empty comment still prints: the line is `Old comment: ` with a
+  space and nothing after it.  And `-c -C ""` on a key that has no
+  comment is **not** a change: the two comments are equal, so the file
+  is left alone.
+
+* **`-p` does NOT touch the `.pub` file.  `-c` rewrites it** with the
+  new comment, and writes it even when it was not there before.
+
+* **Changing the comment does NOT change the passphrase.**  An
+  encrypted key is still encrypted with the same passphrase afterwards.
+
+* **An empty new passphrase takes the passphrase OFF the key**: the
+  file comes out unencrypted, and opens afterwards with no passphrase at
+  all.
+
+* **The EMPTY passphrase is tried FIRST.**  So `-p -P whatever` on a key
+  with no passphrase works, and the `-P` is never looked at.
+
+* **`-c` takes the CURRENT passphrase from `-P`, or from `-N` when there
+  is no `-P`** (ssh-keygen.c:1506).  That is OpenSSH's order and it is a
+  quirk worth naming: `-N` means "the new passphrase" in `-p` and "the
+  current passphrase" in `-c`.
+
+* **The two failure messages are DIFFERENT messages.**  `-p` says
+
+      Failed to load key <path>: incorrect passphrase supplied to decrypt private key
+
+  and `-c` says
+
+      Cannot load private key "<path>": incorrect passphrase supplied to decrypt private key
+
+  One has no quotes around the path and the other has them, and the
+  reason is in the source: one format string and the other
+  (ssh-keygen.c:1397 and ssh-keygen.c:1515).
+
+* **A file that is not there says so without the program name in front
+  of it**: `<path>: No such file or directory`.
+
+### The thing the output does NOT say
+
+**The stdout of a rewrite says almost nothing about the file it
+wrote.**  "Your identification has been saved with the new passphrase."
+is the same line whether the salt was drawn afresh or not, whether the
+round count is 24 or 1, whether the comment was written into the file
+at all, and whether the file is enciphered or not.
+
+So the gate does not only compare the output.  It looks at the FILE:
+
+| what | where in the file | why it matters |
+|---|---|---|
+| the salt | 16 bytes at offset 47 | the same salt and the same passphrase derive the same key, so a file that reuses its salt is a file whose OLD passphrase is still worth something |
+| the KDF round count | a big-endian word at offset 63 | it is the cost of guessing the passphrase; the default is 24 |
+| the cipher name | the string at offset 15 | it says whether the private block is enciphered at all |
+| the check word | 4 bytes at offset 98 of an UNENCRYPTED file | it is the tag that says "this file was deciphered with the passphrase it thinks it was" |
+
+**Two rewrites of the same key have to differ**, and that is a check
+the output cannot make.  OpenSSH draws the salt and the check word
+afresh every time it writes a file (`arc4random_buf(salt, SALT_LEN)`
+and `check = arc4random()` in `sshkey_private_to_blob2`), and so does
+this.
+
+**The round count of a rewrite is the DEFAULT, not the one the old file
+had.**  OpenSSH's `ssh-keygen` has ONE global `rounds`, which is 0
+unless `-a` was given, and `sshkey_private_to_blob2` turns a 0 into
+`DEFAULT_ROUNDS` (24).  So a file written with `-a 100` comes back with
+24 rounds after a `-p`.
+
+### Nothing here asks a question
+
+OpenSSH asks for the old passphrase, for the new one and for the new
+comment on the **TERMINAL** -- and with no terminal it does not fail,
+it **BLOCKS**.  Measured: `ssh-keygen -p -P "" -f key` with an empty
+stdin did not return in 120 seconds, and the probe had to be killed.
+
+So this tool refuses, and says which option is missing:
+
+    $ ssh_keygen -p -f key
+    ssh_keygen: give the new passphrase with -N
+
+**A tool that waits for an answer that is not coming is a tool that
+hangs**, and a tool that hangs is worse than a tool that refuses.
+
+**And a GATE that runs the real tool must never put it in a position
+to ask.**  This one did, and it cost an afternoon: the gate ran the
+real `ssh-keygen -y` against a key that the code under test was
+supposed to have de-enciphered -- and when the code was broken (which
+is what a mutation run does on purpose) the key was still enciphered,
+so the real tool asked for the passphrase **on the terminal** and sat
+there.  The gate hung, the mutation run hung with it, and a hung
+`ssh-keygen` outlived the timeout that was supposed to kill it.
+
+Every call now gives the passphrase, so the tool is never in a
+position to ask:
+
+    ssh-keygen -y -P "" -f key
+
+An enciphered file is then refused with a sentence, and an
+unenciphered one is opened as before -- the passphrase is ignored
+when there is nothing to decipher.
+
+**A gate has to be safe against the code it is testing being broken.**
+That is the whole point of a mutation run: the gate is asked to deal
+with a tree that does not work, and a gate that can be hung by a
+broken tree is a gate that cannot measure anything.
+
+### The divergences, stated rather than hidden
+
+* **`-p` and `-c` together**: OpenSSH prints the sentence and then its
+  whole usage text, and exits with **1**.  This tool prints the
+  sentence -- `Can only have one of -p and -c.` -- and exits with 1,
+  and does **not** print OpenSSH's usage: that text is OpenSSH's, it
+  changes from one release to the next, and a tool that prints another
+  tool's usage text is a tool that lies about what it can do.
+
+* **This tool does not check the Windows ACL of a file it reads.**  The
+  real tool refuses a file with wide permissions before it looks at the
+  contents, so on such a file it says what is wrong with the
+  permissions; this one says what is wrong with the file.
+
+* **This repository has ed25519 only**, so a rewrite of an RSA key is
+  refused rather than done.
+
+* **A rewritten file is made private again.**  OpenSSH writes with
+  `umask(077)`, which only affects a file that is CREATED, so a file
+  that was already there keeps the mode it had.  This repository is
+  stricter on purpose -- see `src/keyperm` -- and a key file that other
+  users can read is not a key file.
+
+### Where the rules live
+
+The rules live in `src/` and the driver translates them:
+
+* `src/keyfile/rewrite.mbt` -- `private_file_text_with_passphrase`
+  (an empty passphrase means an UNENCRYPTED file, and the salt and the
+  check word are drawn afresh) and `comment_is_unchanged`.
+* `src/keyfile/pair.mbt` -- `random_check_word`.
+* `cmd/ssh_keygen/main.mbt` -- the dispatch, the two modes, and the
+  messages.
+
+**The driver asks `src/keyfile` the question and translates the
+answer.**  It does not decide what a rewritten file looks like.
+
+### The gate, the mutations, and the tests
+
+* `host/verify_loop88.mjs` -- **106 checks**, in nine sections: the
+  toolchain, the real OpenSSH being present, the byte-for-byte
+  comparison (18 cases), the two-way round trip, the failures, the
+  rules visible in the output, what the FILE says (which the output
+  does not), the divergences, and the rules living in `src/`.
+
+  **Both tools are pointed at the SAME file, one after the other, and
+  the file is restored between the two runs.**  That matters for a
+  rewrite in a way it did not for a read: a rewrite CHANGES the file,
+  so the two tools cannot be pointed at two different copies without
+  changing what is being compared -- the path is IN the message, and
+  two files with two names have two messages.
+
+* `host/loop88_mutations.py` -- **16 mutations**, each naming the check
+  that has to go red because of it.  The check name is matched as a
+  WHOLE LINE, not as a prefix.
+
+* `src/keyfile/rewrite_test.mbt` and `src/keyfile/rewrite_rng_test.mbt`
+  -- 9 tests.  **They are split by target**, because a rewrite draws a
+  salt and a check word and drawing them needs an entropy source, and
+  the wasm targets have none (`src/rng` says so on purpose).  The split
+  is the same one `src/rng` makes for its own tests: without it,
+  `moon test src/keyfile` on wasm would be a red run -- and a red run
+  that means "there is no entropy here", not "the code is wrong".
+
+### Two anchors that had drifted, and one test that could not fail
+
+**A mutation whose anchor has drifted cannot be measured**, and the
+mutation script counts it as "not caught".  So a drifted anchor is a
+hole in the evidence that looks like coverage.  A scan of every
+mutation script in the repository (`.loop88/scan_anchors.py`) found two
+in Loop #85's, both of them left over from Loops #86 and #87:
+
+* "the fingerprint is computed over the seed instead of the public key"
+  pointed at the two lines of `fingerprint_text` that Loop #87 moved
+  into `fingerprint_of_blob`.  The anchor follows the code.
+
+* "the driver says the passphrase is unsupported and writes the key
+  anyway" pointed at a REFUSAL that Loop #86 removed, because Loop #86
+  gave the file a passphrase and there was nothing left to refuse.  It
+  was rewritten to stand for a rule that is still there: the driver
+  checks the protection the right way round.
+
+**A test that cannot fail is not a test.**  Loop #85's test "the
+encrypted file names the cipher and the KDF" ended with an assertion
+that the enciphered block's length is a whole number of AES blocks --
+and read that length from offset **74**, which is the low byte of the
+public blob's length field and not the block's length at all.  The
+assertion was true by accident: the byte it read was `0x33`, and
+`0x33000000` is a multiple of 16.  The offset is **126**, and the
+assertion now means what it says.
+
+### The gate was reading the comment out of the WRONG FILE
+
+Three of the sixteen mutations went through a green gate, and all three
+were the same mistake -- **the gate read the comment out of the `.pub`
+file**:
+
+    ssh-keygen -l -f <private key>    prints the comment of the .pub FILE
+    ssh-keygen -y -f <private key>    prints the comment of the PRIVATE BLOCK
+
+`-l` goes through `sshkey_try_load_public` (authfile.c:238), which
+tries `<key>.pub` first and uses it when it is there.  `-y` opens the
+private key itself and prints the comment that is inside it.
+
+**A `-p` does not touch the `.pub` file, so a `-l` cannot see anything a
+`-p` wrote.**  A rewrite that dropped the comment out of the private
+block left the `.pub` file exactly as it was, and the gate said PASS.
+The same is true of `-c`: it writes the two files from two different
+lines of the driver, so a `-c` that changed only the `.pub` file would
+have looked right as well.
+
+Measured, not assumed -- a key whose `.pub` file was rewritten by hand
+with another comment:
+
+    $ ssh-keygen -l -f k          # 256 SHA256:... public@probe (ED25519)
+    $ ssh-keygen -y -f k          # ssh-ed25519 AAAA... private@probe
+
+So the checks that ask about a comment after a rewrite ask with `-y`:
+
+    ssh-keygen -y -P <the new passphrase> -f <key>
+
+**A check that reads a different file from the one the code writes is
+not a weak check -- it is a check of nothing.**  It passes, always, and
+it looks like it is watching.  The three mutations it hid were not
+subtle defects: one dropped the comment out of an enciphered rewrite,
+one wrote the private file with the old comment, and one wrote the
+file somewhere else entirely.
+
+### The check name is matched WHOLE LINE, and that is not pedantry
+
+Two of the three remaining mutations were reported as "not caught" for a
+reason that had nothing to do with the code under test: the mutation
+named a check that the gate does not have.
+
+    the gate has:    the re-enciphered key is REALLY enciphered
+    the mutation had: a re-enciphered key is REALLY enciphered
+
+One word.  The matcher is a whole-line regular expression on purpose
+(the gate has checks whose names start with one another's), so a name
+that differs by one word does not match, and a mutation that names a
+check that does not exist can never be caught.
+
+**A mutation that names a check that does not exist is a hole that
+looks like coverage**, exactly like a drifted anchor.  The check name
+has to be COPIED OUT of the gate, and when the gate and the mutation
+list are edited apart, the two drift.  There is now a script for that
+(`.loop88/check_names88.py`) that reads the mutation list with `ast`
+-- a regular expression over the source text gets the names wrong,
+because half of them contain an apostrophe -- and compares them with
+the names the gate actually printed.
+
+### The rules this makes explicit
+
+* **The output of a command is not the file it produced.**  A rewrite
+  says the same three lines whether it wrote the right file or the
+  wrong one.  A gate that only compares the output calls a rewrite
+  that wrote an UNENCRYPTED key when it was asked to encipher one
+  correct -- and so does a test that only asks "did it print the
+  sentence?".
+
+* **A file that is rewritten in place has to be READ first, and the
+  two halves of the old file are not the same thing.**  The passphrase
+  is in the enciphered block and the public key is in the clear; a
+  rewrite that took the comment from the `.pub` file would put a
+  comment in the file that was never there.
+
+* **A tool that asks a question needs a terminal.**  Measured: the
+  real tool BLOCKS without one.  The honest answer for a tool that has
+  no terminal is to refuse and say what is missing.
+
+* **A rule that is checked by a byte comparison is a rule that cannot
+  drift quietly.**  Every one of the rules above was read out of the
+  real tool by running it, not by reading its source and hoping.
+
+* **A gate has to read the file the code WRITES.**  The `.pub` file and
+  the private block hold the same comment right up until a rewrite
+  makes them differ -- and then a check that reads the other one is a
+  check of nothing.  This one cost three mutations.

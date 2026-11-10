@@ -367,7 +367,14 @@ test "the_encrypted_file_names_the_cipher_and_the_kdf" {
   // Then the rounds, as a big-endian word.
   assert_eq(slice(blob, 63, 4), [0x00, 0x00, 0x00, 0x18])
   // The encrypted section is a whole number of AES blocks.
-  let enc_len = u32_at(blob, 74)
+  //
+  // The length is at 126, not at 74: everything before it has a
+  // fixed size (the magic, the two names, the KDF options, the key
+  // count and the public blob), and 74 is the last byte of the PUBLIC
+  // BLOB's length field.  Reading the length there gives a number
+  // that happens to be a multiple of 16 -- 0x33000000 is -- so the
+  // assertion was true by accident.
+  let enc_len = u32_at(blob, 126)
   assert_eq(enc_len.reinterpret_as_int() % 16, 0)
 }
 

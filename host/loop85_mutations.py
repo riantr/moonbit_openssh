@@ -238,11 +238,17 @@ MUTATIONS = [
         # it over something else -- the seed, say -- produces a perfectly
         # well-formed fingerprint of the wrong thing, and it is the one
         # number a user compares against another machine's number.
+        #
+        # **The anchor moved when Loop #87 moved the computation.**
+        # `fingerprint_text` used to compute the digest itself; now it
+        # hands the blob to `fingerprint_of_blob`, which is where the
+        # SHA-256 lives.  A mutation whose anchor has drifted cannot be
+        # measured at all, and one that cannot be measured is a hole in
+        # the evidence that looks like coverage -- so the anchor
+        # follows the code.
         "the fingerprint is computed over the seed instead of the public key",
-        "  let blob = ed25519_public_blob(pair.pk)\n"
-        "  let digest = @sha256.sha256(blob)\n",
-        "  let blob = ed25519_public_blob(pair.seed)\n"
-        "  let digest = @sha256.sha256(blob)\n",
+        "  fingerprint_of_blob(ed25519_public_blob(pair.pk))\n",
+        "  fingerprint_of_blob(ed25519_public_blob(pair.seed))\n",
         "the fingerprint OpenSSH prints is the one our tool printed",
     ),
     (
@@ -302,24 +308,27 @@ MUTATIONS = [
         "the private key file is readable by its owner only",
     ),
     (
-        # The refusal has to REFUSE.  A driver that prints "a passphrase is
-        # not supported" and then writes the key anyway is the exact failure
-        # this loop exists to avoid: the user asked for a passphrase, the
-        # tool said it could not do that, and the file on disk is not
-        # encrypted at all.
-        "the driver says the passphrase is unsupported and writes the key anyway",
-        '  if passphrase != "" && passphrase != "\\"\\"" {\n'
-        "    println(\n"
-        '      "ssh_keygen: a passphrase is not supported; the key would not be encrypted",\n'
-        "    )\n"
-        "    return\n"
-        "  }\n",
-        '  if passphrase != "" && passphrase != "\\"\\"" {\n'
-        "    println(\n"
-        '      "ssh_keygen: a passphrase is not supported; the key would not be encrypted",\n'
-        "    )\n"
-        "  }\n",
-        "no private key was written for the refused passphrase",
+        # The refusal has to REFUSE, and the check has to be checked the
+        # right way round.
+        #
+        # **This mutation used to be about the passphrase.**  Loop #85
+        # refused `-N secret` outright -- there was no KDF yet -- and
+        # the mutation was "the driver says the passphrase is
+        # unsupported and writes the key anyway".  Loop #86 gave the
+        # file a passphrase and REMOVED that refusal, so the mutation
+        # had nothing left to point at: its anchor had drifted, it
+        # could not be measured, and it counted as "not caught".
+        #
+        # A mutation that cannot be measured is a hole in the evidence
+        # that looks like coverage, so it was rewritten rather than
+        # left.  The rule it stands for now is one that is left: the
+        # driver checks the protection the right way round, and a
+        # driver that treats a SUCCESSFUL protection as a failure stops
+        # before the `.pub` file is written.
+        "the driver treats a successful protection as a failure",
+        "  if @keyperm.protect(priv_path) != 0 {\n",
+        "  if @keyperm.protect(priv_path) == 0 {\n",
+        "our ssh_keygen wrote a .pub file",
     ),
     (
         # An existing private key is never silently replaced.  The mode that

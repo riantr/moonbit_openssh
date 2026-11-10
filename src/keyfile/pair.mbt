@@ -168,6 +168,25 @@ pub fn random_check_bytes() -> FixedArray[Byte] {
 }
 
 ///|
+/// A fresh check word: four random bytes, read as a big-endian word.
+///
+/// The check word is written TWICE at the head of the private block, so
+/// that a reader can tell whether the file was deciphered with the
+/// passphrase it thinks it was.  OpenSSH's check word is a whole
+/// `arc4random()` word (`sshkey_private_to_blob2`), and the four bytes
+/// of it are what go on the wire -- most significant byte first.
+///
+/// The bytes come from the same source as the seed, and for the same
+/// reason: a value that must not repeat.
+pub fn random_check_word() -> UInt32 {
+  let b = random_check_bytes()
+  ((b[0].to_uint() << 24) & 0xFF000000U) |
+  ((b[1].to_uint() << 16) & 0x00FF0000U) |
+  ((b[2].to_uint() << 8) & 0x0000FF00U) |
+  (b[3].to_uint() & 0x000000FFU)
+}
+
+///|
 /// The fingerprint of this key, in the form `ssh-keygen -l` prints it.
 ///
 /// That is `SHA256:` followed by the base64 of the SHA-256 of the public

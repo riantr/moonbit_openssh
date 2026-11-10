@@ -51,6 +51,19 @@ async fn main {
   let mut want_public = false
   let mut read_passphrase = ""
   let mut digest = "sha256"
+  // Loop #88: the two rewrites, and the three "was this option given
+  // at all" flags.
+  //
+  // **The flags are not the same as an empty value.**  `-N ""` asks for
+  // an EMPTY passphrase -- which takes the passphrase OFF a key -- and
+  // no `-N` at all asks OpenSSH a question it asks on the terminal.
+  // Those two are very different, and a tool that cannot tell them
+  // apart either hangs or silently removes a passphrase.
+  let mut change_passphrase = false
+  let mut change_comment = false
+  let mut have_new_passphrase = false
+  let mut have_new_comment = false
+  let mut have_read_passphrase = false
   let mut i = 1
   while i < args.length() {
     let a = args[i]
@@ -63,18 +76,25 @@ async fn main {
     } else if a == "-C" && i + 1 < args.length() {
       i = i + 1
       comment = args[i]
+      have_new_comment = true
     } else if a == "-N" && i + 1 < args.length() {
       i = i + 1
       passphrase = args[i]
+      have_new_passphrase = true
     } else if a == "-a" && i + 1 < args.length() {
       i = i + 1
       rounds = parse_rounds(args[i])
     } else if a == "-P" && i + 1 < args.length() {
       i = i + 1
       read_passphrase = args[i]
+      have_read_passphrase = true
     } else if a == "-E" && i + 1 < args.length() {
       i = i + 1
       digest = args[i]
+    } else if a == "-p" {
+      change_passphrase = true
+    } else if a == "-c" {
+      change_comment = true
     } else if a == "-l" {
       want_fingerprint = true
     } else if a == "-y" {
@@ -86,6 +106,43 @@ async fn main {
       return
     }
     i = i + 1
+  }
+  // Loop #88: the two rewrites.
+  //
+  // `-p` and `-c` are the only options that change a key file that is
+  // already there, and they are checked BEFORE the digest: `-E` is
+  // about fingerprints, and a fingerprint is not what `-p` produces.
+  // (OpenSSH checks the digest inside `do_fingerprint`, which does not
+  // run for a rewrite at all, so `-p -E md5` is a rewrite for OpenSSH
+  // and not a refusal.)
+  //
+  // **Only one of them at a time.**  OpenSSH says so and exits with 1
+  // (ssh-keygen.c:3656):
+  //
+  //     Can only have one of -p and -c.
+  //
+  // OpenSSH then prints its whole usage text, and that text is not
+  // printed here: it is OpenSSH's, it changes from one release to the
+  // next, and a tool that prints another tool's usage text is a tool
+  // that lies about what it can do.  The sentence carries the meaning,
+  // so the sentence is what this prints.
+  if change_passphrase && change_comment {
+    eprintln("Can only have one of -p and -c.")
+    @env.exit(1)
+  }
+  if change_passphrase || change_comment {
+    rewrite_mode(RewriteRequest::{
+      path,
+      old_passphrase: read_passphrase,
+      have_old_passphrase: have_read_passphrase,
+      new_passphrase: passphrase,
+      have_new_passphrase,
+      new_comment: comment,
+      have_new_comment,
+      rounds,
+      change_passphrase,
+    })
+    return
   }
   // The digest algorithm is checked BEFORE anything is done, the way
   // OpenSSH checks it: it reads the option and refuses one it does not
@@ -132,8 +189,7 @@ async fn main {
   // OpenSSH's writer uses `arc4random()` for it; the point of it is that
   // the two copies in the file are equal, and the point of it being
   // random is that two key files do not look alike.
-  let check_bytes = random_check_bytes()
-  let check = check_word(check_bytes)
+  let check = @keyfile.random_check_word()
   let priv_text = if passphrase == "" {
     @keyfile.private_file_text(pair, comment, check)
   } else {
@@ -208,9 +264,12 @@ async fn main {
 /// `@keyfile.escape_log_text` -- because OpenSSH escapes every message
 /// it prints, and a message that is printed the way OpenSSH prints it
 /// has to be escaped the way OpenSSH escapes it.
+///
+/// **The work is done by `fail_with`.**  There is one place that
+/// prints and one place that exits, and a second copy of those two
+/// lines is a second place for them to drift apart in.
 fn fail(message : String) -> Unit {
-  eprintln(message)
-  @env.exit(255)
+  fail_with(message)
 }
 
 ///|
@@ -246,27 +305,6 @@ fn parse_rounds(text : String) -> Int32 {
     return 0
   }
   n
-}
-
-///|
-/// Four random bytes for the check word.
-///
-/// The check word is a random word that is written twice into the private
-/// block, so that a reader can tell whether the file was decrypted with
-/// the passphrase it thinks it was.
-///
-/// It comes from `src/rng`, the same source as the seed.
-fn random_check_bytes() -> FixedArray[Byte] {
-  @keyfile.random_check_bytes()
-}
-
-///|
-/// Four bytes as a big-endian word.
-fn check_word(b : FixedArray[Byte]) -> UInt32 {
-  ((b[0].to_uint() << 24) & 0xFF000000U) |
-  ((b[1].to_uint() << 16) & 0x00FF0000U) |
-  ((b[2].to_uint() << 8) & 0x0000FF00U) |
-  (b[3].to_uint() & 0x000000FFU)
 }
 
 ///|
@@ -538,4 +576,322 @@ fn print_public(path : String, text : String, read_passphrase : String) -> Unit 
     Malformed(why) => fail("Load key \"" + escaped(path) + "\": " + why)
     WrongPassphrase(why) => fail("Load key \"" + escaped(path) + "\": " + why)
   }
+}
+
+///|
+/// Loop #88: what a rewrite was asked to do.
+///
+/// The options of a run are its arguments; this is the subset of them
+/// that the rewrite path needs, gathered in one place so that the
+/// function that does the rewriting takes one argument instead of
+/// eight.
+struct RewriteRequest {
+  path : String
+  /// The passphrase the file is OPENED with: `-P`.
+  old_passphrase : String
+  have_old_passphrase : Bool
+  /// The passphrase the file is SAVED with.
+  ///
+  /// For `-p` it is the NEW passphrase (`-N`).  For `-c` it is the one
+  /// the file was opened with -- changing the comment does not change
+  /// the passphrase -- and `-N` is only the CURRENT passphrase when
+  /// there is no `-P`.
+  new_passphrase : String
+  have_new_passphrase : Bool
+  /// The comment the file is SAVED with: `-C`.
+  new_comment : String
+  have_new_comment : Bool
+  rounds : Int32
+  /// True for `-p`, false for `-c`.
+  change_passphrase : Bool
+}
+
+///|
+/// Rewrite a private key file: `-p` (a new passphrase) or `-c` (a new
+/// comment).
+///
+/// **The rules, all of them measured against the real tool.**  The
+/// scripts that measured them are `.loop88/probe_truth.py`,
+/// `.loop88/probe_more.py` and `.loop88/probe_three.py`, and the byte
+/// comparison in `.loop88/compare_keygen88.py` is what holds the two
+/// tools to them.
+///
+///   * `-p` prints `Key has comment '<comment>'` BEFORE it writes
+///     anything, and `Your identification has been saved with the new
+///     passphrase.` after.
+///   * `-c` prints `Old comment: <comment>`, and then one of
+///     `Comment '<new>' applied`, `Comment removed` (the new comment is
+///     empty) or `No change to comment` (the comment is already the one
+///     that was asked for -- and then NOTHING is written).
+///   * an EMPTY comment still prints: `Key has comment ''` and
+///     `Old comment: ` with a space and nothing after it.
+///   * `-p` does NOT touch the `.pub` file; `-c` rewrites it with the
+///     new comment, and writes it even when it was not there before.
+///   * changing the comment does NOT change the passphrase: an
+///     encrypted key is still encrypted with the same passphrase
+///     afterwards.
+///   * an empty new passphrase takes the passphrase OFF the key: the
+///     file comes out unencrypted.
+///   * the EMPTY passphrase is tried FIRST, so `-p -P whatever` on a
+///     key with no passphrase works and the `-P` is never looked at.
+///
+/// **The two failure messages are different messages.**  `-p` says
+/// `Failed to load key <path>: <why>` and `-c` says `Cannot load
+/// private key "<path>": <why>`.  The reason is in the source: one
+/// format string and the other (ssh-keygen.c:1397 and
+/// ssh-keygen.c:1515).
+///
+/// **A file that is not there says so without the program name in
+/// front of it**: `<path>: No such file or directory`.
+///
+/// **Nothing here asks a question.**  OpenSSH asks for the old
+/// passphrase, for the new one and for the new comment on the
+/// TERMINAL -- and with no terminal it does not fail, it BLOCKS.
+/// Measured: `ssh-keygen -p -P "" -f key` with an empty stdin did not
+/// return in 120 seconds.  A tool that waits for an answer that is not
+/// coming is a tool that hangs, so this one refuses and says what is
+/// missing.
+async fn rewrite_mode(req : RewriteRequest) -> Unit {
+  let path = req.path
+  if path == "" {
+    fail("ssh_keygen: -f <path> is required")
+    return
+  }
+  // OpenSSH stats the file before it opens it (ssh-keygen.c:1379), and
+  // the message for a file that is not there has the file's name in it
+  // and NO program name in front of it:
+  // `fatal("%s: %s", identity_file, strerror(errno))`.
+  if !@fs.exists(path) {
+    fail(escaped(path) + ": No such file or directory")
+    return
+  }
+  let text = match read_text(path) {
+    None => fail_with(escaped(path) + ": cannot be read")
+    Some(t) => t
+  }
+  // The passphrase that OPENS the file.
+  //
+  // OpenSSH tries the EMPTY passphrase first (ssh-keygen.c:1382), and
+  // only asks for the old one when the empty one is refused.  That is
+  // why `-p -P whatever` works on a key with no passphrase: the empty
+  // one opens it and the `-P` is never looked at.
+  let encrypted = @keyfile.private_file_is_encrypted(text)
+  let mut opening = ""
+  if encrypted {
+    if req.have_old_passphrase {
+      opening = req.old_passphrase
+    } else if !req.change_passphrase && req.have_new_passphrase {
+      // For `-c`, the CURRENT passphrase is `-P`, or `-N` when there
+      // is no `-P` (ssh-keygen.c:1506).  That is OpenSSH's order, and
+      // it is a quirk worth naming: `-N` means "the new passphrase" in
+      // `-p` and "the current passphrase" in `-c`.
+      opening = req.new_passphrase
+    } else {
+      // OpenSSH would ask for it on the terminal
+      // (ssh-keygen.c:1388).  There is no terminal here, and a tool
+      // that waits for an answer that is not coming is a tool that
+      // hangs.
+      fail(
+        "ssh_keygen: " +
+        escaped(path) +
+        " is an encrypted private key; give the passphrase with -P",
+      )
+      return
+    }
+  }
+  let loaded = if encrypted {
+    @keyfile.parse_private_file_with_passphrase(text, opening)
+  } else {
+    @keyfile.parse_private_file(text)
+  }
+  let (pair, comment) = match loaded {
+    Ed25519(pair, comment) => (pair, comment)
+    // OpenSSH's word for a wrong passphrase.  It is the same word in
+    // both modes, and it is not this repository's wording: a reader
+    // that says "the passphrase is wrong" is a reader that knows
+    // something the caller does not.
+    WrongPassphrase(_) =>
+      fail_with(
+        load_failure(
+          req, path, "incorrect passphrase supplied to decrypt private key",
+        ),
+      )
+    // OpenSSH's word for a file that is not a key file at all.
+    Malformed(_) => fail_with(load_failure(req, path, "invalid format"))
+    Unsupported(reason) => fail_with(load_failure(req, path, reason))
+  }
+  if req.change_passphrase {
+    // OpenSSH prints the comment it read BEFORE it writes anything
+    // (ssh-keygen.c:1400).  The comment of a key with no comment is an
+    // EMPTY comment and not an absent one, so the line reads
+    // `Key has comment ''`.
+    println("Key has comment '" + comment + "'")
+    if !req.have_new_passphrase {
+      // OpenSSH asks for the new passphrase twice
+      // (ssh-keygen.c:1407).  There is no terminal here, and an
+      // unanswered question is a hang.
+      fail("ssh_keygen: give the new passphrase with -N")
+      return
+    }
+    let text = @keyfile.private_file_text_with_passphrase(
+      pair,
+      comment,
+      req.new_passphrase,
+      req.rounds,
+    )
+    if text == "" {
+      // The KDF refused the arguments.  There is then no file to
+      // write, and a file that claims to be encrypted and is not is
+      // worse than no file at all.
+      fail("ssh_keygen: the passphrase could not be used")
+      return
+    }
+    if !save_private(path, text) {
+      return
+    }
+    println("Your identification has been saved with the new passphrase.")
+    return
+  }
+  // -c
+  //
+  // OpenSSH prints the comment it read (ssh-keygen.c:1529).  The
+  // comment of a key with no comment is an EMPTY comment and not an
+  // absent one, so the line is `Old comment: ` with a space and
+  // nothing after it.
+  println("Old comment: " + comment)
+  if !req.have_new_comment {
+    // OpenSSH asks for the new comment on the terminal
+    // (ssh-keygen.c:1536).  There is no terminal here.
+    fail("ssh_keygen: give the new comment with -C")
+    return
+  }
+  if @keyfile.comment_is_unchanged(comment, req.new_comment) {
+    // The comment is already the one that was asked for, so OpenSSH
+    // says so and writes NOTHING (ssh-keygen.c:1545).  Writing the
+    // file anyway would change the salt and the check word: a NEW
+    // file with the same contents.
+    println("No change to comment")
+    return
+  }
+  // The passphrase the file is SAVED with is the one it was OPENED
+  // with: changing the comment does not change the passphrase
+  // (ssh-keygen.c:1554).
+  let text = @keyfile.private_file_text_with_passphrase(
+    pair,
+    req.new_comment,
+    opening,
+    req.rounds,
+  )
+  if text == "" {
+    fail("ssh_keygen: the passphrase could not be used")
+    return
+  }
+  if !save_private(path, text) {
+    return
+  }
+  // The `.pub` file is rewritten too, with the new comment
+  // (ssh-keygen.c:1568).  OpenSSH writes it even when it was not there
+  // before.
+  let w = write_public(
+    path + ".pub",
+    @keyfile.public_file_text(pair, req.new_comment),
+  )
+  if w != "" {
+    fail("ssh_keygen: cannot write " + escaped(path) + ".pub: " + w)
+    return
+  }
+  if req.new_comment != "" {
+    println("Comment '" + req.new_comment + "' applied")
+  } else {
+    println("Comment removed")
+  }
+}
+
+///|
+/// The message for a file that could not be opened.
+///
+/// **The two modes have DIFFERENT messages, and the difference is in
+/// OpenSSH's source.**  `-p` says `Failed to load key %s`
+/// (ssh-keygen.c:1397) and `-c` says `Cannot load private key "%s"`
+/// (ssh-keygen.c:1515).  One has no quotes around the path and the
+/// other has them, and the path in both is escaped the way OpenSSH
+/// escapes a path in a message.
+fn load_failure(req : RewriteRequest, path : String, why : String) -> String {
+  if req.change_passphrase {
+    "Failed to load key " + escaped(path) + ": " + why
+  } else {
+    "Cannot load private key \"" + escaped(path) + "\": " + why
+  }
+}
+
+///|
+/// Write a rewritten private key file, and make it private again.
+///
+/// **The write is IN PLACE**, the way OpenSSH does it:
+/// `sshbuf_write_file` opens the file with O_TRUNC and writes over
+/// it.  A rewrite that wrote to a temporary file and renamed it would
+/// be a different operation -- and one that changes the file's inode,
+/// which a program holding the old one open would not notice.
+///
+/// **The file is made private again afterwards.**  OpenSSH does not do
+/// that: it writes with `umask(077)`, which only affects a file that
+/// is CREATED, so a file that was already there keeps the mode it
+/// had.  This repository is stricter on purpose -- see the note in
+/// `src/keyperm` -- and a key file that other users can read is not a
+/// key file.
+///
+/// The answer is whether it worked.  A failure has already been
+/// reported by the time this returns, and the caller has to stop.
+async fn save_private(path : String, text : String) -> Bool {
+  let w = rewrite_private(path, text)
+  if w != "" {
+    fail("ssh_keygen: cannot write " + escaped(path) + ": " + w)
+    return false
+  }
+  if @keyperm.protect(path) != 0 {
+    fail(
+      "ssh_keygen: cannot restrict " +
+      escaped(path) +
+      " to its owner; the key is readable by other users",
+    )
+    return false
+  }
+  true
+}
+
+///|
+/// Write a private key file over whatever is there.
+///
+/// This is the rewrite path, and it is DIFFERENT from the make path on
+/// purpose.  The make path uses `CreateNew`, so that running the tool
+/// twice cannot destroy a key that is already there.  The rewrite path
+/// is the one place where overwriting IS the job: OpenSSH writes the
+/// file it is rewriting in place, and a rewrite that refused to
+/// overwrite would refuse to do the one thing it is for.
+///
+/// The empty string means success and anything else is the reason it
+/// failed.
+async fn rewrite_private(path : String, text : String) -> String {
+  try {
+    @fs.write_file(path, text, create_mode=@fs.CreateMode::CreateOrTruncate)
+    ""
+  } catch {
+    e => e.to_string()
+  }
+}
+
+///|
+/// Fail, where a value of another type is expected.
+///
+/// `@env.exit` returns whatever type the caller asks for, so this can
+/// stand in for a value in a place where the value is not a `Unit` --
+/// a match arm that has to produce a pair, say.  The program never
+/// gets there: `exit` does not come back.
+///
+/// **This is the one place that prints and the one place that exits.**
+/// `fail` is the same thing for the places where a `Unit` is what is
+/// wanted, and there is no second copy of these two lines.
+fn[T] fail_with(message : String) -> T {
+  eprintln(message)
+  @env.exit(255)
 }
