@@ -1,0 +1,17 @@
+import {
+  "moonbitlang/core/env",
+  "openssh/openssh_moonbit/src/scp",
+  "openssh/openssh_moonbit/src/sftpdrive",
+  "openssh/openssh_moonbit/src/subproc",
+}
+
+pkgtype(kind: "executable")
+
+///| Native only: this driver spawns a child process and writes raw bytes
+/// to a file descriptor, neither of which a browser target can do.  The
+/// library it drives (`src/scp`) still builds on all four targets -- that
+/// is where the rules live and where the tests run.
+
+options(
+  supported_targets: "+native",
+)

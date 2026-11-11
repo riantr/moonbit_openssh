@@ -284,6 +284,11 @@ test "-P refuses out-of-range and non-numeric with the bad-port sentence" {
 ///|
 test "drive letters are local and multi-letter hosts are remote" {
   // The boundary, measured on both sides (rounds 8, 9, 10).
+  //
+  // machine-path-exempt: these strings are INPUTS to the is_remote rule,
+  // not files this machine is expected to have -- `C:\Windows\win.ini` is
+  // here because it is the shape a drive letter takes, and the rule is
+  // about colons, not about that file existing.
   let local_cases = [
     "a.txt", "C:\\Windows\\win.ini", "h:x", "a:b:c", ":x", "C:x", "no-colon-here",
   ]

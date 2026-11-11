@@ -43,6 +43,10 @@ priv struct RunContext {
   multi : Bool
   recursive : Bool
   preserve : Bool
+  /// a multi-source copy into a remote target that is not there yet
+  mut needs_target_dir : Bool
+  /// whether that directory has been made (only once)
+  mut target_dir_ready : Bool
 }
 
 ///|
@@ -66,6 +70,8 @@ pub fn run_copy(
     multi: sources.length() > 1,
     recursive: o.recursive,
     preserve: o.preserve,
+    needs_target_dir: false,
+    target_dir_ready: false,
   }
   let eng = match drive {
     Some(d) => Some(CopyEngine::new(fs, d))
@@ -118,14 +124,39 @@ fn preflight(
         if e.remote_is_dir(ctx.target_path) {
           true
         } else {
-          match e.ensure_remote_dir(ctx.target_path) {
-            Ok(_) => true
-            Err(why) => {
-              report.push(RemoteMkdir(ctx.target_path, why))
-              false
-            }
-          }
+          // Recorded, not made.  Measured: a multi-source copy in which no
+          // source exists leaves NO directory behind, so the mkdir belongs
+          // after the first source is known to be copyable -- see
+          // `ensure_target_dir`.
+          ctx.needs_target_dir = true
+          true
         }
+    }
+  }
+}
+
+///|
+/// Make the multi-source target directory, once, at the first source that
+/// is actually going to be copied.
+///
+/// `False` means "stop": a refused mkdir is fatal (measured, round 8
+/// scenario 30) and the report already says so.
+fn ensure_target_dir(
+  ctx : RunContext,
+  e : CopyEngine,
+  report : ScpReport,
+) -> Bool {
+  if !ctx.needs_target_dir || ctx.target_dir_ready {
+    return true
+  }
+  match e.ensure_remote_dir(ctx.target_path) {
+    Ok(_) => {
+      ctx.target_dir_ready = true
+      true
+    }
+    Err(why) => {
+      report.push(RemoteMkdir(ctx.target_path, why))
+      false
     }
   }
 }
@@ -218,6 +249,9 @@ fn copy_one_upload(
   match eng {
     None => report.push(Perror(ctx.target, "Connection lost"))
     Some(e) => {
+      if !ensure_target_dir(ctx, e, report) {
+        return
+      }
       let dest = dest_for(
         basename_of(src),
         ctx.target_path,
@@ -292,6 +326,9 @@ fn copy_one_remote(
   let is_dir = @sftpdrive.attrs_is_dir(attrs)
   if is_dir && !ctx.recursive {
     report.push(RemoteNotRegular(from))
+    return
+  }
+  if !ensure_target_dir(ctx, e, report) {
     return
   }
   let dest = dest_for(

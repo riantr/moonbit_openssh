@@ -10,7 +10,7 @@
         "crlf_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 123,
+      "uncovered_lines": 129,
       "files_reported": 8,
       "report": true
     },

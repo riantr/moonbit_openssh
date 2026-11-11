@@ -10221,6 +10221,81 @@ how a client finds an agent** -- the literal string
   check -- and those are exactly the parts where a wrong answer is a
   hang.
 
+## Loop #90: `scp` -- and `-D` as the cheapest honest oracle
+
+`scp` since OpenSSH 9.0 speaks SFTP, so this loop is `src/sftpdrive` (an
+interactive client: one request, look at the answer, decide) plus
+`src/scp` (the rules and a copy engine written over an abstract local
+filesystem) plus `cmd/scp`.  `src/subproc` exists because of the oracle
+below.
+
+**`scp -D <program>` runs the named program and speaks SFTP over its
+stdio.**  Pointed at the local `OpenSSH-Win64\sftp-server.exe` that is a
+full-duplex copy with **no network, no sshd and no key material** -- the
+cheapest comparison this repository has, and the reason this loop could be
+gated byte for byte at all.  Three traps, all measured:
+
+  * **A single-letter host is a DRIVE LETTER.**  `scp a.txt h:/out.txt`
+    answers `The system cannot find the drive specified.` -- `is_remote()`
+    on the Windows port refuses `X:` as a host.  Use a multi-character
+    name.
+  * **An absolute remote path ESCAPES the working tree.**  `realpath("/")`
+    on the Windows server answers exactly `/`, i.e. the current drive's
+    root.  Every remote path in the bed is relative, and scp and the
+    server share one cwd.
+  * `-D` passes the path as one argv element, so a path with a space works.
+
+**The sentences come from the STATUS CODE, not from the peer's text.**  For
+a missing file the local server sends `No such file` while the real tool
+prints `No such file or directory` (`ENOENT`'s text).  `SSH_FX_FAILURE`
+keeps the peer's own `Failure`.  A client that passes the peer's message
+through is wrong on the first row and right on the second, which is the
+worst kind of wrong.
+
+**Every failure is one line or two, and the split is not symmetric.**
+Upload: `dest open "x": ...` **then** `failed to upload file a to b`.  A
+top-level download: `open local "x": ...` and **nothing else**.  Inside a
+recursive download: `open local "x": ...` then
+`Download of file <absolute> to <y> failed`, once per child, and the walk
+**keeps going**.  Getting these symmetric is the natural mistake.
+
+**A multi-source destination is treated differently on the two sides.**  A
+local target that is missing or is a file is refused through `perror`
+(`local/out: No such file or directory`, **no `argv[0]: ` prefix**, exit 1)
+and nothing is copied; a **remote** target is `mkdir`'ed -- and a refusal
+there is `fatal()` at **255**.  And the mkdir happens **per source, after
+that source has been stat'ed**: two sources that do not exist leave no
+directory behind.  This loop's first version created it in a pre-flight and
+the gate caught the leftover empty directory.
+
+**`-p` preserves DIRECTORY times too, on both sides**, and a directory's
+time is written **after** its children -- writing a child moves the
+parent's mtime.
+
+**`eprintln` text-translates the whole string.**  Measured:
+`eprintln("A\nB")` emits `A\r\nB\r\n`.  That cannot express the `-P`
+refusal, whose embedded newline the real tool writes raw and which is
+captured as `bad port "0"\n\r\n` -- so the driver builds its bytes and
+writes them through a raw fd (`mb_scp_emit`), with `text_crlf` doing the
+conversion once.
+
+### Two lessons about gates, both from this loop
+
+**A gate can be green and empty.**  The first version of
+`host/verify_loop90.mjs` rebuilt the fixture before *each* side, which
+erased the files the scenario was about: 17 of 20 comparisons were two
+identical failures "passing".  The gate now builds the fixture once per
+side and carries a **non-vacuity** assertion -- a transfer must leave a
+named file on the real side, a refusal must have printed something.
+
+**A mutation's verdict order matters.**  `host/loop90_mutations.py` first
+treated a failing unit test as "did not build", which mislabelled six good
+mutations as INVALID: a mutation aimed at a rule the unit tests already pin
+turns the tests red *and* the gate red, and the verdict went to whichever
+marker matched first.  Consult the **named gate check** first, then the
+build check, then call it missed.  Result: 10 mutations, 10 caught, 0
+missed.
+
 ## The rest of the tool set -- what is done, and what is not
 
 The goal for this repository is the whole OpenSSH tool set in MoonBit.
@@ -10236,15 +10311,14 @@ client works" and "the repository is finished" are very different claims.
     ssh-add      Loop #89
     ssh-keyscan  cmd/ssh_keyscan
     sftp         the client, against internal-sftp
+    scp          Loop #90 -- upload, download, -r, -p, local-to-local and
+                 remote-to-remote, byte-comparable via `-D` (see below).
+                 NOT done: the SSH leg (no private-key-file capability yet)
     port forward the CLIENT half: direct-tcpip
 
 **Not started.**  These are the honest remainder, and each one needs a
 different kind of judgement about what "proven" means:
 
-    scp             small.  Since OpenSSH 9.0 `scp` speaks the SFTP
-                    protocol, so this is a thin client over src/sftp --
-                    and it can be compared byte for byte against the
-                    real `scp`, which is the same standard Loop #89 used.
     sftp-server     medium.  The SFTP subsystem SERVER.  Testable by
                     pointing the real `sftp` client at it, which is
                     stronger than a unit test and is the shape this

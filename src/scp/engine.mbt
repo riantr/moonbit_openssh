@@ -160,20 +160,46 @@ pub fn transfer_chunk() -> Int32 {
 ///|
 /// Map a drive error onto the sentence `scp` would print for it.
 ///
-/// A `Refused` keeps the **server's own message**: the two measured
-/// spellings out of the same bed are `No such file or directory` (an errno
-/// string the server got from the OS) and `Failure` (its own text for
-/// `SSH_FX_FAILURE`), and a client that translated either one would have
-/// to guess.
+/// ## The codes beat the server's message, and that was measured
+///
+/// Handing the server's own text through looked right until the bed
+/// disagreed: for a missing file the local `sftp-server.exe` sends
+/// `No such file`, while the real `scp` prints `No such file and
+/// directory`.  So the tool maps the **status code** to an errno and
+/// prints `strerror` of that, and the server's text is only a fallback.
+///
+/// Two rows are measured and they are not the same shape:
+///
+/// * `SSH_FX_NO_SUCH_FILE` (2) -> `No such file or directory`, which is
+///   `ENOENT`'s text (round 6 scenario 13, round 5 scenario 9);
+/// * `SSH_FX_FAILURE` (4) -> `Failure`, which is the server's own message
+///   and also what the tool printed for a refused `remote mkdir`
+///   (round 8 scenarios 30 and 31).
 ///
 /// `LinkFailed` has no measurement -- there is no way to make the bed's
 /// `sftp-server.exe` die between two packets on demand -- so it says so
 /// instead of inventing an errno.
 fn drive_reason(e : @sftpdrive.DriveError) -> String {
   match e {
-    @sftpdrive.DriveError::Refused(_, why) => why
+    @sftpdrive.DriveError::Refused(code, why) => code_reason(code, why)
     @sftpdrive.DriveError::Protocol(why) => why
     @sftpdrive.DriveError::LinkFailed => "Connection lost"
+  }
+}
+
+///|
+/// The sentence for one non-OK status code.
+///
+/// Codes 2 and 3 are the two the bed produced; the rest fall back to
+/// whatever the peer said, because a client that translated them would
+/// have to invent words for conditions it was never shown.
+fn code_reason(code : Int32, server_text : String) -> String {
+  if code == 2 {
+    reason_no_such_file()
+  } else if code == 3 {
+    reason_permission_denied()
+  } else {
+    server_text
   }
 }
 
