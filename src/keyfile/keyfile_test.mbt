@@ -138,6 +138,7 @@ test "a_private_key_file_round_trips_through_the_reader" {
       // makes the key usable rather than merely readable.
       assert_eq(hex_of(back.seed), hex_of(seed))
     }
+    Ecdsa(_, _) => abort("an ed25519 file was read as an ECDSA key")
     Malformed(why) => abort("the file did not parse: " + why)
     Unsupported(why) => abort("the file was not supported: " + why)
     WrongPassphrase(why) => abort("the passphrase was reported wrong: " + why)
@@ -172,6 +173,7 @@ test "a_file_that_is_not_a_key_file_is_reported_as_malformed" {
   match @keyfile.parse_private_file("hello") {
     Malformed(_) => ()
     Ed25519(_, _) => abort("a file that is not a key file was accepted")
+    Ecdsa(_, _) => abort("a file that is not a key file was accepted")
     Unsupported(why) =>
       abort("a file that is not a key file was reported as unsupported: " + why)
     WrongPassphrase(why) =>
@@ -201,6 +203,7 @@ test "a_file_whose_check_words_differ_is_refused" {
   match @keyfile.parse_private_file(patched) {
     Malformed(_) => ()
     Ed25519(_, _) => abort("a file with two different check words was accepted")
+    Ecdsa(_, _) => abort("a file with two different check words was accepted")
     Unsupported(why) => abort("it was reported as unsupported instead: " + why)
     WrongPassphrase(why) =>
       abort("it was reported as a wrong passphrase instead: " + why)
@@ -276,6 +279,7 @@ test "an_encrypted_private_key_file_round_trips_through_the_reader" {
       assert_eq(hex_of(back.sk), hex_of(pair.sk))
       assert_eq(hex_of(back.seed), hex_of(seed))
     }
+    Ecdsa(_, _) => abort("an encrypted ed25519 file was read as an ECDSA key")
     Malformed(why) => abort("the encrypted file did not parse: " + why)
     Unsupported(why) => abort("the encrypted file was not supported: " + why)
     WrongPassphrase(why) =>
@@ -301,6 +305,7 @@ test "an_encrypted_file_read_without_a_passphrase_is_unsupported" {
     Unsupported(why) => assert_true(why.contains("encrypted"))
     Malformed(why) => abort("it was reported as malformed instead: " + why)
     Ed25519(_, _) => abort("an encrypted file was read without a passphrase")
+    Ecdsa(_, _) => abort("an encrypted file was read without a passphrase")
     WrongPassphrase(why) =>
       abort("it was reported as a wrong passphrase instead: " + why)
   }
@@ -327,6 +332,7 @@ test "the_wrong_passphrase_says_the_passphrase_is_wrong" {
     Malformed(why) => abort("it was reported as malformed instead: " + why)
     Unsupported(why) => abort("it was reported as unsupported instead: " + why)
     Ed25519(_, _) => abort("a wrong passphrase still opened the file")
+    Ecdsa(_, _) => abort("a wrong passphrase still opened the file")
   }
 }
 
@@ -442,6 +448,7 @@ test "the_file_openssh_wrote_opens_with_its_passphrase" {
         "6fb449409fe85edc4b215f2a4fe7ac52a148864ddbf130cd4ef16014e7af2b70",
       )
     }
+    Ecdsa(_, _) => abort("OpenSSH's ed25519 file was read as an ECDSA key")
     Malformed(why) => abort("OpenSSH's own file did not parse: " + why)
     Unsupported(why) => abort("OpenSSH's own file was not supported: " + why)
     WrongPassphrase(why) =>
@@ -465,6 +472,7 @@ test "the_wrong_passphrase_on_openssh's_own_file_says_so" {
     Malformed(why) => abort("it was reported as malformed instead: " + why)
     Unsupported(why) => abort("it was reported as unsupported instead: " + why)
     Ed25519(_, _) => abort("a wrong passphrase still opened OpenSSH's file")
+    Ecdsa(_, _) => abort("a wrong passphrase still opened OpenSSH's file")
   }
 }
 
@@ -529,6 +537,7 @@ test "a_file_that_asks_for_too_many_rounds_is_refused" {
     Malformed(why) => assert_true(why.contains("rounds"))
     Unsupported(why) => abort("it was reported as unsupported instead: " + why)
     Ed25519(_, _) => abort("a file asking for two billion rounds was opened")
+    Ecdsa(_, _) => abort("a file asking for two billion rounds was opened")
     WrongPassphrase(why) =>
       abort("it was reported as a wrong passphrase instead: " + why)
   }
@@ -584,6 +593,7 @@ test "a_comment_that_is_not_ascii_survives_the_round_trip" {
       assert_eq(back_comment, comment)
       assert_eq(hex_of(back.pk), hex_of(pair.pk))
     }
+    Ecdsa(_, _) => abort("the round trip changed the key type")
     Malformed(why) => abort("the file did not parse: " + why)
     Unsupported(why) => abort("the file was not supported: " + why)
     WrongPassphrase(why) => abort("the passphrase was reported wrong: " + why)
@@ -613,6 +623,7 @@ test "a_comment_that_is_not_ascii_survives_the_encrypted_round_trip" {
       assert_eq(back_comment, comment)
       assert_eq(hex_of(back.pk), hex_of(pair.pk))
     }
+    Ecdsa(_, _) => abort("the encrypted round trip changed the key type")
     Malformed(why) => abort("the encrypted file did not parse: " + why)
     Unsupported(why) => abort("the encrypted file was not supported: " + why)
     WrongPassphrase(why) =>

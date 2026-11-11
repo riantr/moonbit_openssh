@@ -106,31 +106,77 @@ pub fn body_after_marker(text : String) -> Array[String] {
 /// ssh-ed25519 <base64 of the public blob> <comment>
 /// ```
 ///
-/// The base64 here is **unpadded**, unlike the private key file's.  That
-/// is not an inconsistency: OpenSSH writes the `authorized_keys` line
-/// with `b64_ntop` and the padding stripped, and the private key file
-/// with `b64_ntop` and the padding kept.  `src/knownhosts` already
-/// handles the unpadded form on the way in.
+/// The base64 here **keeps its `=` padding**, like the private key file's
+/// and unlike a fingerprint's.  An earlier note in this file said the
+/// opposite ("OpenSSH writes the `authorized_keys` line with `b64_ntop`
+/// and the padding stripped"); Loop #91 measured it and that note was
+/// wrong.  It was wrong in a way no ed25519 test could see: an ed25519
+/// public blob is 51 bytes, a whole multiple of three, so its base64 has
+/// no padding and stripping it changes nothing.  A P-256 blob is 104
+/// bytes and its line ends `...YJk/dc=`, which is what the real tool
+/// prints and what its `.pub` file holds.
 ///
 /// The comment may be empty, in which case the line has no trailing
 /// space either.
 pub fn encode_public_line(pk : FixedArray[Byte], comment : String) -> String {
-  let blob = ed25519_public_blob(pk)
-  let padded = @base64.encode(Bytes::from_array(blob))
-  let b64 = strip_padding(padded)
+  encode_public_line_of(KEY_TYPE, ed25519_public_blob(pk), comment)
+}
+
+///|
+/// The `authorized_keys` form of an arbitrary public blob.
+///
+/// Split out in Loop #91, when ECDSA arrived: `encode_public_line` was
+/// ed25519-only because it built the blob itself, and the ECDSA reader
+/// already *has* the blob (the file carries it verbatim, and the reader
+/// cross-checks it against the private half).  Building it a second time
+/// would be a second chance to disagree.
+///
+/// The line shape is measured, and the measurement was wrong until
+/// Loop #91: **the base64 keeps its `=` padding.**  This function used to
+/// call `strip_padding`, and it looked right, because an ed25519 public
+/// blob is 51 bytes -- a whole multiple of three -- so its base64 has no
+/// padding to strip.  The strip was never observable on the only key
+/// type that used it.
+///
+/// ECDSA makes it observable.  A P-256 blob is 104 bytes (one `=`), a
+/// P-384 blob 136 and a P-521 blob 172 (two `==` each), and the real
+/// `ssh-keygen` keeps every one of them:
+///
+/// ```
+/// $ ssh-keygen -y -f k256          # and k256.pub says the same
+/// ecdsa-sha2-nistp256 AAAA...YJk/dc= loop91
+/// ```
+///
+/// So the padding is kept here, and the difference from
+/// `fingerprint_of_blob` -- which does strip it -- is not a style choice
+/// but two different rules in OpenSSH: a public line is base64 of the
+/// blob as written, while a fingerprint is base64 with the padding
+/// removed (`fingerprint_b64`, sshkey.c:1031).
+pub fn encode_public_line_of(
+  key_type : String,
+  blob : FixedArray[Byte],
+  comment : String,
+) -> String {
+  let b64 = @base64.encode(Bytes::from_array(blob))
   if comment == "" {
-    KEY_TYPE + " " + b64 + "\n"
+    key_type + " " + b64 + "\n"
   } else {
-    KEY_TYPE + " " + b64 + " " + comment + "\n"
+    key_type + " " + b64 + " " + comment + "\n"
   }
 }
 
 ///|
 /// Remove the `=` padding from a base64 string.
 ///
-/// The padding is one or two `=` at the very end.  OpenSSH's
-/// `sshbuf_dtourlb64` does the same thing (sshbuf-misc.c:222) for the
-/// `authorized_keys` line.
+/// This is for **fingerprints**, not for public lines.  OpenSSH's
+/// `fingerprint_b64` (sshkey.c:1031) strips the padding, and a SHA-256
+/// digest is 32 bytes -- one short of a multiple of three -- so the strip
+/// there is real and observable: `SHA256:` is followed by 43 characters,
+/// not 44.
+///
+/// Loop #91: this used to be claimed for the `authorized_keys` line too
+/// (citing `sshbuf_dtourlb64`, sshbuf-misc.c:222).  That was measured and
+/// is wrong -- see `encode_public_line_of`.
 fn strip_padding(b64 : String) -> String {
   let n = b64.length()
   let mut end = n

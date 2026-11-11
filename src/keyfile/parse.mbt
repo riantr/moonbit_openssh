@@ -32,6 +32,13 @@
 pub(all) enum Parsed {
   /// The file was read and it is an unencrypted ed25519 key.
   Ed25519(Ed25519KeyPair, String)
+  /// The file was read and it is an unencrypted ECDSA key (Loop #91).
+  ///
+  /// A separate arm rather than a union with a tag, because the two keys
+  /// carry different facts: ed25519 has one 32-byte seed and ECDSA has a
+  /// curve, a point and a scalar.  Flattening them would give every caller
+  /// a field that is meaningless for its own key type.
+  Ecdsa(EcdsaKeyPair, String)
   /// The file is not an `openssh-key-v1` file at all.
   Malformed(String)
   /// The file is an `openssh-key-v1` file this reader cannot open --
@@ -258,6 +265,11 @@ fn parse_unencrypted(b : FixedArray[Byte], at : Int32) -> Parsed {
                         None => Parsed::Ed25519(pair, comment)
                         Some(why) => Parsed::Malformed(why)
                       }
+                    Parsed::Ecdsa(pair, comment) =>
+                      match check_ecdsa_envelope(pubblob, pair) {
+                        None => Parsed::Ecdsa(pair, comment)
+                        Some(why) => Parsed::Malformed(why)
+                      }
                     other => other
                   }
               }
@@ -478,6 +490,12 @@ fn parse_block(block : FixedArray[Byte], encrypted : Bool) -> Parsed {
     None => Parsed::Malformed("the key type is missing")
     Some((ktype, a1)) => {
       at = a1
+      // Loop #91: ECDSA keys carry their own fields (curve, point, scalar)
+      // and are parsed before the ed25519 shape is assumed, because the
+      // two blocks do not have the same field list.
+      if ecdsa_is_key_type(ktype) {
+        return parse_ecdsa_fields(block, at, ktype)
+      }
       if ktype != KEY_TYPE {
         return Parsed::Unsupported("the key type is " + ktype + ", not ed25519")
       }

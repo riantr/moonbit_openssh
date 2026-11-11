@@ -544,6 +544,12 @@ fn is_private_key_file(text : String) -> Bool {
 fn print_public(path : String, text : String, read_passphrase : String) -> Unit {
   match @keyfile.parse_private_file(text) {
     Ed25519(pair, comment) => println(@keyfile.public_line_text(pair, comment))
+    // Loop #91: `-y` prints the public half of any key this reader can
+    // open, and the line is built from the file's own point -- no private
+    // scalar is needed and nothing is written.  Measured against
+    // `ssh-keygen -y -f <p256 key>` byte for byte.
+    Ecdsa(pair, comment) =>
+      println(@keyfile.ecdsa_public_line_text(pair, comment))
     Unsupported(why) =>
       if read_passphrase == "" {
         if @keyfile.private_file_is_encrypted(text) {
@@ -563,6 +569,8 @@ fn print_public(path : String, text : String, read_passphrase : String) -> Unit 
           @keyfile.parse_private_file_with_passphrase(text, read_passphrase) {
           Ed25519(pair, comment) =>
             println(@keyfile.public_line_text(pair, comment))
+          Ecdsa(pair, comment) =>
+            println(@keyfile.ecdsa_public_line_text(pair, comment))
           WrongPassphrase(_) =>
             fail(
               "Load key \"" +
@@ -706,6 +714,17 @@ async fn rewrite_mode(req : RewriteRequest) -> Unit {
   }
   let (pair, comment) = match loaded {
     Ed25519(pair, comment) => (pair, comment)
+    // Loop #91: `-y` reads an ECDSA key, but a rewrite (`-c`, `-p`) has
+    // to write one back, and this writer still writes ed25519 only.  The
+    // refusal is here rather than deeper because this is the last point
+    // where the file is known to be good and the operation known to be
+    // unimplemented; failing here cannot leave a half-written file.
+    Ecdsa(_, _) =>
+      fail_with(
+        load_failure(
+          req, path, "this tool rewrites ed25519 keys, and this is an ECDSA key",
+        ),
+      )
     // OpenSSH's word for a wrong passphrase.  It is the same word in
     // both modes, and it is not this repository's wording: a reader
     // that says "the passphrase is wrong" is a reader that knows

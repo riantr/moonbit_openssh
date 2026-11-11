@@ -127,6 +127,13 @@ pub fn ed25519_public_of_blob(blob : FixedArray[Byte]) -> FixedArray[Byte]? {
 /// 尾随空格,而 OpenSSH 的 `ssh-add -L` 是先打印公钥行、再打印
 /// `" " + 注释`,所以它的注释为空时**有一个尾随空格**。这里给的是
 /// `ssh-add -L` 那种,所以空格是无条件的。
+///
+/// **Loop #91:下面的 `strip_padding` 在这里是空操作,而且无从实测。**
+/// 这个函数只接受 ed25519 的公钥 blob(51 字节 = 3 × 17),base64 本来
+/// 就不产生 `=`,所以"剥"与"不剥"在这一行上不可观测。同一套写法在
+/// `encode_public_line_of` 那里已经**被实测证伪**:ECDSA 的公钥行是带
+/// `=` 的。这里保留原样,是因为改了也无法用真工具验证;等有 RSA 这条
+/// 路(blob 长度不是 3 的倍数)时再连同证据一起改。
 pub fn public_line_of_blob(blob : FixedArray[Byte], comment : String) -> String {
   if ed25519_public_of_blob(blob) is None {
     return ""
