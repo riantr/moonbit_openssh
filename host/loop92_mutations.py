@@ -31,8 +31,8 @@ writing the gate, and they are the interesting ones:
   * The permission word's "other" field was a constant.  It is the access
     control list's, and it is the difference between `0o100600` and
     `0o100607` -- so a constant is right in one directory and wrong in
-    every other one.  The gate found it because the bed is on `E:\\`, whose
-    ACL grants "everybody" more than the temp directory's does.
+    every other one.  The gate found it because the bed sits on a drive
+    whose ACL grants "everybody" more than the temp directory's does.
 
   * The real server answers 4096 for a directory's size in a STAT and 0 in
     a listing.  Two different questions, two different answers, and the
@@ -158,11 +158,30 @@ MUTATIONS = [
     ),
     (
         # The permission word the server reports for an OPEN file, which is
-        # FSTAT's and not STAT's.
+        # FSTAT's and not STAT's.  The read-only file's answer is 33060, and
+        # it is a different number -- so the gate has to FSTAT a read-only
+        # file to reach that branch at all.
         "FSTAT reports STAT's permission word",
         "pub fn fstat_perm_word(is_readonly : Bool) -> Int32 {\n  if is_readonly {\n    33060",
         "pub fn fstat_perm_word(is_readonly : Bool) -> Int32 {\n  if is_readonly {\n    33024",
-        "FSTAT of an open file",
+        "FSTAT of a read-only file",
+    ),
+    (
+        # The read-only file's STAT word is built on 33024, not on 33152.
+        # The gate stats a writable file AND a read-only one for exactly
+        # this reason.
+        "a read-only file is given the writable file's permission word",
+        "else if is_readonly { 33024 }",
+        "else if is_readonly { 33152 }",
+        "STAT of a file and of a missing path",
+    ),
+    (
+        # The write bit is taken off the ACL's answer for a read-only file:
+        # the ACL grants 7 and the read-only file answers 5.
+        "a read-only file keeps the ACL's write bit",
+        "let other = if is_readonly { other_bits & 5 } else { other_bits & 7 }",
+        "let other = if is_readonly { other_bits & 7 } else { other_bits & 7 }",
+        "STAT of a file and of a missing path",
     ),
 ]
 

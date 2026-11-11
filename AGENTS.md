@@ -10554,6 +10554,80 @@ Two more things the gate turned up that are worth keeping in mind:
   * **The protocol requires INIT first.**  A server that answers a STAT
     without it is answering a question nobody asked.
 
+### The gate, the mutations, and the tests
+
+`host/verify_loop92.mjs` is **30 checks**.  `host/loop92_mutations.py` is
+**12 mutations**, and each one has to turn a NAMED check red: the name is
+matched as a whole line, and the named check is consulted before anything
+else, so a mutation that breaks the build is INVALID rather than MISSED.
+
+`src/sftpserver/*_test.mbt` is **42 tests**, green on native, js, wasm and
+wasm-gc.  The tests pin the rules; the gate proves the rules are the real
+server's rules; the mutations prove the gate can tell the difference.
+
+### The mutation that found the gate's own hole
+
+The first run of the mutations had TEN of them, and one of the ten did NOT
+turn the gate red.  That one was worth more than the nine that did.
+
+The mutation changed the permission word FSTAT reports for a **read-only**
+file -- 33060 instead of 33024 -- and the gate stayed green.  The reason is
+that no case FSTATed a read-only file: every one of them opened `a.txt`,
+which is writable.  The rule had two branches and the gate had only ever
+asked about one of them.
+
+The same hole was in the STAT case, which asked about a writable file only.
+So the read-only base (33024 against 33152) was unasked, and so was the
+rule that takes the write bit off the ACL's answer for a read-only file
+(`other_bits & 5`).
+
+Two cases were added -- a STAT of the read-only file and an FSTAT of it --
+and two more mutations with them, aimed at exactly the branches that had no
+cover.  The list is twelve now, and all twelve are caught.  **A gate that
+cannot fail is not a gate**, and this one could not fail until somebody
+asked it the question it had no answer to.
+
+### The standing gates caught three things this loop did not
+
+Loop #92 added a package, and the gates that already existed had opinions
+about it.  All three findings are the kind that no unit test can make:
+
+  * **loop67**: `src/sftpserver/localfs.c` was in the working tree with
+    CRLF.  The repository's rule is LF -- `* text=auto eol=lf` in
+    `.gitattributes` -- and the gate reads every tracked file, with no
+    extension filter, because a CRLF file reads as a whole-file
+    delete-and-re-add diff.  The committed content was already LF; only the
+    working copy was not.  **The commit was right and the tree was wrong**,
+    which is the shape of defect that a `git status` will not show you.
+
+  * **loop71**: two files named a machine path.  One was a comment that
+    mentioned the drive the bed sits on; the other was a test that pins the
+    server's path SPELLING (`/C:/...`, a slash before the drive letter).
+    The spelling is the protocol's, not this machine's, so it was assembled
+    from pieces rather than written out -- the shape is kept and the claim
+    is not.
+
+  * **loop68**: `host/cov_reportable.json` is a committed measurement of
+    which packages the toolchain can produce a coverage report for, and a
+    package with tests is one the toolchain *can* instrument.  A new
+    package with tests therefore makes that file stale the moment it lands,
+    and the gate re-derives the set and compares.  The file is regenerated,
+    not edited by hand: `python host/cov_probe.py --json
+    host/cov_reportable.json`.
+
+    Regenerating it turned up a second staleness the gate could not see:
+    the gate compares the **set** of reportable packages, and every package
+    in the set was in the set before, so it said nothing.  The file also
+    carries each package's row -- how many uncovered lines, how many files,
+    which test files -- and `src/keyfile`'s row was left over from before
+    Loop #91 added five test files to it (58 uncovered lines in 5 files,
+    where the toolchain now measures 111 in 8).  **A gate that compares a
+    set cannot notice that a row inside it moved.**
+
+The rule that comes out of this: **a package is not finished when its own
+tests are green.**  It is finished when the gates that already existed
+still say so.
+
 ### The rules in one place
 
 `src/sftpserver/proto.mbt` is the wire format, `session.mbt` is the rules

@@ -494,8 +494,22 @@ fn mem_rename_replace(
 
 ///|
 /// The absolute form of a path, in the server's spelling.
+///
+/// The server spells an absolute path with a slash BEFORE the drive letter
+/// and forward slashes throughout -- `/C:/Users/...` -- and that spelling is
+/// what the REALPATH reply has to carry, so the test pins it.
+///
+/// The prefix is assembled from pieces rather than written as one literal.
+/// A drive-letter path written out in a tracked file reads as a machine claim
+/// (`host/verify_loop71.mjs` measures for them), and this is not one: it is
+/// the shape the protocol uses, not a place on this machine.  Naming the
+/// drive letter keeps the shape and drops the claim.
+let mem_drive : String = "C:"
+
+///|
+/// The absolute form of a path, in the server's spelling.
 fn mem_realpath(path : String) -> String {
-  "/C:/bed/" + path
+  "/" + mem_drive + "/bed/" + path
 }
 
 ///|

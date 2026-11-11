@@ -1,41 +1,6 @@
 {
   "rows": [
     {
-      "package": "src/scp",
-      "test_files": [
-        "args_test.mbt",
-        "msg_test.mbt",
-        "copy_test.mbt",
-        "engine_test.mbt",
-        "crlf_test.mbt"
-      ],
-      "exit": 0,
-      "uncovered_lines": 129,
-      "files_reported": 8,
-      "report": true
-    },
-    {
-      "package": "src/sftpdrive",
-      "test_files": [
-        "drive_test.mbt"
-      ],
-      "exit": 0,
-      "uncovered_lines": 32,
-      "files_reported": 1,
-      "report": true
-    },
-    {
-      "package": "src/subproc",
-      "test_files": [
-        "subproc_native_test.mbt",
-        "subproc_stub_test.mbt"
-      ],
-      "exit": 0,
-      "uncovered_lines": 26,
-      "files_reported": 2,
-      "report": true
-    },
-    {
       "package": "src/aead",
       "test_files": [
         "aead_test.mbt",
@@ -197,11 +162,15 @@
     {
       "package": "src/keyfile",
       "test_files": [
-        "keyfile_test.mbt"
+        "ecdsa_test.mbt",
+        "keyfile_test.mbt",
+        "public_test.mbt",
+        "rewrite_rng_test.mbt",
+        "rewrite_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 58,
-      "files_reported": 5,
+      "uncovered_lines": 111,
+      "files_reported": 8,
       "report": true
     },
     {
@@ -250,6 +219,42 @@
       "report": true
     },
     {
+      "package": "src/scp",
+      "test_files": [
+        "args_test.mbt",
+        "copy_test.mbt",
+        "crlf_test.mbt",
+        "engine_test.mbt",
+        "msg_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 129,
+      "files_reported": 8,
+      "report": true
+    },
+    {
+      "package": "src/sftpdrive",
+      "test_files": [
+        "drive_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 32,
+      "files_reported": 1,
+      "report": true
+    },
+    {
+      "package": "src/sftpserver",
+      "test_files": [
+        "longname_test.mbt",
+        "proto_test.mbt",
+        "session_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 88,
+      "files_reported": 4,
+      "report": true
+    },
+    {
       "package": "src/sha256",
       "test_files": [
         "sha256_test.mbt",
@@ -278,6 +283,17 @@
       ],
       "exit": 0,
       "uncovered_lines": 21,
+      "files_reported": 2,
+      "report": true
+    },
+    {
+      "package": "src/subproc",
+      "test_files": [
+        "subproc_native_test.mbt",
+        "subproc_stub_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 26,
       "files_reported": 2,
       "report": true
     },
@@ -326,6 +342,7 @@
     "src/rng",
     "src/scp",
     "src/sftpdrive",
+    "src/sftpserver",
     "src/sha256",
     "src/sha512",
     "src/sshconfig",

@@ -383,7 +383,15 @@ const CASES = [
   },
   {
     name: "STAT of a file and of a missing path",
-    steps: [[rStat(1, "a.txt"), 1], [rStat(2, "nope.txt"), 1]],
+    // The read-only file is in here on purpose.  Its permission word is a
+    // DIFFERENT base (33024 against 33152) and the ACL's write bit is taken
+    // off it, so a case that only stats a writable file never reaches
+    // either of those rules.
+    steps: [
+      [rStat(1, "a.txt"), 1],
+      [rStat(2, "nope.txt"), 1],
+      [rStat(31, "ro.txt"), 1],
+    ],
   },
   {
     name: "LSTAT answers the same as STAT",
@@ -481,6 +489,17 @@ const CASES = [
       [rOpen(1, "a.txt", FXF_READ), 1],
       [rFstat(2, Buffer.from([0, 0, 0, 0])), 1],
       [rClose(3, Buffer.from([0, 0, 0, 0])), 1],
+    ],
+  },
+  {
+    name: "FSTAT of a read-only file",
+    // The read-only file's FSTAT word is 33060, and it is a different number
+    // from the writable file's 33206 -- so a gate that only FSTATs a
+    // writable file never reaches the other branch of the rule.
+    steps: [
+      [rOpen(32, "ro.txt", FXF_READ), 1],
+      [rFstat(33, Buffer.from([0, 0, 0, 0])), 1],
+      [rClose(34, Buffer.from([0, 0, 0, 0])), 1],
     ],
   },
   {
