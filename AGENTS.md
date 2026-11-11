@@ -10428,6 +10428,148 @@ called in their own file (`hex_of`, `slice`, `u32_at`) are not.  The fix is
 to move a helper into the file that uses it -- not to delete working code
 because a warning named it.
 
+## Loop #92: `sftp-server` -- the server half of SFTP
+
+`src/sftp` is the client: it builds requests and parses replies.  This loop
+built the **mirror** -- `src/sftpserver` parses requests and builds replies --
+and `cmd/sftp_server` is the driver that speaks it over standard input and
+output.  That is the same program `sshd` runs for the `sftp` subsystem, and
+the same one `scp -D <program>` runs to speak SFTP over a pipe.
+
+**The wire format keeps ONE implementation.**  The cursor, the string
+encoders, the attrs encoder and the framing are all `src/sftp`'s; this
+package adds only the direction that did not exist.  The same argument
+`src/sftpdrive` made one layer up.
+
+The rules live in `src/sftpserver` and the filesystem behind them is an
+**interface** (`ServerFs`, a bundle of fifteen function values), the same
+move `src/scp` made with `LocalFs`.  So the state machine can be asked for
+things a real disk cannot be asked for -- a directory with 250 entries, a
+read-only file, a path that is not there -- and every answer can be
+compared against the bytes the real server sent for the same situation.
+`src/sftpserver/*_test.mbt` does that on **all four targets**: 42 tests,
+green on native, js, wasm and wasm-gc.
+
+### The oracle: the real `sftp-server.exe`, byte for byte
+
+`host/verify_loop92.mjs` sends the SAME requests to two servers -- the real
+`sftp-server.exe` on this machine and ours -- and compares the replies
+**byte for byte**, plus the tree that is left on the disk.  Comparing two
+servers against each other is the only way to see the differences that
+matter: a reply can be "correct" in isolation and still differ from the one
+a real client is written against.
+
+Two things about the bed are load-bearing:
+
+  * **The times are pinned.**  A STAT reply carries the file's access time,
+    and the first server to read the file can change it -- which would make
+    the second server's answer differ for a reason that has nothing to do
+    with behaviour.  Every file AND every directory is stamped with the
+    same instant before EACH server runs.  The directories are stamped last
+    and bottom up, because writing a file inside a directory changes that
+    directory's own time.
+  * **Every case opens with INIT.**  The real server waits for it before it
+    answers anything at all, so a case that started with a STAT would see
+    the real server answer nothing -- which is correct behaviour and would
+    look like a difference in every later reply.
+
+### What was measured, and what it cost to get wrong
+
+| the fact | the number | where it came from |
+|---|---|---|
+| VERSION carries six extensions, not eleven | 179 bytes | `probe2.py` |
+| the STATUS sentences are a closed set | seven | `probe3.py`, `probe6.py`, `probe10.py` |
+| a handle is a SLOT, not a counter | 0, 1, then 0 again | `probe8.py` |
+| a listing is cut into batches of a hundred | 100, 100, 50 | `probe8.py` |
+| an enumeration ends with STATUS EOF, not an empty NAME | 1 | `probe_out.txt` |
+| a READ never returns more than 65536 bytes | 65536 | `probe3.py` |
+| an unknown request TYPE gets NO reply | silence | `probe3.py` |
+| an unknown EXTENSION is refused | 8 | `probe3.py` |
+| the date column changes form at an age of 15768000 s | half a year | `probe5.py` |
+| the size column is `%8llu` and GROWS | 123456789 shifts the date | `probe2.py` |
+| a directory's size is the filesystem's own number | 0, 0, 4096, 24576 | `probe_dirsize2.py` |
+
+The date rule was checked against **all 23 recorded longname lines** before
+it was written down (`.loop92/longname_rule.py` replays them and compares),
+so what went into the code is the rule and not one lucky example.
+
+### The four defects the gate found
+
+They are the reason the gate exists, and none of them would have been found
+by a unit test that only checked its own ideas.
+
+  1. **The `longname` had SEVEN spaces too few** between the group column
+     and the size.  Every listing differed by seven characters per line.
+     The layout is `mode(10) + "    1" + " -        -" + EIGHT spaces +
+     size(%8llu) + " " + date(12) + " " + name`, and the eight spaces are
+     the gap the `ls -l` layout leaves for a group column wide enough to
+     hold a name.
+
+  2. **The permission word's "other" field is the access control list's.**
+     A writable file answers `0o100600` under the temp directory and
+     `0o100607` under `E:\` -- the same file, and the difference is exactly
+     the "other" field.  `.loop92/probe_acl2.py` grants ONE ACE per
+     directory and reads the number back:
+
+         | the ACL says | the "other" field |
+         |---|---|
+         | `Everyone:(M)` | 7 |
+         | `Everyone:(GR,GE)` | 5 |
+         | `Authenticated Users:(M)` | 7 |
+         | `Authenticated Users:(GR,GE)` | 5 |
+         | `BUILTIN\Users:(M)` | 0 |
+         | `BUILTIN\Users:(RX)` | 0 |
+         | nothing | 0 |
+
+     Two things are worth noticing: the rights that count are the GENERIC
+     ones (an ACE granted the specific `(RX)` moved nothing), and only the
+     two classes that stand for EVERYBODY count -- not the groups the user
+     happens to be in.  A read-only file has the write bit taken off the
+     ACL's answer.  `localfs.c` reads the ACL with
+     `GetNamedSecurityInfoW` and `advapi32`; `FSTAT` does **not** consult
+     it (it repeats the owner's bits into the group and other columns, and
+     answers `0o100666` in both directories).
+
+  3. **A directory's size is the FILESYSTEM's number, and it is not a
+     constant.**  Measured with the real server, a directory with 0, 1, 16
+     and 120 entries answers 0, 0, 4096 and 24576 -- the NTFS index, in
+     4096-byte clusters.  An early note in this loop said "a directory is
+     4096", because the one directory it happened to measure had 16
+     entries in it.  The rule is "whatever the platform says", and the
+     platform's number is what `GetFileAttributesExW` already returns.
+
+  4. **`localfs.c` had never been compiled.**  `moon check` does NOT build
+     the native stub -- only `moon test` and `moon build` do -- so a file
+     with a struct type that does not exist (`WIN32_FILE_ATTRIBUTE_DATA`
+     has no `cFileName`) and an uninitialised pointer in it sat there
+     green.  **A package that has C in it must be built, not checked.**
+
+Two more things the gate turned up that are worth keeping in mind:
+
+  * **The session must not invent handle numbers.**  The first version
+    allocated a slot of its own and ignored the filesystem's number, which
+    meant the reply could say one number and the table look up another.
+    The handle number IS the filesystem's, and the session records what it
+    was given.
+  * **The protocol requires INIT first.**  A server that answers a STAT
+    without it is answering a question nobody asked.
+
+### The rules in one place
+
+`src/sftpserver/proto.mbt` is the wire format, `session.mbt` is the rules
+(which request produces which reply), `longname.mbt` is the `ls -l` line,
+and `localfs.c` is the only platform code.  `cmd/sftp_server` decides
+nothing: it frames requests off standard input and writes the replies back,
+and it is native only because it reads and writes a file descriptor.
+
+`posix-rename@openssh.com` is implemented because the real server
+implements it -- and it REPLACES the target, which the draft's `FXP_RENAME`
+refuses to do (`4 Failure` for the same pair of files).  The other five
+extensions the real server advertises are not implemented, and an
+extension this server does not know answers `8 Operation unsupported`,
+which is a different thing from an unknown request TYPE, which gets no
+reply at all.
+
 ## The rest of the tool set -- what is done, and what is not
 
 The goal for this repository is the whole OpenSSH tool set in MoonBit.
@@ -10447,15 +10589,14 @@ client works" and "the repository is finished" are very different claims.
                  remote-to-remote, byte-comparable via `-D` (see below).
                  Loop #91 -- the SSH leg, over a real sshd, with an ECDSA
                  key file read by `src/keyfile`
+    sftp-server  Loop #92 -- `src/sftpserver` plus `cmd/sftp_server`,
+                 byte-comparable against the real `sftp-server.exe` on
+                 every request shape (see below)
     port forward the CLIENT half: direct-tcpip
 
 **Not started.**  These are the honest remainder, and each one needs a
 different kind of judgement about what "proven" means:
 
-    sftp-server     medium.  The SFTP subsystem SERVER.  Testable by
-                    pointing the real `sftp` client at it, which is
-                    stronger than a unit test and is the shape this
-                    repository already uses.
     sshd            large, and the real one is several loops: server-side
                     kex, userauth as a SERVER, channels, session,
                     `sshd-session`/`sshd-auth` split.  Testable against

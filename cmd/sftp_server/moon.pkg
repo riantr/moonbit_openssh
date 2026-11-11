@@ -1,0 +1,15 @@
+import {
+  "openssh/openssh_moonbit/src/sftp",
+  "openssh/openssh_moonbit/src/sftpserver",
+}
+
+///| Native only: this driver reads and writes raw bytes on a file
+/// descriptor, which a browser target cannot do.  The library it drives
+/// (`src/sftpserver`) still builds on all four targets -- that is where
+/// the rules live and where the tests run.
+
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+native",
+)

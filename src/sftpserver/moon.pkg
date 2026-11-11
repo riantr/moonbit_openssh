@@ -1,0 +1,45 @@
+///| `src/sftpserver` -- the server half of SFTP.
+///
+/// Loop #92.  `src/sftp` is the client: it builds requests and parses
+/// replies.  This package is the mirror -- it parses requests and builds
+/// replies -- plus the filesystem those replies are about.
+///
+/// The wire format therefore keeps ONE implementation: the cursor, the
+/// string encoders, the attrs encoder and the framing are all
+/// `src/sftp`'s, and this package adds only the direction that did not
+/// exist.  The same argument `src/sftpdrive` made one layer up.
+///
+/// ## The three layers
+///
+/// * `proto.mbt` -- the request shapes and the reply builders, plus the
+///   STATUS sentences.  Everything here was measured against the real
+///   `sftp-server.exe` on this machine; `.loop92/DESIGN.md` records the
+///   measurements and which file each one came from.
+/// * `session.mbt` / `longname.mbt` -- the rules: which request produces
+///   which reply, and the `ls -l` line the server builds for a
+///   directory entry.
+/// * `localfs_native.mbt` / `localfs_stub.mbt` -- the only platform
+///   code: Win32 wide-character file calls on native, and a refusal
+///   everywhere else (`localfs.c` says why wide).
+///
+/// ## The two facts a draft-only implementation gets wrong
+///
+/// They are called out where they are implemented, because both were
+/// wrong here first:
+///
+///   * an enumeration ends with STATUS EOF, not with an empty NAME.
+///   * `-p` uploads use FSETSTAT on the HANDLE, not SETSTAT on the path.
+import {
+  "openssh/openssh_moonbit/src/sftp",
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "library")
+
+options(
+  native_stub: [ "localfs.c" ],
+  targets: {
+    "localfs_native.mbt": [ "native" ],
+    "localfs_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+)
