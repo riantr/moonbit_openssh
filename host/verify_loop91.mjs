@@ -51,7 +51,22 @@ import crypto from "node:crypto";
 const ROOT = path.resolve(
   new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
 );
-const REAL_SCP = "C:\\Windows\\System32\\OpenSSH\\scp.exe";
+// Where the real OpenSSH client might be.
+//
+// Two installations exist on Windows and they are not the same thing: the
+// portable Win32-OpenSSH build under Program Files, and the inbox optional
+// feature under System32.  Neither is on PATH by default.
+//
+// machine-path-exempt: each entry below is a CANDIDATE, probed in order until
+// one exists; none is asserted to exist on any machine.  The inbox one comes
+// first because that is the client this gate's comparisons were measured
+// against, so a machine with both reports the same thing the measurement did.
+const SCP_CANDIDATES = [
+  "C:\\Windows\\System32\\OpenSSH\\scp.exe",
+  "C:\\Program Files\\OpenSSH-Win64\\scp.exe",
+  "C:\\Program Files\\OpenSSH\\scp.exe",
+];
+const REAL_SCP = SCP_CANDIDATES.find((p) => fs.existsSync(p)) || null;
 const BED = path.join(ROOT, ".loop91", "gate91");
 // The server and the known_hosts file live OUTSIDE the bed, and that is not
 // tidiness: `fresh()` wipes the bed before every case, so anything the
@@ -359,6 +374,15 @@ function compare(label, port, extra, srcFn, dstFn, setup, expectSide, key = null
 
 async function main() {
   console.log("=== Loop #91: scp over SSH, and the key file behind it ===");
+  if (!REAL_SCP) {
+    // A loud failure naming every place that was looked at.  Without this the
+    // symptom is an ENOENT from deep inside spawnSync, which reads as a bug in
+    // this file rather than as "this machine has no OpenSSH client".
+    console.log("no scp.exe found in any of:");
+    for (const p of SCP_CANDIDATES) console.log(`  ${p}`);
+    process.exit(3);
+  }
+  console.log(`real scp: ${REAL_SCP}`);
   if (!USER) {
     console.log("no USERNAME in the environment: this gate needs a login name");
     process.exit(1);

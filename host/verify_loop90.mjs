@@ -68,8 +68,13 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 const ROOT = path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
-const REAL_SCP = "C:\\Windows\\System32\\OpenSSH\\scp.exe";
-const REAL_SRV = "C:\\Program Files\\OpenSSH-Win64\\sftp-server.exe";
+// machine-path-exempt: each entry below is a CANDIDATE, probed in order until
+// one exists; none is asserted to exist.  The order is the one the forty-one
+// measurements were taken with.
+const SCP_CANDIDATES = ["C:\\Windows\\System32\\OpenSSH\\scp.exe", "C:\\Program Files\\OpenSSH-Win64\\scp.exe", "C:\\Program Files\\OpenSSH\\scp.exe"];
+const SRV_CANDIDATES = ["C:\\Program Files\\OpenSSH-Win64\\sftp-server.exe", "C:\\Windows\\System32\\OpenSSH\\sftp-server.exe", "C:\\Program Files\\OpenSSH\\sftp-server.exe"];
+const REAL_SCP = SCP_CANDIDATES.find((p) => fs.existsSync(p)) || null;
+const REAL_SRV = SRV_CANDIDATES.find((p) => fs.existsSync(p)) || null;
 const HOST = "probehost";
 const BED = path.join(ROOT, ".loop90", "gate90");
 const NOW_WINDOW = 600;
@@ -234,13 +239,21 @@ function moon(args) {
 function main() {
   console.log("loop90: the copy engine, against the real scp.exe\n");
 
-  if (!fs.existsSync(REAL_SCP)) {
-    ok("a real scp.exe is available", false, `not found at ${REAL_SCP}`);
+  if (!REAL_SCP) {
+    ok(
+      "a real scp.exe is available",
+      false,
+      `no scp.exe in any of: ${SCP_CANDIDATES.join(", ")}`,
+    );
     summary();
     return;
   }
-  if (!fs.existsSync(REAL_SRV)) {
-    ok("a real sftp-server.exe is available", false, `not found at ${REAL_SRV}`);
+  if (!REAL_SRV) {
+    ok(
+      "a real sftp-server.exe is available",
+      false,
+      `no sftp-server.exe in any of: ${SRV_CANDIDATES.join(", ")}`,
+    );
     summary();
     return;
   }
