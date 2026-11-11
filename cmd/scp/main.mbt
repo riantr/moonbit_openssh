@@ -87,18 +87,30 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
   let target = @scp.target_of(o)
   let mut needs_remote = !@scp.is_local(target)
   let hosts : Array[String] = []
+  // Loop #91: the login name comes from the first remote spec, the same
+  // one the connection is made to.  `user@host:path` is the only place
+  // `scp` can learn it.
+  let mut remote_user : String? = None
   for i = 0; i < sources.length(); i = i + 1 {
     match @scp.split_spec(sources[i]) {
       @scp.Spec::Local(_) => ()
-      @scp.Spec::Remote(_, host, _) => {
+      @scp.Spec::Remote(user, host, _) => {
         needs_remote = true
         hosts.push(host)
+        if remote_user is None {
+          remote_user = user
+        }
       }
     }
   }
   match @scp.split_spec(target) {
     @scp.Spec::Local(_) => ()
-    @scp.Spec::Remote(_, host, _) => hosts.push(host)
+    @scp.Spec::Remote(user, host, _) => {
+      hosts.push(host)
+      if remote_user is None {
+        remote_user = user
+      }
+    }
   }
   if needs_remote {
     // One connection can only serve one host; `-3` and multi-host runs are
@@ -115,14 +127,9 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
       return
     }
     if o.sftp_server_path == "" {
-      // The SSH leg is not built; say so instead of failing silently.
-      report.push(
-        @scp.ScpError::Perror(
-          sources[0],
-          "remote copies need -D until the SSH leg is built",
-        ),
-      )
-      finish(prog, report)
+      // Loop #91: the SSH leg.  Same engine, same sentences, different
+      // byte link -- see `ssh.mbt` for why nothing above it changed.
+      run_remote(prog, o, fs, report, remote_user, hosts[0])
       return
     }
     match spawn_drive(o.sftp_server_path) {

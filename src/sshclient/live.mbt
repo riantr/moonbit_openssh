@@ -1201,6 +1201,29 @@ fn[T : @transport.Transport] live_auth_with_state(
   d : @bigint.BigNat,
   kh : @knownhosts.KnownHostsPolicy,
 ) -> (AuthResult, SessionState?) {
+  live_auth_curve_with_state(conn, x, user, d, @ecdsa.Curve::p256(), kh)
+}
+
+///|
+/// `live_auth_with_state`, with the signing curve named.
+///
+/// Loop #91: the curve is a property of the private key FILE, not of this
+/// client.  `src/keyfile` reads `nistp256`, `nistp384` and `nistp521`, and
+/// a P-384 key that signed as P-256 would be rejected by the server for
+/// being of the wrong key type -- which reads like an authorization
+/// failure, not like a curve mismatch.
+///
+/// Split out rather than parameterised in place so that every existing
+/// caller keeps the exact behaviour it had, with no default argument to
+/// forget.
+fn[T : @transport.Transport] live_auth_curve_with_state(
+  conn : T,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  curve : @ecdsa.Curve,
+  kh : @knownhosts.KnownHostsPolicy,
+) -> (AuthResult, SessionState?) {
   let (res, state) = handshake_to_session(conn, x, kh)
   let handshake = match res {
     Established(rep) => rep
@@ -1225,7 +1248,6 @@ fn[T : @transport.Transport] live_auth_with_state(
       return (Failed(AuthError::Transport(SessionError::NoServiceAccept)), None)
     Some(a) => a
   }
-  let curve = @ecdsa.Curve::p256()
   let (pk_blob, sig_blob, payload) = match
     @userauth.userauth_publickey_signed_request(
       curve,
