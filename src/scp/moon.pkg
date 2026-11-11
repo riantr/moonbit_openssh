@@ -1,0 +1,52 @@
+///| `src/scp` -- the parts of `scp` that are rules rather than transport.
+///
+/// Loop #90.  Everything here is a pure function of the command line and
+/// the path strings, so it can be tested on all four backends and
+/// compared byte-for-byte against the real `scp.exe` without a peer.
+///
+/// ## Why this package exists at all
+///
+/// The driver in `cmd/scp` is allowed to translate between our error
+/// types and the sentences OpenSSH prints; it is not allowed to decide
+/// anything.  `scp`'s command line is a getopt string with a handful of
+/// validators, and `is_remote()` is a two-line function that decides
+/// which of the three copy paths a run takes.  Both are rules, so both
+/// live here, where a unit test can pin them and where a mutation can
+/// be aimed at one of them without touching the driver.
+///
+/// ## The three layers, and why they are three files and not one
+///
+/// * `args.mbt` / `spec.mbt` / `copy.mbt` / `msg.mbt` -- the rules: the
+///   option table, the local-versus-remote split, the destination naming
+///   and the measured sentences.  Every claim in them was read out of the
+///   real binary (`.loop90/DESIGN.md`).
+/// * `engine.mbt` -- the copy itself, written over two abstractions (a
+///   `LocalFs` of six function values and an `@sftpdrive.SftpDrive`), so
+///   the recursion, the `-p` handling and the failure ordering can be
+///   tested with no filesystem and no peer, on all four targets.
+/// * `localfs_native.mbt` / `localfs_stub.mbt` -- the only platform code:
+///   Win32 wide-character file calls on native, and a refusal everywhere
+///   else (`localfs.c` says why wide).
+///
+/// ## The measured claims this file encodes
+///
+/// The reference is the real binary on this machine (9.5p2); every table
+/// below was read out of its behaviour by `.loop90/probe_optstring9.py`,
+/// `probe_args7.py`, `probe_args8.py`, `probe_numspec10.py`,
+/// `probe_scp_D5.py`, `probe_scp_D6.py`, `probe_scp_D7.py` and
+/// `probe_scp_D8.py`, not copied from `scp.c`.
+import {
+  "moonbitlang/core/encoding/utf8",
+  "openssh/openssh_moonbit/src/sftp",
+  "openssh/openssh_moonbit/src/sftpdrive",
+}
+
+pkgtype(kind: "library")
+
+options(
+  native_stub: [ "localfs.c" ],
+  targets: {
+    "localfs_native.mbt": [ "native" ],
+    "localfs_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+)

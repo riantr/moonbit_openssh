@@ -1,6 +1,41 @@
 {
   "rows": [
     {
+      "package": "src/scp",
+      "test_files": [
+        "args_test.mbt",
+        "msg_test.mbt",
+        "copy_test.mbt",
+        "engine_test.mbt",
+        "crlf_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 123,
+      "files_reported": 8,
+      "report": true
+    },
+    {
+      "package": "src/sftpdrive",
+      "test_files": [
+        "drive_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 32,
+      "files_reported": 1,
+      "report": true
+    },
+    {
+      "package": "src/subproc",
+      "test_files": [
+        "subproc_native_test.mbt",
+        "subproc_stub_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 26,
+      "files_reported": 2,
+      "report": true
+    },
+    {
       "package": "src/aead",
       "test_files": [
         "aead_test.mbt",
@@ -289,9 +324,12 @@
     "src/knownhosts",
     "src/poly1305",
     "src/rng",
+    "src/scp",
+    "src/sftpdrive",
     "src/sha256",
     "src/sha512",
     "src/sshconfig",
+    "src/subproc",
     "src/x25519"
   ]
 }

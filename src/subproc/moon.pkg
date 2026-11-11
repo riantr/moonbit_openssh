@@ -1,0 +1,15 @@
+import {
+  "moonbitlang/core/encoding/utf8",
+}
+
+pkgtype(kind: "library")
+
+options(
+  native_stub: [ "subproc.c" ],
+  targets: {
+    "subproc_native.mbt": [ "native" ],
+    "subproc_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+    "subproc_native_test.mbt": [ "native" ],
+    "subproc_stub_test.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+)

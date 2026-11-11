@@ -1,0 +1,13 @@
+///| Loop #90: an interactive SFTP client, one request at a time.
+///
+/// A separate package from `src/sftp` for the same reason `src/sftp` is a
+/// separate package from `src/sshclient`: the protocol (framing, builders,
+/// parsers) is one thing and the way it is driven is another. `src/sftp`
+/// own `SftpSession` is the *scripted* driver (a whole op list up front,
+/// which is what a known-answer test wants); this is the *interactive* one
+/// (`stat`, look, decide, ask again), which is what `scp` wants.
+import {
+  "openssh/openssh_moonbit/src/sftp",
+}
+
+pkgtype(kind: "library")
