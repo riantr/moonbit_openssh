@@ -10296,6 +10296,117 @@ marker matched first.  Consult the **named gate check** first, then the
 build check, then call it missed.  Result: 10 mutations, 10 caught, 0
 missed.
 
+## Loop #91: the private key FILE, and `scp` over a real sshd
+
+Loop #90's two declared gaps, one of them closed.  The gap was: a real `scp`
+signs with a private key **file**, and `src/keyfile` could read only
+ed25519.  So this loop is `src/keyfile` (an ECDSA reader) plus
+`src/sshclient` (an interactive subsystem link) plus `cmd/scp`'s SSH leg.
+
+**`live_auth` already signed ECDSA P-256.**  `live.mbt:1228` builds the
+`userauth` request with `@ecdsa.Curve::p256()` and a scalar the caller
+supplies; nothing about the client needed teaching.  What was missing was
+that the scalar lived in a test constant rather than in a file.  Measuring
+this first is what kept the loop small.
+
+### Two beliefs this loop measured and found wrong
+
+Both were in this repository, and neither could be seen before ECDSA
+existed, because **an ed25519 public blob is 51 bytes -- a whole multiple of
+three -- so its base64 has no `=` to strip and no way to notice.**
+
+  * **The `authorized_keys` line KEEPS its base64 padding.**  `encode.mbt`
+    said OpenSSH strips it (citing `sshbuf_dtourlb64`) and called
+    `strip_padding`.  Measured: a P-256 blob is 104 bytes and
+    `ssh-keygen -y` prints `...YJk/dc=`, and the `.pub` file the tool wrote
+    at key creation holds the `= ` too.  The strip remains correct for
+    **fingerprints** (`SHA256:` really is 43 characters for a 32-byte
+    digest) -- two different rules, not an inconsistency.
+  * **`ssh-keygen -y` output ends with CRLF and carries exactly ONE
+    newline.**  `encode_public_line_of` returns the FILE form, so passing
+    it to `println` produced two.  Caught only by comparing bytes; a trimmed
+    comparison would have called it equal.
+
+### The ECDSA private block, and the three traps
+
+`type | curve_id | Q | d | comment | padding` -- the trap is that ed25519
+has no `curve_id`, so a reader that copies the ed25519 shape reads
+`nistp256`(8) as the point and the point(65) as the scalar.  Both lengths
+look plausible and nothing fails until a signature is wrong.  That is what
+the first walk did.
+
+  * **`d` is an `mpint`.**  A scalar whose top bit is set carries a leading
+    `00`.  Measured fixtures: P-256 ordinary `d` = 32 bytes, P-384 `d` = 49
+    with `00`, P-256-above-2^255 `d` = 33 with `00`.
+  * **P-521's `d` is 66 bytes and starts with `01`** -- a real bit of a
+    521-bit number, not a sign byte, so the strip must not fire on it.  Its
+    point is 133 bytes (521 bits is 66 bytes with seven bits unused), and a
+    reader that rounds to 64 rejects every P-521 key.
+  * **P-521's padding is EMPTY**, because its block happens to be a whole
+    number of 8-byte words.  A reader that insists on at least one padding
+    byte rejects every fifth P-521 key.
+
+The three curve names `nistp256` / `nistp384` / `nistp521` are the **same
+length**, so they must be compared as strings, never by width.
+
+### The interactive link (`src/sshclient/link.mbt`)
+
+The same four steps `run_sftp_session` takes, stopping after the subsystem
+confirmation and handing back `write`/`read`, because `scp` must read an
+answer before choosing the next request.  Two things that are easy to get
+wrong:
+
+  * **A write may have to read.**  `stdin_take` clamps to the peer's window;
+    when it is exhausted the only way forward is to receive, and data that
+    arrives during a write must be **buffered**, not dropped.
+  * **End of stream is an empty array, not an error** -- that is the
+    contract `src/sftpdrive` already reads.
+
+`live_auth_curve_with_state` splits the curve out of the auth path: the
+curve is a property of the KEY FILE.  A P-384 key that signs as P-256 is
+refused by the server as the wrong key type, which reads like an
+authorization failure and is not one.
+
+### What the bed cost, measured
+
+  * **A private sshd spawned as a plain (non-elevated) user works on this
+    machine.**  That was the real risk -- Win32-OpenSSH normally runs as a
+    service in order to impersonate the login user -- and `sshd -D -e -f
+    <conf>` serves the user that started it.
+  * **Absolute remote paths work with both tools**: `hp@host:/E:/.../x`.
+    The bed's "remote" side is a directory on this machine, so a relative
+    remote path would resolve against the login user's home and the gate
+    would write outside its own bed.
+  * **PowerShell cannot pipe a script into `sftp -b -`**: the pipe prepends
+    a UTF-8 BOM and the client answers `Invalid command`.  Write a batch
+    FILE.
+  * The gate keeps the sshd directory and `known_hosts` **outside** the bed
+    it wipes between cases.  The first version put them inside and every
+    comparison failed with `kex_exchange_identification: read: Connection
+    reset` -- a deleted host key, reading like a protocol problem.
+
+### The weakness the gate had, and how it was found
+
+Section A compares `ssh-keygen -y`, whose output is built from the public
+**point**.  So a reader that takes the wrong bytes out of `d` prints the
+right line and passes every `-y` check: **the scalar is only observable in a
+signature.**  Same for the curve.  The gate therefore signs two real copies,
+one with the top-bit-set key and one with the P-384 key, and a wrong scalar
+or a wrong curve turns THOSE red.  Without them, mutations #0 and #1 would
+have been MISSED while every `-y` check stayed green.
+
+`host/verify_loop91.mjs`: 23/23.  `host/loop91_mutations.py`: see the log.
+
+### `moon check --deny-warn` reports unused values per FILE, resolves per PACKAGE
+
+`src/keyfile` had two `unused_value` errors at HEAD (`test_seed`,
+`blob_of`), verified at HEAD in a worktree so they were not new.  They are
+not dead: `rewrite_rng_test.mbt` calls them.  A test helper defined in one
+file and called only from a sibling is reported unused, while helpers also
+called in their own file (`hex_of`, `slice`, `u32_at`) are not.  The fix is
+to move a helper into the file that uses it -- not to delete working code
+because a warning named it.
+
 ## The rest of the tool set -- what is done, and what is not
 
 The goal for this repository is the whole OpenSSH tool set in MoonBit.
@@ -10313,7 +10424,8 @@ client works" and "the repository is finished" are very different claims.
     sftp         the client, against internal-sftp
     scp          Loop #90 -- upload, download, -r, -p, local-to-local and
                  remote-to-remote, byte-comparable via `-D` (see below).
-                 NOT done: the SSH leg (no private-key-file capability yet)
+                 Loop #91 -- the SSH leg, over a real sshd, with an ECDSA
+                 key file read by `src/keyfile`
     port forward the CLIENT half: direct-tcpip
 
 **Not started.**  These are the honest remainder, and each one needs a
