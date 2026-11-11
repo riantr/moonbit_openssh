@@ -90,6 +90,53 @@ pub fn ed25519_public_blob(pk : FixedArray[Byte]) -> FixedArray[Byte] {
 }
 
 ///|
+/// 从公钥 blob 里取出那 32 字节的 ed25519 公钥。
+///
+/// 公钥 blob 的形状是 `string "ssh-ed25519"` + `string 32 字节`,所以
+/// 这一步是**反** `ed25519_public_blob`。
+///
+/// 别的密钥类型不在本仓库的范围里,这里对它们返回 None。**「不认」
+/// 是可以说清楚的,「认了但算错了」不行。**
+///
+/// 这条规则住在 `src/keyfile`,因为它讲的是**密钥文件的格式**;agent
+/// 那边要拆 blob 时也用它,而不是自己再拆一遍。
+pub fn ed25519_public_of_blob(blob : FixedArray[Byte]) -> FixedArray[Byte]? {
+  let (name, next) = match read_bytes(blob, 0) {
+    None => return None
+    Some(v) => v
+  }
+  if bytes_to_string(name) != KEY_TYPE {
+    return None
+  }
+  let (pk, _) = match read_bytes(blob, next) {
+    None => return None
+    Some(v) => v
+  }
+  if pk.length() != 32 {
+    return None
+  }
+  Some(pk)
+}
+
+///|
+/// 公钥 blob 变成 authorized_keys 那一行,**不带行尾换行**。
+///
+/// 这一行是 `<类型> <base64>` + (注释非空时)` <注释>`。
+///
+/// **和 `.pub` 文件那一行不是同一件事**:文件那一行在注释为空时没有
+/// 尾随空格,而 OpenSSH 的 `ssh-add -L` 是先打印公钥行、再打印
+/// `" " + 注释`,所以它的注释为空时**有一个尾随空格**。这里给的是
+/// `ssh-add -L` 那种,所以空格是无条件的。
+pub fn public_line_of_blob(blob : FixedArray[Byte], comment : String) -> String {
+  if ed25519_public_of_blob(blob) is None {
+    return ""
+  }
+  let padded = @base64.encode(Bytes::from_array(blob))
+  let b64 = strip_padding(padded)
+  KEY_TYPE + " " + b64 + " " + comment
+}
+
+///|
 /// The bytes of a String, as UTF-8.
 ///
 /// The key type and the cipher names are ASCII, so UTF-8 is the identity

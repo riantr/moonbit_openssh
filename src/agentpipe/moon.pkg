@@ -1,0 +1,19 @@
+import {
+  "moonbitlang/core/encoding/utf8",
+}
+
+pkgtype(kind: "library")
+
+options(
+  native_stub: [ "agentpipe.c" ],
+  targets: {
+    "agentpipe_native.mbt": [ "native" ],
+    "agentpipe_stub.mbt": [ "js", "wasm", "wasm-gc" ],
+    // Loop #89: the tests are split the same way the implementation is.
+    // The real named pipe is a Windows thing, so the round trip is
+    // native only; the stub that refuses everything is tested on the
+    // targets where the stub IS the whole story.
+    "agentpipe_test.mbt": [ "native" ],
+    "agentpipe_stub_test.mbt": [ "js", "wasm", "wasm-gc" ],
+  },
+)

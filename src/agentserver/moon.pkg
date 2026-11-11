@@ -1,0 +1,46 @@
+///|
+/// Loop #89: the agent server.
+///
+/// The client half of the agent protocol has been in `src/agent` since
+/// Loop #80: it asks for the identity list, it asks for a signature, it
+/// parses the answers.  What was missing was the other half -- the
+/// side that HOLDS the keys and answers the requests.  This package is
+/// that side.
+///
+/// **The rules live here and the driver translates them.**  `cmd/ssh_agent`
+/// owns the pipe and the loop over connections; everything about what
+/// a request MEANS is here.
+///
+/// **The protocol is measured, not remembered.**  Every message type and
+/// every payload shape came from running the real `ssh-add` against a
+/// stub agent and reading the bytes it sent:
+///
+///   * `REQUEST_IDENTITIES` (11): no payload.
+///   * `IDENTITIES_ANSWER` (12): `u32 count`, then for each identity
+///     **TWO** strings -- the key blob and the comment.  One string per
+///     identity is what the first attempt sent, and the real tool
+///     answered "incomplete message".
+///   * `ADD_IDENTITY` (17): `string key blob`, `string private blob`,
+///     `string comment`.
+///   * `REMOVE_IDENTITY` (18): `string key blob`.
+///   * `REMOVE_ALL_IDENTITIES` (19): no payload -- and the client also
+///     sends the v1 message (9), whose error is ignored.
+///   * `SIGN_REQUEST` (13): `string key blob`, `string data`,
+///     `u32 flags`.  The flags are a **u32**, not a string
+///     (`authfd.c`: `sshbuf_put_u32(msg, flags)`).
+///   * `SIGN_RESPONSE` (14): `string signature`, where the signature is
+///     the SSH shape -- `string "ssh-ed25519"` + `string the 64 bytes`.
+///
+/// **A failure is a failure.**  A request the agent cannot answer is
+/// answered with `AGENT_FAILURE`, which is a legal answer, and the
+/// client decides what it means.  An agent that answers `AGENT_SUCCESS`
+/// to something it did not do is worse than an agent that says no.
+import {
+  "moonbitlang/core/encoding/utf8",
+  "openssh/openssh_moonbit/src/agent",
+  "openssh/openssh_moonbit/src/ed25519",
+  "openssh/openssh_moonbit/src/keyfile",
+  "openssh/openssh_moonbit/src/sshwire",
+}
+
+pkgtype(kind: "library")

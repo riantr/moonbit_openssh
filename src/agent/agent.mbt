@@ -82,6 +82,44 @@ pub const AGENT_SIGN_RESPONSE : Byte = b'\x0e'
 pub const AGENT_FAILURE : Byte = b'\x1e'
 
 ///|
+/// agent 照办了
+///
+/// 协议里有两个「成功」:`SSH_AGENT_SUCCESS`(6)是空的成功,
+/// `SSH_AGENT_FAILURE`(30)是拒绝。两个都在 `authfd.h` 里,这里记的是
+/// 那个空的。
+pub const AGENT_SUCCESS : Byte = b'\x06'
+
+///|
+/// 客户端请求:加一把密钥
+///
+/// 载荷是 `string 公钥 blob` + `string 私钥 blob` + `string 注释`。
+pub const AGENTC_ADD_IDENTITY : Byte = b'\x11'
+
+///|
+/// 客户端请求:删掉一把密钥
+///
+/// 载荷是 `string 公钥 blob`。
+pub const AGENTC_REMOVE_IDENTITY : Byte = b'\x12'
+
+///|
+/// 客户端请求:删掉所有密钥
+///
+/// 没有载荷。
+pub const AGENTC_REMOVE_ALL_IDENTITIES : Byte = b'\x13'
+
+///|
+/// 客户端请求:删掉所有 RSA 密钥(协议 v1 的那条)
+///
+/// 这是 1999 年的那条消息,现代的 agent 不理它。**但客户端还是发它**:
+/// OpenSSH 的 `ssh-add -D` 对 v1 和 v2 各发一次,只取 v2 的结果
+/// (`ssh-add.c`:"attempt to remove both protocol v.1 and v.2 keys"),
+/// 因为 agent 可能是被转发的,而转发过来的可能是老实现。
+///
+/// agent 回答它「成功」就行:它没有 RSA 密钥可删,而「删掉了零把」
+/// 也是删掉了。
+pub const AGENTC_REMOVE_ALL_RSA_IDENTITIES : Byte = b'\x09'
+
+///|
 /// agent 回复的长度上限。
 ///
 /// OpenSSH 的 `MAX_AGENT_REPLY_LEN`(256 KiB)。上限不是可有可无的:回复长度
@@ -95,6 +133,37 @@ pub const MAX_REPLY_LEN : Int32 = 256 * 1024
 /// OpenSSH 的 `MAX_AGENT_IDENTITIES`(2048)。同样的道理:条数也是对端给的,
 /// 一个说「我有 40 亿把钥匙」的 agent 不应该让客户端照着它循环。
 pub const MAX_IDENTITIES : Int32 = 2048
+
+///|
+/// 从载荷里读一个 u32(大端),和 `ag_read_u32` 一样,只是公开了。
+///
+/// **对外的 agent 也需要读载荷**:请求的载荷完全由对端控制,而服务端
+/// 要从里面读出公钥 blob、数据和 flags。这个函数检查越界,`@sshwire`
+/// 的那个不检查——所以服务端用的是这个。
+pub fn agent_read_u32(b : FixedArray[Byte], off : Int32) -> Int32? {
+  ag_read_u32(b, off)
+}
+
+///|
+/// 从载荷里读一个 SSH string(带长度前缀),返回 `(内容, 下一个偏移)`。
+///
+/// 越界返回 None。和 `ag_read_string` 一样,只是公开了。
+pub fn agent_read_string(
+  b : FixedArray[Byte],
+  off : Int32,
+) -> (FixedArray[Byte], Int32)? {
+  ag_read_string(b, off)
+}
+
+///|
+/// 把一段字节变成字符串(非 ASCII 字节按 latin-1 折算)。
+///
+/// agent 的注释是给人看的,而它的字节是什么编码取决于写它的人。
+/// 这里按 latin-1 折算,所以每一个字节都有一个字符,注释里的每一个
+/// 字符也都会回到同一个字节上——往返是不会改内容的。
+pub fn agent_bytes_to_string(b : FixedArray[Byte]) -> String {
+  ag_string(b)
+}
 
 ///|
 /// agent 的传输。
@@ -195,11 +264,19 @@ fn ag_read_string(
 }
 
 ///|
-/// 把一段 ASCII 文本变成字节
-fn ag_ascii(s : String) -> FixedArray[Byte] {
-  let out : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')
-  for i = 0; i < s.length(); i = i + 1 {
-    out[i] = (s[i].to_int() & 0xFF).to_byte()
+/// 把一段文本变成 UTF-8 字节。
+///
+/// **注释是人写的,而且它不是 ASCII。**  OpenSSH 把命令行上的注释按
+/// 它本来的字节存下来,而命令行在这台机器上是 UTF-8;所以这里也用
+/// UTF-8,两边才对得上。
+///
+/// `ag_ascii` 取每个字符的低字节,那个捷径对 ASCII 是对的,对别的
+/// 编码是**静悄悄地错**——注释会变成一堆乱码,而协议层不会报错。
+fn ag_utf8(s : String) -> FixedArray[Byte] {
+  let raw = @utf8.encode(s)
+  let out : FixedArray[Byte] = FixedArray::make(raw.length(), b'\x00')
+  for i = 0; i < raw.length(); i = i + 1 {
+    out[i] = raw[i]
   }
   out
 }
@@ -235,6 +312,42 @@ pub fn agent_frame(
     ]),
     body,
   )
+}
+
+///|
+/// 读一条帧,返回 `(类型, 载荷)`。
+///
+/// 这是**服务端**要的那一半:`agent_exchange` 是发一条等一条,而一个
+/// agent 要先读一条、回答一条、再读一条。客户端和服务端用同一条
+/// 帧格式,所以这里也用同一个 `agent_frame` 的逆运算。
+///
+/// None 表示连接断了、或者长度不合法。**长度是要先查再分配的**:长度
+/// 是对端给的一个 u32,一个说「回复有 4 GiB」的对端不应该让 agent
+/// 一次申请 4 GiB。
+pub fn agent_read_message(chan : AgentChannel) -> (Byte, FixedArray[Byte])? {
+  let head = match (chan.read_exact)(4) {
+    None => return None
+    Some(h) => h
+  }
+  let len = match ag_read_u32(head, 0) {
+    None => return None
+    Some(v) => v
+  }
+  if len > MAX_REPLY_LEN {
+    return None
+  }
+  if len < 1 {
+    return None
+  }
+  let l = len
+  let body = match (chan.read_exact)(l) {
+    None => return None
+    Some(b) => b
+  }
+  if body.length() < 1 {
+    return None
+  }
+  Some((body[0], ag_slice(body, 1, body.length())))
 }
 
 ///|
@@ -432,6 +545,97 @@ pub fn agent_sign(
 }
 
 ///|
+/// 请 agent 加一把密钥。
+///
+/// 载荷是 `string 密钥类型名` + `string 公钥` + `string 私钥` +
+/// `string 注释`。
+///
+/// **这里没有外层的长度前缀,而 `REMOVE_IDENTITY` 有。**  这是量出来
+/// 的,不是笔误:
+///
+///   * `ADD_IDENTITY` 的载荷是 135 字节:`00 00 00 0b "ssh-ed25519"`
+///     `00 00 00 20 <32 字节公钥>` `00 00 00 40 <64 字节私钥>`
+///     `00 00 00 0c probe@loop89`。
+///   * `REMOVE_IDENTITY` 的载荷是 55 字节:`00 00 00 33` 后面跟着那
+///     51 字节的公钥 blob。
+///
+/// 原因在 OpenSSH 的源码里:加钥匙走的是 `sshkey_private_serialize`
+/// (它写的是类型名、公钥、私钥三个字段),删钥匙走的是 `sshkey_puts`
+/// (它写的是 `sshbuf_put_string(blob)`——**多一层长度前缀**)。
+///
+/// 所以这里的 `key_blob` 是那 51 字节(`string 类型名` + `string 公钥`),
+/// 它**原样**就是前两个字段;而 `private_blob` 是 `string 私钥`。
+///
+/// 返回 false 是**协议意义上的拒绝**,不是连接断了:agent 说「不接」。
+/// 这两件事对调用方是不同的——「不接」是 agent 的回答,「断了」是
+/// agent 不在了——所以这个函数把两者分开了:`None` 是断了,
+/// `Some(false)` 是被拒绝。
+pub fn agent_add_identity(
+  chan : AgentChannel,
+  key_blob : FixedArray[Byte],
+  private_blob : FixedArray[Byte],
+  comment : String,
+) -> Bool? {
+  let payload = ag_cat(
+    key_blob,
+    ag_cat(private_blob, @sshwire.write_ssh_string(ag_utf8(comment))),
+  )
+  let (t, _) = match agent_exchange(chan, AGENTC_ADD_IDENTITY, payload) {
+    None => return None
+    Some(v) => v
+  }
+  Some(t == AGENT_SUCCESS)
+}
+
+///|
+/// 请 agent 删掉一把密钥。
+///
+/// 载荷是 `string 公钥 blob`,没有别的。
+pub fn agent_remove_identity(
+  chan : AgentChannel,
+  key_blob : FixedArray[Byte],
+) -> Bool? {
+  let (t, _) = match
+    agent_exchange(
+      chan,
+      AGENTC_REMOVE_IDENTITY,
+      @sshwire.write_ssh_string(key_blob),
+    ) {
+    None => return None
+    Some(v) => v
+  }
+  Some(t == AGENT_SUCCESS)
+}
+
+///|
+/// 请 agent 删掉所有密钥。
+///
+/// **协议 v1 的那条也要发。**  OpenSSH 的 `ssh-add -D` 对 v1 和 v2 各
+/// 发一次,只取 v2 的结果,因为 agent 可能是被转发的,而转发过来的
+/// 可能是老实现。这一条发过去,老 agent 才真的把它的 RSA 密钥删掉。
+///
+/// v1 那条的结果**不看**:它对现代的 agent 一定失败(现代 agent 不理
+/// 它),而 OpenSSH 也是忽略它的错误的。
+pub fn agent_remove_all_identities(chan : AgentChannel) -> Bool? {
+  let (t, _) = match
+    agent_exchange(
+      chan,
+      AGENTC_REMOVE_ALL_IDENTITIES,
+      FixedArray::make(0, b'\x00'),
+    ) {
+    None => return None
+    Some(v) => v
+  }
+  // v1 的那条:发出去,结果不看。
+  let _ = agent_exchange(
+    chan,
+    AGENTC_REMOVE_ALL_RSA_IDENTITIES,
+    FixedArray::make(0, b'\x00'),
+  )
+  Some(t == AGENT_SUCCESS)
+}
+
+///|
 /// 构造一个 identity 列表的**参考**字节串,给 KAT 用。
 ///
 /// 这不是协议的一部分,而是让两套实现能对同一份样例产生同样的字节:
@@ -448,7 +652,7 @@ pub fn agent_reference_identities_payload(
   ])
   for i = 0; i < entries.length(); i = i + 1 {
     out = ag_cat(out, @sshwire.write_ssh_string(entries[i].key_blob))
-    out = ag_cat(out, @sshwire.write_ssh_string(ag_ascii(entries[i].comment)))
+    out = ag_cat(out, @sshwire.write_ssh_string(ag_utf8(entries[i].comment)))
   }
   out
 }

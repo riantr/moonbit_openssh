@@ -9908,3 +9908,368 @@ the names the gate actually printed.
   the private block hold the same comment right up until a rewrite
   makes them differ -- and then a check that reads the other one is a
   check of nothing.  This one cost three mutations.
+
+## Loop #89: the SSH agent -- `ssh_agent` and `ssh_add`
+
+Loop #80 wrote the client half of the SSH agent protocol (`src/agent`: ask
+for the identity list, ask for a signature, parse the answers).  What was
+missing was the other half -- the side that **holds** the keys -- and the
+transport that can carry it on this platform.
+
+    ssh_agent [--socket <pipe>] [--key <file> ...]   a daemon that holds keys
+    ssh_add   [-l] [-L] [-d] [-D] [-q] [file ...]
+
+### The transport is a NAMED PIPE, and that is not a choice
+
+`SSH_AUTH_SOCK` on this machine is a **named pipe** (`\\.\pipe\...`), and
+the real client refuses anything else without even connecting:
+
+    $ SSH_AUTH_SOCK=127.0.0.1:1234 ssh-add -l
+    Error connecting to agent: No such file or directory
+
+The literal string `SSH_AUTH_SOCK=\\.\\pipe\\openssh-ssh-agent` is inside
+the installed `ssh-add.exe`, and the installed `ssh-agent.exe` is a
+**Windows service**: it says `unable to start ssh-agent service, error
+:1058` and exits, and the service itself is disabled on this machine
+(`sc start ssh-agent` -> `StartService FAILED 1058`).
+
+So the judge available here is the real **client**, not the real **agent**.
+That is worth saying out loud, because it decides what the gate can
+claim:
+
+* the real client is the judge for **what goes on the wire** and for
+  **what the sentences and the exit statuses are**;
+* the real agent is NOT available, so **the server's decisions are
+  pinned by OpenSSH's rules** (`ssh-agent.c`) and by the real client's
+  rendering of them -- not by a second implementation to compare with.
+
+`src/agentpipe` is the transport: a C-FFI layer over `CreateNamedPipeW` /
+`CreateFileW` / `ConnectNamedPipe` / `ReadFile` / `WriteFile`.  It is
+**native only**, and the js/wasm targets get a stub that refuses
+everything -- a stub that pretended to have a pipe would fail later, in
+the middle of a request, with a message about the AGENT rather than about
+the PLATFORM.
+
+### The protocol is ASYMMETRIC, and that is the whole trap
+
+Every shape below was measured by running the real `ssh-add` against a
+stub agent that printed the bytes it sent
+(`.loop89/probe_add_proto.py`):
+
+    ADD_IDENTITY      (17)  135 bytes, NO outer length prefix
+                         00 00 00 0b "ssh-ed25519"
+                         00 00 00 20 <32 bytes of public key>
+                         00 00 00 40 <64 bytes of private key>
+                         00 00 00 0c probe@loop89
+
+    REMOVE_IDENTITY   (18)   55 bytes, WITH an outer length prefix
+                         00 00 00 33 <the 51-byte public key blob>
+
+    REQUEST_IDENTITIES(11)   no payload
+    REMOVE_ALL        (19)   no payload -- and the client ALSO sends the
+                              v1 message (9), whose error is ignored
+
+The asymmetry is not a typo.  The add path serializes the key field by
+field (`sshkey_private_serialize`: the type name, the public key, the
+private key), while the remove path writes one blob (`sshkey_puts`, which
+is `sshbuf_put_string(blob)` -- **one more length prefix**).
+
+A server that reads both the same way gets exactly one of them right, and
+the one it gets wrong is the one that **works against a mock agent** --
+which is the worst place to find out.
+
+`IDENTITIES_ANSWER` is `u32 count` and then per identity **TWO** strings:
+the key blob and the comment.  The first attempt sent one string per
+identity, and the real tool answered `incomplete message`.
+
+### The sentences and the exit statuses, measured
+
+    ssh-add -l        (empty agent)   stdout "The agent has no identities."   exit 1
+    ssh-add <file>                    stderr "Identity added: <path> (<comment>)"   exit 0
+    ssh-add -l        (one key)       stdout "256 SHA256:<fp> <comment> (ED25519)"  exit 0
+    ssh-add -L        (one key)       stdout "<pubkey line>"   exit 0
+    ssh-add -d <file>                 stderr "Identity removed: <path> ED25519 (<comment>)"  exit 0
+    ssh-add -D                        stderr "All identities removed."   exit 0
+    (no agent)                        stderr "Error connecting to agent: No such file or directory"   exit 2
+    (agent refuses)                   stderr "Could not add identity \"<path>\": agent refused operation"   exit 1
+
+**Which stream a sentence goes to is part of the contract.**  "The agent
+has no identities." is a `printf` in OpenSSH -- STDOUT -- and the exit
+status is still 1.  "All identities removed." is `fprintf(stderr, ...)`.
+
+**`-L` prints the public key line and then a SPACE and the comment.**  The
+space is unconditional: OpenSSH prints the key line, then prints
+`" " + comment`.  The `.pub` FILE has no trailing space when the comment
+is empty, but `ssh-add -L` does.  The two are different things.
+
+### The gate: `host/verify_loop89.mjs` (81 checks)
+
+The gate has six parts, and each part judges something different:
+
+* **G0** -- the tree compiles and the unit tests pass.
+* **G2** -- **our client vs the real client, byte for byte**: the same
+  sequence of operations, each client against **its own** agent, and the
+  exit status, stdout and stderr compared byte for byte.
+* **G3** -- the round trip: the real client lists and removes a key that
+  our agent is holding.
+* **G4** -- **the wire**: a stub agent records the request FRAMES the two
+  clients put on the pipe, and the two frames are compared byte for byte.
+  This is the only thing that can tell a protocol SHAPE from a sentence.
+* **G5** -- **the server's decisions, rendered by the real client**.
+* **G6** -- the agent can be given a key at startup (`--key`).
+* **G7** -- the options this tool REFUSES, and why (see below).
+
+### The blind spot in G2, and how G5 closes it
+
+G2 has a hole, and it is worth naming it.
+
+In G2 **both** clients talk to **our** agent.  So when the AGENT decides
+something, both clients see the same decision and print the same thing --
+and the comparison cannot tell whether that decision was RIGHT.  A server
+that accepted a duplicate key would make both clients print "Identity
+added", and the two would agree perfectly about a wrong answer.
+
+**The mutations found this, not the author.**  Three of the twenty-one
+mutations pass every output comparison in G2:
+
+* the agent accepts a duplicate key;
+* removing all from an empty agent fails;
+* the identity list drops the comment.
+
+G5 closes it by asking the **real client** a question whose answer only
+the server can give, and checking the answer against OpenSSH's rules
+(`process_add_identity` refuses a duplicate key; removing all the keys
+succeeds even when there are none):
+
+    adding a new key          -> SUCCESS
+    adding the same key again -> FAILURE      <- OpenSSH refuses a duplicate
+    removing a key it has not -> FAILURE
+    removing all its keys     -> SUCCESS, even when it had none
+    the comment it gives back -> the comment it was given
+    the public key line       -> the key file's line
+
+The sentences in G5 are measured; the DECISIONS are OpenSSH's rules.  The
+gate says so, in the gate.
+
+### The mutations: `host/loop89_mutations.py` (23, all CAUGHT)
+
+Twenty-three mutations, each one a way this code could plausibly be wrong,
+each one naming the gate check that has to go red because of it.
+
+**Three of them caught the gate rather than the code**, and that is what
+they were for:
+
+* **the agent accepts a duplicate key** -- INVISIBLE to G2 (both clients
+  talk to our agent), caught by G5.
+* **removing all from an empty agent fails** -- invisible to G2 for the
+  same reason, caught by G5.
+* **the identity list drops the comment** -- invisible to G2, caught by
+  the new G5 check that reads what the agent HOLDS.
+
+Two more are about the **interface**, not the wire:
+
+* **the client treats `-s` as an unknown option** and **the client calls
+  a real unimplemented option an unknown one** -- both turn a fact about
+  THIS TOOL into a fact about the USER.  Caught by G7.
+
+And one of them caught the **mutation runner itself**:
+
+* **the anchor counter keyed by basename.**  Two of the files under test
+  are called `main.mbt` -- `cmd/ssh_add/main.mbt` and
+  `cmd/ssh_agent/main.mbt` -- and a dict keyed by the basename has the
+  second one overwrite the first.  Every anchor that lives in
+  `cmd/ssh_add` came back as a **SKIP**, and a SKIP is counted as "not
+  caught": eight mutations silently never ran.  The same collision was in
+  the **backup**, and that one was worse -- restoring it would have put
+  `cmd/ssh_agent`'s content into `cmd/ssh_add`, silently corrupting the
+  tree.  Both are keyed by the PATH now.
+
+### A CANCELLED mutation run leaves the tree mutated
+
+The runner writes the whole file set before every mutation and restores
+it in a `finally`.  **A run that is CANCELLED does not reach its
+`finally`.**  That happened here: the batch was cancelled while it was
+on mutation #14, and `src/keyfile/blob.mbt` was left with that mutation
+applied -- which silently removed a space from the `ssh-add -L` output
+and turned two gate checks red **for a reason that had nothing to do with
+the code**.
+
+The backup is on disk precisely so that this can be undone from outside
+the process that wrote it, so there is now a `--restore` mode, and a
+`.loop89/check_pristine89.py` that says whether the tree is what it was
+before the mutations started.
+
+**A cancelled run is not a failed run: it is a run whose measurement is
+worthless AND whose tree is now wrong.**  Both halves have to be dealt
+with.
+
+### The guarded way to run mutations, and the unguarded way
+
+The failure above was made POSSIBLE by how the run was started.  The
+engine (`ci/ci.py`) already knew about this shape of accident:
+
+    ci/ci.py --tiers mutations      # runs each harness in a throwaway
+                                    # `git worktree` sandbox, so the tree
+                                    # that matters is never written to
+
+That is why the sandbox exists (Loop #40's interrupted run left
+`src/channel/channel.mbt` with a swapped name/value pair).  **Running
+`host/loop89_mutations.py` directly skips the sandbox and writes into the
+working tree** -- which is the unguarded path, and the one that left the
+space out of the `-L` line here.
+
+Two habits come out of it, and both are cheap:
+
+* run mutation batches through `ci/ci.py --tiers mutations`, not directly;
+* when a direct run has to be interrupted anyway, run
+  `python host/loop89_mutations.py --restore` before trusting anything
+  else, and confirm with `.loop89/check_pristine89.py` -- **the gate
+  catching it is the LAST line of defence, and it cost a full gate run
+  to find out.**
+
+### An option letter that already means something
+
+The first version of this loop gave BOTH tools short options, and both
+were wrong, because the tools are named after OpenSSH tools whose options
+already exist:
+
+    ssh-agent -s     "print sh-style env commands"   not "which socket"
+    ssh-agent -a     "bind to this address"          not "load this key"
+    ssh-add   -s     "add keys from a PKCS#11 card"  not "which socket"
+
+`ssh_add -s <pipe>` meant "the agent is here".  Measured against the real
+tool with OUR agent running, so the connection succeeds and the provider
+is actually reached (`.loop89/probe_dash_s2.py`):
+
+* `ssh-add -s <provider>` **BLOCKS**.  It wants a PIN, asks on the
+  terminal, and with no terminal it waits -- killed at 6 s with **no
+  output at all**, the same shape as `ssh-keygen -p` in Loop #88.
+* `ssh-add -s` with no argument: `option requires an argument -- s`, and
+  its own usage text says `ssh-add -s pkcs11`.
+* `ssh-add -e <provider>`: `Could not remove card "<path>": agent
+  refused operation`, exit 1.
+
+So a tool that takes `-s` and means something else has done the worst
+thing available: **`ssh-add -s pkcs11` typed at it SUCCEEDS as a no-op**,
+and the user is told the card was added.
+
+Three behaviours are possible for an option a tool does not implement,
+and only one is honest:
+
+1. take the letter and give it a different meaning -- silently wrong;
+2. say "unknown option" -- a lie about the INTERFACE, since it is a real
+   OpenSSH option;
+3. say what the option MEANS and that this tool does not do it.
+
+This loop now does (3), and G7 pins it:
+
+    $ ssh_add -s provider
+    ssh_add: -s is for a PKCS#11 smartcard, which this tool does not support
+    (exit 1, and it does not hang)
+
+`ssh_agent` went further and dropped short options ENTIRELY:
+
+    $ ssh_agent -s x
+    ssh_agent: no short options: every ssh-agent short option already means something else
+    usage: ssh_agent [--socket <pipe>] [--key <file> ...]
+
+and the client has no socket option at all, because **`SSH_AUTH_SOCK` is
+how a client finds an agent** -- the literal string
+`SSH_AUTH_SOCK=\\.\pipe\\openssh-ssh-agent` is inside the real
+`ssh-add.exe`.
+
+### What this loop is really about
+
+* **The rules live in `src/`, and the driver only translates.**  The
+  protocol lives in `src/agent` and `src/agentserver`; the file format
+  lives in `src/keyfile`; `cmd/ssh_agent` owns the pipe and the loop over
+  connections, and `cmd/ssh_add` owns the sentences.  Neither driver
+  decides what a request MEANS.
+
+* **A server that says "success" to something it did not do is worse
+  than a server that says no.**  `AGENT_FAILURE` is a legal answer, and
+  the CLIENT decides what it means -- that is why `agent_add_identity`
+  returns `Bool?` and not a `Bool`: `None` is "the connection is gone",
+  `Some(false)` is "the agent refused", and those two are different
+  things.
+
+* **The key's two halves have to be the same key.**  The agent checks
+  that when a key is added, not when it is used: signing with a mismatched
+  pair produces a signature the client cannot verify, and the client sees
+  a mysterious authentication failure.  Finding it at ADD time is much
+  cheaper and much clearer.
+
+* **A comparison between two things that are both yours cannot check
+  your server.**  That is the G2 hole, and it is worth remembering for
+  every other "ours vs theirs" gate in this repository: when both sides
+  are the code under test, the comparison checks the CLIENT and says
+  nothing about the SERVER.
+
+* **The real tool is the judge, and the real tool is not always
+  available.**  Here the real CLIENT was available and the real AGENT was
+  not -- and the honest thing is to say which is which, rather than to
+  write a gate that quietly claims more than it checked.
+
+* **A named pipe's two ends have to be in two processes.**  The client
+  BLOCKS in `CreateFile` until the server calls `ConnectNamedPipe`, and
+  the server BLOCKS in `ConnectNamedPipe` until a client connects -- and
+  MoonBit's `async` is a single-threaded cooperative scheduler, so a
+  blocking C call in it blocks the whole program.  So the round trip is
+  **not** a unit test here: it is tested in the gate, which runs the
+  agent and the client as two processes, which is how the real tools use
+  it anyway.  The unit test covers the parts a single process CAN
+  check -- and those are exactly the parts where a wrong answer is a
+  hang.
+
+## The rest of the tool set -- what is done, and what is not
+
+The goal for this repository is the whole OpenSSH tool set in MoonBit.
+That is worth stating as a list rather than an impression, because "the
+client works" and "the repository is finished" are very different claims.
+
+**Done, and proven against a real peer or a real tool:**
+
+    ssh          ssh_live (native) / wt_ssh (browser) / ssh_full
+    ssh-keygen   make (Loop #85), encipher (Loop #86), read (Loop #87),
+                 rewrite -p/-c (Loop #88)
+    ssh-agent    Loop #89 -- and the REAL ssh-add talks to it
+    ssh-add      Loop #89
+    ssh-keyscan  cmd/ssh_keyscan
+    sftp         the client, against internal-sftp
+    port forward the CLIENT half: direct-tcpip
+
+**Not started.**  These are the honest remainder, and each one needs a
+different kind of judgement about what "proven" means:
+
+    scp             small.  Since OpenSSH 9.0 `scp` speaks the SFTP
+                    protocol, so this is a thin client over src/sftp --
+                    and it can be compared byte for byte against the
+                    real `scp`, which is the same standard Loop #89 used.
+    sftp-server     medium.  The SFTP subsystem SERVER.  Testable by
+                    pointing the real `sftp` client at it, which is
+                    stronger than a unit test and is the shape this
+                    repository already uses.
+    sshd            large, and the real one is several loops: server-side
+                    kex, userauth as a SERVER, channels, session,
+                    `sshd-session`/`sshd-auth` split.  Testable against
+                    the real `ssh` client.
+    ssh-copy-id     small.  Upstream is a shell script; the judgement
+                    call is whether a MoonBit version should mirror its
+                    sentences or just its effects.
+    ssh-keysign     small but niche -- the host-based-auth delegate, and
+                    it needs hostbased auth to be worth testing at all.
+
+**Deliberately not planned:**
+
+    ssh-pkcs11-helper   a smartcard.  `ssh-add -s/-e/-S` is refused with
+                        a sentence rather than silently redefined
+                        (see the option-letter section above), and a
+                        helper would be the same claim in a bigger bin.
+    ssh-sk-helper       FIDO/U2F.  Needs the hardware to mean anything,
+                        and a stub that "succeeds" would be worse than
+                        the refusal.
+
+The order worth taking is `scp`, then `sftp-server`, then `sshd` -- each
+one is testable against a real counterpart with the machinery this
+repository already has, and `sshd` is the only one that is really
+several loops.

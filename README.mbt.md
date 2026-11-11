@@ -10,7 +10,7 @@ only dependency that carries weight is `moonbitlang/async`, for filesystem and
 socket syscalls. `moonbit-community/proton*` is used by `cmd/proton_gui` only
 -- no package under `src/` may import it.
 
-- **Branch of record:** `loop41-m2-fault-console` (currently at Loop #54)
+- **Branch of record:** `loop41-m2-fault-console` (currently at Loop #89)
 - **Loop history and every design decision:** [`AGENTS.md`](AGENTS.md) -- read
   this one, it is the actual documentation
 - **License:** Apache-2.0
@@ -52,6 +52,9 @@ Also working, and proven against a real `sshd` or a man in the middle:
   `ssh -L`, with the max-packet clamping and both failure modes. The local
   listener that turns a connection into a request, and the `ssh -R`
   direction that the server initiates, are not here yet.
+- the SSH agent: `ssh_agent` holds keys, `ssh_add` talks to it, and the
+  **real** `ssh-add` talks to our agent byte for byte. The transport is a
+  Windows named pipe, because that is what the real client speaks.
 - two transports, one set of rules
 
 Four targets are built and compared byte for byte: `native`, `js`, `wasm`,
@@ -82,6 +85,7 @@ node host\verify_loop52.mjs    #  9 checks -- the pin survives the page going aw
 node host\verify_loop47.mjs    # 19 checks -- a peer that lies about its host key
 node host\verify_loop45.mjs    # 51 checks -- fault vectors over a real socket
 node host\verify_loop41.mjs    # 29 checks -- byte-identical to a Python oracle
+node host\verify_loop89.mjs    # 81 checks -- the agent, against the REAL ssh-add
 ```
 
 Mutation checks are separate, and are how a gate proves it would have caught
@@ -90,6 +94,7 @@ something:
 ```powershell
 python host\loop54_mutations.py    # 3 CAUGHT, 0 MISSED
 python host\loop53_mutations.py
+python host\loop89_mutations.py    # 23 CAUGHT, 0 MISSED
 ```
 
 **Never run two browser gates concurrently.** Each spawns Chromium, a static
@@ -111,9 +116,13 @@ src/
   sftp/ bpacket/ channel/               SFTP and the channel layer
   sshclient/ wtlive/                    the two transport adapters
   userauth/ sshconfig/
+  agent/ agentserver/ agentpipe/        the SSH agent: protocol, server, pipe
+  keyfile/                              the OpenSSH private key file
 cmd/
   ssh_live/                             the native client
   wt_ssh/                               the browser client
+  ssh_agent/ ssh_add/                   the agent daemon and its client
+  ssh_keygen/                           make, read, rewrite a key
   *_test/                               known-answer and property tests
 host/                                   python man in the middle + the gates
 ```
