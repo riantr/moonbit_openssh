@@ -10395,7 +10395,28 @@ one with the top-bit-set key and one with the P-384 key, and a wrong scalar
 or a wrong curve turns THOSE red.  Without them, mutations #0 and #1 would
 have been MISSED while every `-y` check stayed green.
 
-`host/verify_loop91.mjs`: 23/23.  `host/loop91_mutations.py`: see the log.
+`host/verify_loop91.mjs`: 23/23.  `host/loop91_mutations.py`: 6 mutations,
+6 caught, 0 missed, 0 invalid, 0 skipped.
+
+The standing gates after this loop, all green:
+
+    loop67   8/8     (CJK snapshot re-saved; the diff is only this loop's
+                      intentional additions -- 248 files, 17629 runs)
+    loop68  57/57
+    loop71   9/9     (949 files scanned, 0 machine-path hits)
+    loop90  41/41
+    loop91  23/23
+
+**loop71 was red at Loop #90's own commit and nobody knew**: `4fe5544`
+checked out into a worktree and run there reports 8/9, with
+`verify_loop90.mjs` asserting `C:\Windows\System32\OpenSSH\scp.exe`.  Both
+gates now declare a candidate list and probe it -- per binary, in the order
+each loop's measurements were taken with, because a machine holding both
+OpenSSH installations must resolve to what the measurements used or a green
+gate stops meaning what it meant.  Note the marker's limit: `EXEMPT_WINDOW`
+is 12 lines, and the failure says the file and the distance ("13 line(s)
+below its machine-path-exempt marker"), which is why it was a one-read fix.
+
 
 ### `moon check --deny-warn` reports unused values per FILE, resolves per PACKAGE
 
