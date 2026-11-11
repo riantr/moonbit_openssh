@@ -162,13 +162,22 @@ function moonCheck(pkg, target) {
   return { errors: failed ? (m ? Number(m[2]) : 1) : 0, warnings: m ? Number(m[1]) : -1, out: r.out };
 }
 
-// The real OpenSSH ssh-add.
-const KEYGEN_DIRS = [
+// The real OpenSSH tools this gate judges itself against.
+//
+// Loop #71 forbids a tracked file from ASSERTING a machine-specific
+// absolute path, and allows a *probe list* that is declared as one: each
+// entry is tried in turn and the gate fails loudly, naming all of them,
+// when none exists. This is that shape, and the marker line below is the
+// declaration -- `verify_loop71.mjs` treats a bare marker as a failure, so
+// the reason has to be here.
+//
+// machine-path-exempt: each entry is probed in order, none is asserted; the list names the three places Win32-OpenSSH installs to on this platform, and the gate reports all three when the tool is missing
+const SSH_DIRS = [
   "C:\\Windows\\System32\\OpenSSH",
   "C:\\Program Files\\OpenSSH-Win64",
   "C:\\Program Files\\OpenSSH",
 ];
-const SSH_ADDS = KEYGEN_DIRS
+const SSH_ADDS = SSH_DIRS
   .map((d) => path.join(d, "ssh-add.exe"))
   .filter((p) => existsSync(p));
 
@@ -530,7 +539,13 @@ async function main() {
   // -------------------------------------------------------------------------
   // Helper: make a test key using real ssh-keygen
   // -------------------------------------------------------------------------
-  const SSH_KEYGENS = KEYGEN_DIRS
+  // The same three directories that hold ssh-add.exe also hold
+  // ssh-keygen.exe, so the probe list above is the one to use. (It used to
+  // be a second copy of the same three strings under the name KEYGEN_DIRS,
+  // which went stale the moment the first copy was renamed -- a rename that
+  // leaves one reference behind is a ReferenceError at run time, not a
+  // compile error, and this gate's whole job is to be runnable.)
+  const SSH_KEYGENS = SSH_DIRS
     .map((d) => path.join(d, "ssh-keygen.exe"))
     .filter((p) => existsSync(p));
   

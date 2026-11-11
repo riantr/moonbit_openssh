@@ -20,6 +20,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,11 +34,37 @@ CJK = re.compile(r"[\u3000-\u9fff\u3400-\u4dbf\uff00-\uffef\u3040-\u30ff\uac00-\
 
 
 def walk():
-    for dirpath, dirnames, filenames in os.walk(ROOT):
-        dirnames[:] = [d for d in dirnames if d not in SKIP]
-        for f in sorted(filenames):
-            if f.endswith(SUFFIX):
-                yield os.path.join(dirpath, f)
+    """Every TRACKED file that carries one of SUFFIX.
+
+    The snapshot is a committed artefact, so it has to describe the tree a
+    *checkout* produces -- which is what `git ls-files` enumerates, not what
+    happens to be lying in somebody's working directory.
+
+    Loop #89 measured the difference. The committed snapshot carried an entry
+    for `src/test_nested/nested_test.mbt`, a path that `git log --all` shows
+    has never been tracked: it was picked up by walking the filesystem on the
+    machine that saved the snapshot. On CI the file cannot exist, so every run
+    printed `NOTE ... was in the snapshot and no longer exists` -- noise that
+    is indistinguishable from a real staleness signal, in a gate whose whole
+    job is to notice when CJK content moves.
+
+    A tracked file that is currently deleted in the working tree is skipped
+    rather than crashing: that is a normal state halfway through an edit, and
+    the entry simply is not in the snapshot this run.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if out.returncode != 0:
+        sys.exit("git ls-files failed in %s: %s"
+                 % (ROOT, out.stderr.decode("utf-8", "replace").strip()))
+    for rel in out.stdout.decode("utf-8").split("\0"):
+        if not rel.endswith(SUFFIX):
+            continue
+        full = os.path.join(ROOT, rel.replace("/", os.sep))
+        if os.path.exists(full):
+            yield full
 
 
 def collect():

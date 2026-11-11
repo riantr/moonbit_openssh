@@ -12,6 +12,37 @@
       "report": true
     },
     {
+      "package": "src/agent",
+      "test_files": [
+        "agent_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 38,
+      "files_reported": 1,
+      "report": true
+    },
+    {
+      "package": "src/agentpipe",
+      "test_files": [
+        "agentpipe_stub_test.mbt",
+        "agentpipe_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 21,
+      "files_reported": 2,
+      "report": true
+    },
+    {
+      "package": "src/agentserver",
+      "test_files": [
+        "agentserver_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 20,
+      "files_reported": 2,
+      "report": true
+    },
+    {
       "package": "src/bcrypt_pbkdf",
       "test_files": [
         "bcrypt_pbkdf_test.mbt"
@@ -240,6 +271,9 @@
   ],
   "reportable": [
     "src/aead",
+    "src/agent",
+    "src/agentpipe",
+    "src/agentserver",
     "src/bcrypt_pbkdf",
     "src/blowfish",
     "src/bpacket",
