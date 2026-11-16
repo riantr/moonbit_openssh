@@ -43,8 +43,8 @@ struct RemoteTarget {
 /// The scalar and curve of the identity file, or the sentence that says why
 /// there is none.
 fn identity_of(
-  o : @scp.ScpOptions,
-  fs : @scp.LocalFs,
+  o : @scplib.ScpOptions,
+  fs : @scplib.LocalFs,
 ) -> Result[(@bigint.BigNat, @ecdsa.Curve), String] {
   if o.identity_files.length() == 0 {
     return Err(
@@ -99,7 +99,7 @@ fn identity_of(
 /// as the wrong account fails with "Permission denied", which reads like a
 /// key problem and is not one.
 fn target_of_spec(
-  o : @scp.ScpOptions,
+  o : @scplib.ScpOptions,
   user_given : String?,
   host : String,
 ) -> Result[RemoteTarget, String] {
@@ -128,15 +128,15 @@ fn target_of_spec(
 /// there is no second set of sentences for the remote case.
 fn run_remote(
   prog : String,
-  o : @scp.ScpOptions,
-  fs : @scp.LocalFs,
-  report : @scp.ScpReport,
+  o : @scplib.ScpOptions,
+  fs : @scplib.LocalFs,
+  report : @scplib.ScpReport,
   user_given : String?,
   host : String,
 ) -> Unit {
   let (d, curve) = match identity_of(o, fs) {
     Err(why) => {
-      report.push(@scp.ScpError::Perror(host, why))
+      report.push(@scplib.ScpError::Perror(host, why))
       finish(prog, report)
       return
     }
@@ -144,7 +144,7 @@ fn run_remote(
   }
   let t = match target_of_spec(o, user_given, host) {
     Err(why) => {
-      report.push(@scp.ScpError::Perror(host, why))
+      report.push(@scplib.ScpError::Perror(host, why))
       finish(prog, report)
       return
     }
@@ -152,7 +152,7 @@ fn run_remote(
   }
   let conn = match @tcp.TcpConn::connect(t.host, t.port) {
     None => {
-      report.push(@scp.ScpError::Perror(t.host, "Connection refused"))
+      report.push(@scplib.ScpError::Perror(t.host, "Connection refused"))
       finish(prog, report)
       return
     }
@@ -170,7 +170,7 @@ fn run_remote(
       @knownhosts.KnownHostsPolicy::skip(),
     ) {
     Err(e) => {
-      report.push(@scp.ScpError::Perror(t.host, link_error_text(e)))
+      report.push(@scplib.ScpError::Perror(t.host, link_error_text(e)))
       conn.close()
       finish(prog, report)
       return
@@ -183,14 +183,14 @@ fn run_remote(
   )
   match drive.handshake() {
     Err(_) => {
-      report.push(@scp.ScpError::Perror(t.host, "no SFTP handshake"))
+      report.push(@scplib.ScpError::Perror(t.host, "no SFTP handshake"))
       conn.close()
       finish(prog, report)
       return
     }
     Ok(_) => ()
   }
-  @scp.run_copy(o, fs, Some(drive), report)
+  @scplib.run_copy(o, fs, Some(drive), report)
   conn.close()
   finish(prog, report)
 }

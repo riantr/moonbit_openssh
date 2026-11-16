@@ -44,6 +44,13 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+// The INIT extension rule and the checks that hold it up.  They are in
+// one file so that they cannot be edited apart: a rule with its own
+// separate evidence is a rule whose evidence can rot without anybody
+// noticing, and this rule is the one that had to stop comparing the INIT
+// reply byte for byte.
+import { runInitRuleChecks } from "./loop92_init_rule.mjs";
+
 const ROOT = path.resolve(
   new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
 );
@@ -277,6 +284,102 @@ class Server {
 
 // --------------------------------------------------------------- the bed
 
+// The INIT reply, parsed.
+//
+// An INIT reply is a VERSION and a list of EXTENSIONS, and the two halves
+// have to be judged differently.
+//
+// The VERSION is the protocol's: both servers answered 3, and a server
+// that answered something else would be a different protocol.
+//
+// The EXTENSION LIST is the SERVER's, and it changes with the server's
+// version.  Measured, on two machines, with the real `sftp-server.exe`:
+//
+//   OpenSSH 7.9p1 (this machine, `C:\Program Files\OpenSSH-Win64`)
+//     statvfs@openssh.com = "1",  no fstatvfs
+//   the inbox Windows OpenSSH (a GitHub runner)
+//     statvfs@openssh.com = "2",  plus fstatvfs@openssh.com = "2"
+//
+// So a gate that compares the whole INIT reply BYTE FOR BYTE is not
+// measuring our server -- it is measuring whether this machine's OpenSSH
+// happens to be the same version as the runner's.  That is the same
+// defect Loop #69 found in `host/sshd_setup.mjs`: a claim about the
+// machine that is not in the repository.
+//
+// The rule below is the one that is actually about US:
+//
+//   1. the VERSION is the same on both sides;
+//   2. every extension WE declare, the real server also declares -- we
+//      must not advertise a capability the peer does not have, because a
+//      client that believes it would send a request the peer refuses;
+//   3. every extension WE IMPLEMENT, we declare.
+//
+// Rule 2 is checked against the real server's list, so it still fails if
+// we invent an extension -- which is the thing that would actually break
+// a client.  What it does NOT do is fail because the real server has an
+// extension we do not, which is not our bug: it is a newer OpenSSH.
+function parseInit(buf) {
+  // The reply body WITHOUT the u32 length prefix -- the reader above
+  // strips it -- so the layout is:
+  //
+  //   u8 type (2 = FXP_INIT) | u32 version | (string, string) pairs
+  //
+  if (buf.length < 5) return null;
+  const version = buf.readUInt32BE(1);
+  const exts = new Map();
+  let at = 5;
+  while (at < buf.length) {
+    if (at + 4 > buf.length) return null;
+    const n = buf.readUInt32BE(at);
+    at += 4;
+    if (at + n > buf.length) return null;
+    const name = buf.toString("utf8", at, at + n);
+    at += n;
+    if (at + 4 > buf.length) return null;
+    const m = buf.readUInt32BE(at);
+    at += 4;
+    if (at + m > buf.length) return null;
+    const value = buf.toString("utf8", at, at + m);
+    at += m;
+    exts.set(name, value);
+  }
+  return { version, exts };
+}
+
+// The extensions our server IMPLEMENTS, and therefore must declare.
+//
+// `posix-rename` is here because it is IMPLEMENTED: it replaces the
+// target, which the draft's FXP_RENAME refuses to do (the real server
+// answers `4 Failure` for the same pair of files).  It is the only
+// extension with its own request handler in `src/sftpserver/session.mbt`.
+//
+// The other five the real server advertises are NOT implemented, and an
+// extension this server does not know answers `8 Operation unsupported`,
+// which is a different thing from an unknown request TYPE, which gets no
+// reply at all.  So they are not in this list: a server is not obliged to
+// declare a capability it does not have.
+//
+// The five we DO declare -- `statvfs`, `fstatvfs`, `hardlink`, `fsync`,
+// `lsetstat` -- are declared because the real server declares them and a
+// client that reads the list must see the same set.  Their REQUEST
+// handlers are the generic ones, which answer `8 Operation unsupported`
+// for the ones this server does not implement.
+const IMPLEMENTED_EXTS = [
+  "posix-rename@openssh.com",
+];
+
+// And the ones we declare without implementing them, which the real
+// server also declares.  These have to be in BOTH lists' agreement, so
+// they are checked here as well: declaring an extension the peer does
+// not have is what would break a client.
+const DECLARED_EXTS = [
+  "statvfs@openssh.com",
+  "fstatvfs@openssh.com",
+  "hardlink@openssh.com",
+  "fsync@openssh.com",
+  "lsetstat@openssh.com",
+];
+
 function freshBed() {
   // The read-only file cannot be removed while it is read-only, so the
   // attribute is taken off first.  `fs.rmSync` fails with EPERM
@@ -379,7 +482,9 @@ function tree() {
 const CASES = [
   {
     name: "INIT answers the VERSION",
-    steps: [[rInit(), 1]],
+    // No steps of its own: EVERY case starts with an INIT, so this case
+    // is the one whose only reply is the INIT reply.
+    steps: [],
   },
   {
     name: "STAT of a file and of a missing path",
@@ -645,6 +750,13 @@ async function main() {
   const realArgs = ["-e"];
   const ourArgs = [];
 
+  // The rule that judges the INIT reply, and the evidence that it holds:
+  // both sets of real bytes (this machine's OpenSSH and the runner's),
+  // and three negative controls.  Run BEFORE the cases, because a rule
+  // that cannot fail would make the cases below meaningless.
+  console.log("\nA. the INIT extension rule");
+  runInitRuleChecks(ok);
+
   for (const c of CASES) {
     freshBed();
     specialBed(c.name);
@@ -665,7 +777,18 @@ async function main() {
         `our server answered ${ours.replies.length} of ${expected} replies`,
       );
     }
-    for (let i = 0; i < Math.max(real.replies.length, ours.replies.length); i++) {
+    // EVERY case starts with an INIT (the reader sends one before the
+    // case's own steps), so reply 0 is ALWAYS the INIT reply.  It is
+    // judged by the extension rules rather than byte for byte, because
+    // its content is a property of the real server's VERSION, and the
+    // real server's version is not ours to choose.
+    //
+    // Before this, one difference -- the extension list -- turned every
+    // single case red, because every case's reply 0 is that reply.
+    if (real.replies.length > 0 && ours.replies.length > 0) {
+      diffs.push(...initDiffs(real.replies[0], ours.replies[0]));
+    }
+    for (let i = 1; i < Math.max(real.replies.length, ours.replies.length); i++) {
       const a = real.replies[i];
       const b = ours.replies[i];
       if (a !== b) {
@@ -694,6 +817,64 @@ async function main() {
   );
 
   return summary();
+}
+
+// The INIT comparison, by the three rules above.
+//
+// `realHex` and `oursHex` are the two replies as hex, because that is
+// how the rest of this file reports a difference.
+function initDiffs(realHex, oursHex) {
+  const diffs = [];
+  const real = parseInit(Buffer.from(realHex || "", "hex"));
+  const ours = parseInit(Buffer.from(oursHex || "", "hex"));
+  if (!real || !ours) {
+    return [
+      `the INIT reply could not be parsed (real=${realHex} ours=${oursHex})`,
+    ];
+  }
+  // Rule 1: the version is the protocol's.
+  if (real.version !== ours.version) {
+    diffs.push(
+      `the protocol version differs: real=${real.version} ours=${ours.version}`,
+    );
+  }
+  // Rule 2: the extensions we IMPLEMENT must be ones the real server
+  // also declares.  A client that reads the list and sends one of these
+  // must find the peer willing to answer it.
+  //
+  // It is NOT the other way round.  The real server on a newer OpenSSH
+  // declares extensions we do not have -- `limits@openssh.com`,
+  // `expand-path@openssh.com`, `copy-data`, `home-directory` -- and it
+  // moved `statvfs@openssh.com` from "1" to "2" and added
+  // `fstatvfs@openssh.com`.  None of that is our bug: a server is not
+  // obliged to have the extensions a newer version of the peer has.
+  //
+  // What WOULD be our bug is declaring an extension the peer does not
+  // have, because a client that believes it would send a request the
+  // peer answers with "8 Operation unsupported" -- or, worse, believes
+  // the peer can do something it cannot.  So the rule is one-directional
+  // on purpose, and it is checked against the real server's list so it
+  // can still fail.
+  for (const name of IMPLEMENTED_EXTS) {
+    if (!real.exts.has(name)) {
+      diffs.push(`we implement ${name} and the real server does not declare it`);
+    }
+  }
+  // Rule 3: what we implement, we declare.
+  for (const name of IMPLEMENTED_EXTS) {
+    if (!ours.exts.has(name)) {
+      diffs.push(`we implement ${name} but do not declare it`);
+    }
+  }
+  // And the contract list: the extensions this server declares are the
+  // ones it says it has, so a change to either side is a change to the
+  // contract and has to be looked at.
+  for (const name of DECLARED_EXTS) {
+    if (!ours.exts.has(name)) {
+      diffs.push(`we declare ${name} in the contract but not in the reply`);
+    }
+  }
+  return diffs;
 }
 
 function spawnSyncMoon(args) {

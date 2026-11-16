@@ -10644,6 +10644,349 @@ extension this server does not know answers `8 Operation unsupported`,
 which is a different thing from an unknown request TYPE, which gets no
 reply at all.
 
+## Loop #93: `sshd` -- the server half of SSH
+
+`src/sshclient` is the client: it dials out, it proposes, it verifies the other
+side's signature.  This loop built the **mirror** -- `src/sshd` listens, it
+answers, it is the one whose host key gets signed -- and `cmd/sshd` is the
+driver that accepts a socket and runs the state machine.
+
+The slice is the whole handshake up to a **publickey authentication**:
+
+    1. the identification exchange,
+    2. the key exchange, in the SERVER role,
+    3. the switch to the encrypted transport,
+    4. `ssh-userauth` service negotiation,
+    5. the `publickey` method, with the client's signature verified.
+
+The connection protocol -- channels, `exec`, `shell`, `subsystem` -- is the
+NEXT loop.  It is not a detail that was skipped: it is a different protocol
+(RFC 4254) whose every rule is expressed in terms of a session that has to
+exist first.  What this loop owes the peer in the meantime is a refusal it can
+read, and that refusal is checked byte for byte (see below).
+
+### The oracle: the real `ssh.exe`, and its own words
+
+A server is not right because it agrees with us -- it is right when a real
+client believes it.  So the oracle here is the OpenSSH client on this
+machine, and the verdict is **the client's own sentence**:
+
+    Authenticated to 127.0.0.1 ([127.0.0.1]:22321) using "publickey".
+
+That one line says the client verified our host key's signature over the
+exchange hash, switched to the encrypted transport, negotiated `ssh-userauth`,
+and checked the signature over the session identifier.  Every one of those is
+a thing the server has to get right, and the gate reads the client's sentence
+rather than the server's opinion of itself.
+
+The failure modes this catches are the ones a self-check cannot: **a reply
+that is well formed but framed wrongly is refused by the peer**, and the peer
+says so.  Two of the three defects below were exactly that.
+
+### What was measured, and how
+
+`host/ssh_recorder.py` is a recording TCP proxy.  Put in front of a real
+`sshd -D`, it records the plaintext part of a session -- everything up to
+NEWKEYS -- and that is the whole of what a server has to get byte-for-byte
+right before anything is encrypted.  It is deliberately dumb: it forwards
+bytes and writes them down, because a proxy that understood SSH would be a
+second implementation of SSH, and its understanding would be the thing under
+test.
+
+| the fact | the number | where it came from |
+|---|---|---|
+| the real sshd proposes group14 + ed25519 + aes128-ctr + hmac-sha2-256 | one set | the recorder in front of a real `sshd -D` |
+| the real sshd does **not** offer strict-kex | absent | the same capture |
+| `KEX_ECDH_REPLY` is three strings | `string(K_S) string(Q_S) string(sig)` | the same capture |
+| `K_S` is `string("ssh-ed25519") + string(pub32)` | 51 bytes | the same capture |
+| the signature field is `string(string(alg) + string(sig64))` | **87 bytes on the wire** | the same capture |
+| the signature blob is `string("ssh-ed25519") + string(64)` | 83 bytes | the same capture |
+| `Q_S` is an mpint, leading zero included | 4 + N | the same capture |
+| the client's `CHANNEL_OPEN` is **four** fields | 23 bytes | our server, with the real client |
+| there is **no** `string sender channel` in `CHANNEL_OPEN` | absent | the same |
+| `CHANNEL_OPEN_FAILURE` is **four** fields | `u32 u32 string string` | RFC 4254 §5.4, and the client's own answer |
+
+The algorithms are not a preference: they are what the real `sshd` and the
+real client negotiated, and they are what this repository's own client
+already speaks, so the server's transcript can be compared field by field
+with the real server's.  `curve25519-sha256` would also work -- the
+primitives are in the tree (`src/kexc25519`) -- but choosing it would mean the
+comparison could no longer be made, and a comparison that cannot be made is a
+claim that cannot be checked.
+
+The server's proposal lives in `src/kexflow` (`Proposal::default_server`),
+not in `src/sshd`: the proposal is the KEX's own business, and a server that
+had to import the client's proposal would put the two halves of one protocol
+in two packages that cannot see each other's tables.
+
+### The three defects the real client found
+
+None of them would have been found by a unit test that only checked its own
+ideas, because in all three the server produced a **perfectly well-formed
+message that the peer refused to read**.
+
+  1. **The signature field was missing one layer of `string`.**  The reply's
+     third field is a string whose CONTENT is the signature blob, so the blob
+     is wrapped in a string ONE more time.  Written unwrapped, the bytes were
+     the same 83 bytes of content with a different framing -- `u32(11)
+     "ssh-ed25519" || u32(64) || sig` instead of `u32(83) || u32(11)
+     "ssh-ed25519" || u32(64) || sig`.  The peer read an **11-byte
+     "signature"**, found 68 bytes it did not expect, and said
+     `unexpected bytes remain after decoding`.  It never sent NEWKEYS, so the
+     server's own failure was `no_newkeys` -- a symptom that pointed at the
+     wrong place entirely.
+
+  2. **The `CHANNEL_OPEN` was read with one `string` too many.**  The payload
+     is four fields -- `string type || u32 sender channel || u32 window ||
+     u32 max packet` -- and there is **no** `string sender channel` between
+     the type and the number.  Reading one took the **window size** for the
+     channel number, so the refusal was addressed to channel 2097152 and the
+     client answered `open failure packet referred to nonexistent channel
+     2097152`.  The repository's own client (`src/channel`, which talks to
+     the real sshd every day) builds the same four fields; the RFC's fifth
+     field is not what the implementations send.
+
+  3. **The `CHANNEL_OPEN_FAILURE` left out the language tag.**  The payload is
+     `uint32 recipient || uint32 reason || string description || string
+     language tag` -- FOUR fields.  Three leave the peer reading the next
+     packet's bytes as the tag.
+
+The first of the three is the reason `host/verify_loop93.mjs` also records
+the handshake and checks the **shape** of the reply against the shape the
+real sshd was measured to send: a whole-handshake verdict cannot say WHICH
+message was wrong.
+
+### The two holes the mutation suite found
+
+The first run of the thirteen mutations caught **eleven**.  The two it did not
+catch were worth more than the eleven it did, because both of them were holes
+in the GATE -- a check that could not fail, and a rule the gate could not see.
+
+  1. **"The client verified our host key" could not fail.**  The check
+     looked for the client's `Server host key: ssh-ed25519 SHA256:...` line.
+     But OpenSSH prints that line **before** it verifies the signature over
+     the exchange hash, so a server that signs nothing at all still produced
+     the line, and the check stayed green while the client was aborting with
+     `incorrect signature`.  The check now also asserts that the client did
+     **not** say `incorrect signature` -- the client's own sentence, measured
+     with the signature zeroed, not guessed.
+
+  2. **The authorized-keys rule was written TWICE.**  The probe
+     (`key_is_authorized`) and the signed request (`verify_publickey`) each
+     had their own comparison of the key blob against the list.  The real
+     client ALWAYS sends the probe first, so breaking only the signed
+     request's comparison left the probe's refusal standing, and breaking
+     only the probe's comparison left the signed request's refusal standing.
+     **Neither half of the rule was visible to the gate.**  The rule is
+     written once now -- `key_authorized` -- and called from both, and the
+     mutation that breaks it turns the gate red.
+
+The second one is the general shape: **a rule that is written twice is a rule
+that can be broken in a way nobody notices**, and the mutation suite is
+exactly the place where that shows up.  The first one is the other shape: **a
+check that greps for a line the peer prints BEFORE the thing it claims to
+check has been checked.**
+
+### The rules in one place
+
+`src/sshd/kexserver.mbt` is the key exchange in the server role,
+`authserver.mbt` is the `publickey` method and the authorized keys, `wire.mbt`
+is moving packets, and `server.mbt` is the state machine that decides what
+happens in what order.  `cmd/sshd` decides nothing about SSH: it listens,
+reads the host key and the authorized keys, and hands the connection over.
+
+Three rules were worth writing down because they are easy to get backwards:
+
+  * **The two directions are the client's names with the roles swapped.**
+    What the server SENDS uses the `stoc` key and what it RECEIVES uses the
+    `ctos` key.  Getting that backwards does not fail loudly -- it decrypts
+    the peer's stream into noise and the MAC does not verify, which reads as
+    "the peer sent garbage".
+  * **The authorized keys are consulted BEFORE the signature is looked at.**
+    The other order turns "you do not have access" into "your signature is
+    bad", which is a different and misleading answer -- and it does wasted
+    work on every unauthorized key.
+  * **A key with OPTIONS in `authorized_keys` is REFUSED.**  This server does
+    not implement `command=` or `no-pty`, and a key whose restrictions it
+    will not enforce is a key whose restrictions are silently dropped.
+
+### The gate, the mutations, and the tests
+
+`host/verify_loop93.mjs` is **28 checks**.  `host/loop93_mutations.py` is
+**13 mutations**, and each one has to turn a NAMED check red: the name is
+matched as a whole line, and the named check is consulted before anything
+else, so a mutation that breaks the build is INVALID rather than MISSED.
+Three of the thirteen are the defects above, reproduced exactly.
+
+`src/sshd/sshd_test.mbt` is **15 tests**, green on native, js, wasm and
+wasm-gc.  The framing ones are written against the bytes the real sshd was
+measured to send -- the reply's signature field is 83 bytes and the blob
+inside it has no trailing bytes, the channel number is the sender channel and
+not the window size.
+
+### The CI was red before this loop, and the reason was a warning on stderr
+
+The GitHub Actions run on Loop #92's commit (`16183b3`) was **red**: 59 of 66
+steps, with seven gates failing.  None of them was caused by Loop #93 -- they
+were red already -- and the reason is worth writing down, because it is the
+third time this repository has been broken by a claim about a machine instead
+of a claim about the code.
+
+**1. A build warning went into the output a hash was computed over.**
+`host/verify_loop80.mjs` pins the output of seven `moon run` programs by
+sha256, and its `moon()` helper hashes `stdout + stderr` together.  `moon`
+writes its warnings to **stderr**, and Loop #90 added `cmd/scp`, whose
+`moon.pkg` imports `src/scp` -- the same name as the package itself.  moon
+answers that with
+
+    Warning: Duplicate alias `scp` at "...\cmd\scp\moon.pkg".
+
+so the warning text went into the hash.  **All seven baselines stopped
+matching.**  Measured, to be sure of the direction: the stdout alone hashes
+to exactly the recorded baseline (`1bbbc364fb3d5e51` for `u128_test`), and
+stdout+stderr does not.  The fix is the alias:
+
+    import { "openssh/openssh_moonbit/src/scp" @scplib, ... }
+
+and `cmd/sshd` does the same with `@sshdsrv`, because `src/sshd` has the same
+name as `cmd/sshd`.  **A package that imports a package with its own name
+makes moon warn on every build in the workspace**, and the warning is on
+stderr, so any gate that hashes a command's combined output inherits it.
+Loop #80, 82, 83, 84 and 85 were all red for this one reason.
+
+**2. A gate read files that nothing in the repository made.**
+`host/verify_loop91.mjs` reads four private key fixtures from `.loop91/`.
+They were made by hand, by a probe script that was never committed, and
+`.loop*/` is gitignored -- so the gate was green on the machine that wrote
+it and **crashed with ENOENT** on a fresh clone.  The fixtures are now made
+by `host/loop91_fixtures.py`, which is in the repository, and the gate calls
+it.  The `mpint/k0` fixture needs a P-256 key whose scalar is **above
+2^255**, so the script SEARCHES for one (measured: 3 keys on this machine;
+the bound is 60) rather than assuming one exists.  And the gate does not
+take the script's word for it: it parses the private key itself, with a
+second implementation of the OPENSSH PRIVATE KEY format, and asserts the
+scalar is 33 bytes starting `00`.  A gate that believes the maker is a gate
+that believes a comment.
+
+**3. A gate compared bytes that belong to the server's version.**
+`host/verify_loop92.mjs` compares our SFTP server with the real
+`sftp-server.exe` reply by reply, byte for byte -- and **every case starts
+with an INIT**, so reply 0 of every case is the INIT reply.  The INIT
+reply's extension list is not the protocol's; it is the server's, and it
+changes with the server's version.  Measured with the real tool on two
+machines:
+
+| the real server | bytes | the extension list |
+|---|---|---|
+| OpenSSH 7.9p1 (this machine) | 179 | `statvfs` "2", `fstatvfs` "2" |
+| the inbox Windows OpenSSH (the runner) | 250 | `statvfs` "2", and `limits`, `expand-path`, `copy-data`, `home-directory` |
+
+One difference -- the extension list -- turned **every** case red on the
+runner, and none of it is our bug: it is a newer OpenSSH.  The INIT reply
+is now judged by RULES: the protocol version is the same, every extension
+we IMPLEMENT is one the real server also declares, and every extension we
+declare is in our contract.  The rules and their evidence are in
+`host/loop92_init_rule.mjs` and `host/loop92_init_replies.json` -- **both
+sets of real bytes are in the repository**, so the rule is checked against
+both machines' OpenSSH on every run -- and three negative controls say the
+rule can still go red (drop an implemented extension, change the version,
+implement something the peer lacks).  The rule is deliberately
+one-directional: the real server declaring extensions we do not have is not
+our bug, and a server is not obliged to have what a newer peer has.
+
+The general shape is the same one Loop #69 found in
+`host/sshd_setup.mjs`: **a claim about the machine is not a rule.**  Three
+versions of it, three fixes, and the fix each time is to put the machine's
+part into the repository -- the alias, the fixture script, the two sets of
+INIT bytes.
+
+### And the fixture that was made by hand hid a real bug for two loops
+
+The fixture script is not only a fix for the ENOENT.  Making the keys
+**fresh on every run** turned a fixture that had been pinned to one lucky
+key into a generator, and the generator found a defect that the pinned
+fixture had been hiding for two loops.
+
+`src/keyfile` checked the ECDSA scalar's length like this:
+
+    if d.length() > ecdsa_scalar_max(curve) || d.length() == 0 ||
+       d.length() < ecdsa_scalar_max(curve) - 1
+
+and `ecdsa_scalar_max` is `point_width / 2 + 1`, so for P-521 it accepted
+**66 or 67** bytes and nothing else.  But an `mpint` is stored minimally:
+leading zeros are stripped, and a `00` is put back only when the top bit
+of the first byte is set.  P-521's order starts `01`, so a scalar below
+2^520 has a `00` as the first byte of its 66-byte form -- that `00` is not
+a sign byte (the number is positive), so it is stripped, and the file
+stores **65** bytes.  The reader called such a file malformed.
+
+| curve | the number | the stored length can be | the reader accepted |
+|---|---|---|---|
+| P-256 | 32 bytes | 32 | 32 |
+| P-384 | 48 bytes | 48 | 48 |
+| P-521 | 66 bytes | **65**, 66, 67 | 66, 67 |
+
+So the reader refused **one ECDSA key in 256** -- the ones whose scalar's
+top byte came out zero -- and the real `ssh-keygen -y` read every one of
+them.  The check is now `1 .. width` bytes, with the upper bound still
+there, because a scalar longer than the curve's width is not a scalar of
+that curve; a TRUNCATED file is caught by the check words and the
+padding, which are what say whether the block is a whole one.
+
+Two things are worth saying about how it was found:
+
+* **The pinned fixture was the reason it survived.**  The hand-made
+  `.loop91/k521` was one of the other 255, so the gate was green and the
+  reader was wrong, and both were true at the same time.  A fixture that
+  is regenerated is a fixture that cannot keep its luck.
+* **The new test was mutation-checked.**  Putting the old check back
+  makes `a_p521_scalar_of_65_bytes_reads_and_the_line_is_the_one_openssh_prints`
+  fail by name -- so the test has cover, rather than merely passing.
+
+The fix is in `src/keyfile/ecdsa.mbt`, the test in
+`src/keyfile/ecdsa_test.mbt` (57 tests, green on all four targets), and
+the shape is written down in `ecdsa_scalar_width`'s doc comment, because
+"the scalar's length is a range and not a number" is the kind of rule
+that is re-derived wrongly otherwise.
+
+### The rule that comes out of all three
+
+**A gate must measure the thing it claims, on the machine it runs on, and
+nothing else.**  Each of the three failures above was a gate that measured
+something adjacent:
+
+| the gate measured | what it claimed |
+|---|---|
+| a hash of `stdout + stderr` | "the program's output has not changed" |
+| "the file exists" | "the fixture is the one the case is about" |
+| the INIT reply, byte for byte | "our server agrees with the real one" |
+| the scalar's length, as one number | "this is an ECDSA scalar" |
+
+The fix in each case is to make the measurement narrower and the evidence
+wider:
+
+* hash **stdout only**, because stderr belongs to the toolchain, not to the
+  program -- and put the toolchain's own warnings out of the way (the
+  alias) rather than filtering them out of the hash, because a filter is
+  another rule that can be wrong;
+* have the gate **make** its fixture, and **parse it itself** to check it
+  is the shape the case is about, because a gate that trusts the maker
+  trusts a comment;
+* judge the reply by **rules that are about us** (the protocol version; the
+  extensions we implement) rather than by bytes that belong to the peer's
+  version, and keep the peer's bytes **in the repository** so the rule is
+  checked against every machine's OpenSSH rather than only this one's;
+* accept the **whole range** a value can have -- a scalar's length is
+  `1 .. width`, not one number -- and make the fixture **fresh**, because
+  a pinned fixture is a fixture that can keep its luck.
+
+The last one has a rule inside it that is easy to get backwards: **the real
+server having extensions we do not have is not our bug.**  A server is not
+obliged to have what a newer version of the peer has, and the newest
+OpenSSH replaced four extensions with two.  The rule is deliberately
+one-directional, and the negative controls in `host/loop92_init_rule.mjs`
+say so.
+
 ## The rest of the tool set -- what is done, and what is not
 
 The goal for this repository is the whole OpenSSH tool set in MoonBit.
@@ -10666,15 +11009,20 @@ client works" and "the repository is finished" are very different claims.
     sftp-server  Loop #92 -- `src/sftpserver` plus `cmd/sftp_server`,
                  byte-comparable against the real `sftp-server.exe` on
                  every request shape (see below)
+    sshd         Loop #93 -- `src/sshd` plus `cmd/sshd`: the handshake and
+                 a publickey authentication, against the REAL `ssh.exe`,
+                 which says `Authenticated to ... using "publickey"` (see
+                 below).  The connection layer is the next loop.
     port forward the CLIENT half: direct-tcpip
 
 **Not started.**  These are the honest remainder, and each one needs a
 different kind of judgement about what "proven" means:
 
-    sshd            large, and the real one is several loops: server-side
-                    kex, userauth as a SERVER, channels, session,
-                    `sshd-session`/`sshd-auth` split.  Testable against
-                    the real `ssh` client.
+    sshd, the rest  the connection layer (channels, `exec`, `shell`,
+                    `subsystem`), the other userauth methods, the
+                    `sshd-session`/`sshd-auth` split, and the rekey.
+                    Testable against the real `ssh` client, one loop at a
+                    time -- Loop #93 did the handshake and `publickey`.
     ssh-copy-id     small.  Upstream is a shell script; the judgement
                     call is whether a MoonBit version should mirror its
                     sentences or just its effects.
@@ -10694,4 +11042,5 @@ different kind of judgement about what "proven" means:
 The order worth taking is `scp`, then `sftp-server`, then `sshd` -- each
 one is testable against a real counterpart with the machinery this
 repository already has, and `sshd` is the only one that is really
-several loops.
+several loops.  The first two are done; `sshd` is under way, and its
+handshake is proven against the real client.

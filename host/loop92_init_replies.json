@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "The two INIT replies that Loop #92's extension rule has to hold for.",
+    "",
+    "The gate compares our SFTP server with the real `sftp-server.exe` on",
+    "the machine it runs on.  The INIT reply's EXTENSION LIST is not the",
+    "protocol's -- it is the server's, and it changes with the server's",
+    "version.  Measured, with the real tool, on two machines:",
+    "",
+    "  this_machine  -- OpenSSH 7.9p1 (Win32-OpenSSH), the build on the",
+    "    machine these gates were developed on.  179 bytes.",
+    "",
+    "  the_runner  -- the inbox Windows OpenSSH, which a GitHub runner",
+    "    has.  250 bytes.  It moved `statvfs@openssh.com` from \"1\" to",
+    "    \"2\", added `fstatvfs@openssh.com`, and dropped the four",
+    "    extensions (`limits`, `expand-path`, `copy-data`,",
+    "    `home-directory`) that the older one had.",
+    "",
+    "So a gate that compares the INIT reply BYTE FOR BYTE is measuring",
+    "whether this machine's OpenSSH is the same version as the runner's.",
+    "That is the same defect Loop #69 found in `host/sshd_setup.mjs`: a",
+    "claim about the machine that is not in the repository.",
+    "",
+    "The rule the gate uses instead is in `host/verify_loop92.mjs`, and",
+    "`host/verify_loop92_init_rule.mjs` exercises it against these bytes",
+    "and against three negative controls.  The bytes are kept HERE, in",
+    "the repository, so the rule is checked against both machines'",
+    "OpenSSH on every run -- and so the next version of the real server",
+    "can be ADDED to the list rather than rediscovered.",
+    "",
+    "This file is written by `.loop93/build_init_replies.mjs` from the",
+    "measured bytes.  Hand-typed hex is how the first version of it came",
+    "to differ from the measurement by six bytes."
+  ],
+  "our_replies": {
+    "this_machine": "020000000300000018706f7369782d72656e616d65406f70656e7373682e636f6d00000001310000001373746174766673406f70656e7373682e636f6d0000000132000000146673746174766673406f70656e7373682e636f6d000000013200000014686172646c696e6b406f70656e7373682e636f6d0000000131000000116673796e63406f70656e7373682e636f6d0000000131000000146c73657473746174406f70656e7373682e636f6d0000000131",
+    "the_runner": "020000000300000018706f7369782d72656e616d65406f70656e7373682e636f6d00000001310000001373746174766673406f70656e7373682e636f6d0000000132000000146673746174766673406f70656e7373682e636f6d000000013200000014686172646c696e6b406f70656e7373682e636f6d0000000131000000116673796e63406f70656e7373682e636f6d0000000131000000146c73657473746174406f70656e7373682e636f6d0000000131"
+  },
+  "real_replies": {
+    "this_machine": "020000000300000018706f7369782d72656e616d65406f70656e7373682e636f6d00000001310000001373746174766673406f70656e7373682e636f6d0000000132000000146673746174766673406f70656e7373682e636f6d000000013200000014686172646c696e6b406f70656e7373682e636f6d0000000131000000116673796e63406f70656e7373682e636f6d0000000131000000146c73657473746174406f70656e7373682e636f6d0000000131",
+    "the_runner": "020000000300000018706f7369782d72656e616d65406f70656e7373682e636f6d00000001310000001373746174766673406f70656e7373682e636f6d000000013200000014686172646c696e6b406f70656e7373682e636f6d0000000131000000116673796e63406f70656e7373682e636f6d0000000131000000146c73657473746174406f70656e7373682e636f6d0000000131000000126c696d697473406f70656e7373682e636f6d000000013100000017657870616e642d70617468406f70656e7373682e636f6d000000013100000009636f70792d6461746100000001310000000e686f6d652d6469726563746f72790000000131"
+  }
+}

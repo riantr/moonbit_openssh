@@ -64,6 +64,56 @@ pub fn Proposal::default_client(strict_kex : Bool) -> Proposal {
 }
 
 ///|
+/// The SERVER's proposal (Loop #93).
+///
+/// This is the one place the server's algorithm list is written down, and it
+/// is written down here rather than in `src/sshd` for the reason the client
+/// list is here: the proposal is the KEX's own business, and a server that
+/// had to import the client's proposal would put the two halves of the same
+/// protocol in two packages that cannot see each other's tables.
+///
+/// **The list is measured, not chosen.** The real `sshd` on this machine
+/// negotiated exactly these four names with the real `ssh.exe`, and the
+/// transcript was captured byte for byte (`.loop93/`):
+///
+///     kex        diffie-hellman-group14-sha256
+///     host key   ssh-ed25519
+///     cipher     aes128-ctr
+///     mac        hmac-sha2-256
+///
+/// Two things follow from that, and both are worth stating because they are
+/// the reasons this list is short:
+///
+///   * It is a strict SUBSET of the real server's proposal (the real one also
+///     offers ecdsa/rsa host keys, aes256-ctr, chacha20-poly1305 and more).
+///     A client picks the first algorithm of ITS OWN list that the server
+///     also offers, so a subset makes the client land on the same algorithms
+///     it landed on against the real server -- which is what makes the two
+///     transcripts comparable field by field.
+///   * Every name here is one this tree can actually run: `src/kexdh` has
+///     RFC 3526 group 14, `src/hostkey` has ed25519, and `src/bpacket` has
+///     the aes128-ctr + hmac-sha2-256 path. `check_proposal_runnable` says so
+///     about any proposal, and this one passes it.
+///
+/// The strict-KEX marker is NOT sent, and that is measured too: the real
+/// sshd 8.0 on this machine does not send it either, and the real client
+/// completes the handshake with it absent.
+pub fn Proposal::default_server() -> Proposal {
+  {
+    kex_algs: "diffie-hellman-group14-sha256",
+    hostkey_algs: "ssh-ed25519",
+    enc_ctos: "aes128-ctr",
+    enc_stoc: "aes128-ctr",
+    mac_ctos: "hmac-sha2-256",
+    mac_stoc: "hmac-sha2-256",
+    comp_ctos: "none",
+    comp_stoc: "none",
+    lang_ctos: "",
+    lang_stoc: "",
+  }
+}
+
+///|
 /// ASCII 字符串转 bytes(提案常量专用)
 fn pf_ascii(s : String) -> FixedArray[Byte] {
   let a : FixedArray[Byte] = FixedArray::make(s.length(), b'\x00')

@@ -88,8 +88,19 @@ import sandbox  # noqa: E402
 # src/sshclient is native-only in practice (see AGENTS.md, Loop #54), so it is
 # built for native only -- listing it for wasm would make CI red for a reason
 # that has been understood and documented for loops.
-MULTI_TARGET_PACKAGES = ["src\\bpacket", "src\\kexflow"]
-NATIVE_ONLY_PACKAGES = ["src\\sshclient", "src\\transport", "src\\knownhosts"]
+#
+# Loop #93 added two:
+#
+#   * `src/sshd` -- the SERVER half of SSH.  Its rules are platform-free and
+#     it builds and its 15 tests pass on all four targets; only the DRIVER
+#     (`cmd/sshd`) reads files, and that is native only.
+#   * `cmd/sshd` -- native only, because it reads the host key and the
+#     authorized keys with `@fs`.  Measured: `moon build cmd/sshd --target js`
+#     fails, `moon build src/sshd --target js` does not.
+MULTI_TARGET_PACKAGES = ["src\\bpacket", "src\\kexflow", "src\\sshd"]
+NATIVE_ONLY_PACKAGES = [
+    "src\\sshclient", "src\\transport", "src\\knownhosts", "cmd\\sshd",
+]
 TARGETS = ["native", "js", "wasm", "wasm-gc"]
 
 GATE_RE = re.compile(r"verify_loop(\d+)\.mjs$")

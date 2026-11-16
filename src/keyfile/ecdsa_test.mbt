@@ -176,6 +176,19 @@ const ECDSA_LINE_521 : String = "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA
 const ECDSA_BODY_521 : String = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAArAAAABNlY2RzYS1zaGEyLW5pc3RwNTIxAAAACG5pc3RwNTIxAAAAhQQBv2DPtrLuuA0bJMrDvJgYmh3fOP6vs9+Lq40Pd456FSXX8V/gGDFPFimadHAirE492VvR/XTE8BbvyXFsDYWFXz8B2qcCQw3zv+fjNy43efvVbxKMtXoW/o8hxmAqFWULKZYuJBsR2Pr7tKvflCbde5E0miSuh6YzI+HSWMwu5wLd9HwAAAEIrV+Aoa1fgKEAAAATZWNkc2Etc2hhMi1uaXN0cDUyMQAAAAhuaXN0cDUyMQAAAIUEAb9gz7ay7rgNGyTKw7yYGJod3zj+r7Pfi6uND3eOehUl1/Ff4BgxTxYpmnRwIqxOPdlb0f10xPAW78lxbA2FhV8/AdqnAkMN87/n4zcuN3n71W8SjLV6Fv6PIcZgKhVlCymWLiQbEdj6+7Sr35Qm3XuRNJokroemMyPh0ljMLucC3fR8AAAAQgGTQ/BF7nggxRHX+1mEKiirIPOmHEpJaCXh+FEao6OUo/M/CnqZPqoUbAtSmPUtfQMR4GWsmo7RArJAfSkyedDgGAAAAApsb29wOTFwNTIx"
 
 ///|
+/// The public line `ssh-keygen -y` printed for `.loop91/k521`, whose
+/// scalar is 65 bytes rather than 66.
+///
+/// This is the shape the reader used to REFUSE, and it is the one the
+/// hand-made fixture happened not to be.  See the test below.
+const ECDSA_LINE_521_SHORT : String = "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAHYBeQzTOkqYbak5KXydZa/4LU8dxgdNLgEtCtIgH7GNSZRrY99dPBKJowINMQFWVyoxzdbOql+UL59QpXzQtEgxQHhOw5o2NIhdiO7lvrerTf/YvgaorePOc6yb07wWYc9bT8e14BmcKEVKLh2uxC4yI6nw/y6TW6zeINUrjIeFWpAeQ== loop91@k521"
+
+///|
+/// The base64 body of `.loop91/k521` -- the same key as
+/// `ECDSA_BODY_521`, the one whose scalar is 65 bytes.
+const ECDSA_BODY_521_SHORT : String = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAArAAAABNlY2RzYS1zaGEyLW5pc3RwNTIxAAAACG5pc3RwNTIxAAAAhQQB2AXkM0zpKmG2pOSl8nWWv+C1PHcYHTS4BLQrSIB+xjUmUa2PfXTwSiaMCDTEBVlcqMc3WzqpflC+fUKV80LRIMUB4TsOaNjSIXYju5b63q03/2L4GqK3jznOsm9O8FmHPW0/HteAZnChFSi4drsQuMiOp8P8uk1us3iDVK4yHhVqQHkAAAEI3X+k5d1/pOUAAAATZWNkc2Etc2hhMi1uaXN0cDUyMQAAAAhuaXN0cDUyMQAAAIUEAdgF5DNM6SphtqTkpfJ1lr/gtTx3GB00uAS0K0iAfsY1JlGtj3108EomjAg0xAVZXKjHN1s6qX5Qvn1ClfNC0SDFAeE7DmjY0iF2I7uW+t6tN/9i+Bqit485zrJvTvBZhz1tPx7XgGZwoRUouHa7ELjIjqfD/LpNbrN4g1SuMh4VakB5AAAAQSRZ9wPbDaN8JELOncWPtXbSHY6P7x4xrgpc86jUchwIigzwSx0FSChgIAOeHXBqMbfTqb6uSqFCbPxCVxI8x2jEAAAAC2xvb3A5MUBrNTIx"
+
+///|
 /// The public line `ssh-keygen -y` printed for `.loop91/mpint/k0`, whose
 /// scalar has its top bit set.
 const ECDSA_LINE_MPINT : String = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCBh1grBTCDW8LR39eijItVkRRHxQzYIa3wxhCtA8UfMtmn+KL1B+vx98lcaj5HyOlq2d31cbNkbWA64X2PLS5Q= mpint0"
@@ -311,6 +324,95 @@ test "a_scalar_whose_top_bit_is_set_keeps_all_of_its_bytes" {
     WrongPassphrase(why) =>
       abort("a real mpint file wanted a passphrase: " + why)
     Ed25519(_, _) => abort("a P-256 file was read as an ed25519 key")
+  }
+}
+
+///|
+/// A P-521 scalar of 65 bytes reads, and it is the shape the reader used
+/// to refuse.
+///
+/// P-521's order starts `01`, so a scalar below 2^520 has a `00` as the
+/// first byte of its 66-byte form.  That `00` is not a sign byte -- the
+/// number is positive -- so the `mpint` encoding STRIPS it, and the file
+/// stores 65 bytes.  The reader's length check used to accept only 66
+/// and 67, so it called this file malformed.
+///
+/// **This is one key in 256.**  The reader refused every P-521 key whose
+/// scalar happened to be below 2^520, and the gate did not find it for
+/// two loops because the hand-made fixture was one of the other 255.  The
+/// fixture is now made fresh by `host/loop91_fixtures.py` on every run,
+/// and this one is the case that the old reader got wrong.
+///
+/// The public line is the real `ssh-keygen -y` output for this file, so
+/// the test asserts against the tool's own answer and not against a
+/// remembered shape.
+test "a_p521_scalar_of_65_bytes_reads_and_the_line_is_the_one_openssh_prints" {
+  match @keyfile.parse_private_file(ecdsa_file(ECDSA_BODY_521_SHORT)) {
+    Ecdsa(pair, comment) => {
+      assert_eq(pair.curve, "nistp521")
+      assert_eq(comment, "loop91@k521")
+      assert_eq(pair.point.length(), 133)
+      assert_eq(pair.point[0].to_int(), 4)
+      // 65, not 66: the leading zero of the 66-byte form was stripped,
+      // because it was not a sign byte.
+      assert_eq(pair.scalar.length(), 65)
+      assert_eq(
+        ecdsa_hex_of(pair.scalar),
+        "2459f703db0da37c2442ce9dc58fb576d21d8e8fef1e31ae0a5cf3a8d4721c088a0cf04b1d0548286020039e1d706a31b7d3a9beae4aa1426cfc4257123cc768c4",
+      )
+      assert_eq(
+        @keyfile.ecdsa_public_line_text(pair, comment),
+        ECDSA_LINE_521_SHORT,
+      )
+    }
+    Malformed(why) =>
+      abort("a real P-521 file with a 65-byte scalar was refused: " + why)
+    Unsupported(why) =>
+      abort("a real P-521 file with a 65-byte scalar was unsupported: " + why)
+    WrongPassphrase(why) =>
+      abort("a real P-521 file wanted a passphrase: " + why)
+    Ed25519(_, _) => abort("a P-521 file was read as an ed25519 key")
+  }
+}
+
+///|
+/// The scalar's length is a RANGE, and the reader has to accept the whole
+/// range.
+///
+/// This is the same defect as the test above, stated as the rule rather
+/// than as one file: after the `mpint`'s one leading zero is removed, the
+/// scalar is 1 .. width bytes, where width is the curve's byte width
+/// (32, 48, 66).  The old check accepted `width` and `width + 1` only,
+/// so a scalar of `width - 1` bytes -- one key in 256 -- was refused as
+/// malformed.
+///
+/// The upper bound is still checked, because a scalar longer than the
+/// curve's width is not a scalar of that curve.  A TRUNCATED file is
+/// caught by the check words and the padding, which are what say whether
+/// the block is a whole one.
+test "the_scalar_length_is_a_range_and_not_a_number" {
+  assert_eq(@keyfile.ecdsa_scalar_width("nistp256"), 32)
+  assert_eq(@keyfile.ecdsa_scalar_width("nistp384"), 48)
+  assert_eq(@keyfile.ecdsa_scalar_width("nistp521"), 66)
+  // The P-256 fixture: 32 bytes.
+  match @keyfile.parse_private_file(ecdsa_file(ECDSA_BODY_256)) {
+    Ecdsa(pair, _) => assert_eq(pair.scalar.length(), 32)
+    _ => abort("the P-256 fixture did not read")
+  }
+  // The P-384 fixture: 48 bytes.
+  match @keyfile.parse_private_file(ecdsa_file(ECDSA_BODY_384)) {
+    Ecdsa(pair, _) => assert_eq(pair.scalar.length(), 48)
+    _ => abort("the P-384 fixture did not read")
+  }
+  // The P-521 fixture whose scalar's 66-byte form starts with `01`: 66.
+  match @keyfile.parse_private_file(ecdsa_file(ECDSA_BODY_521)) {
+    Ecdsa(pair, _) => assert_eq(pair.scalar.length(), 66)
+    _ => abort("the P-521 fixture did not read")
+  }
+  // And the one whose 66-byte form starts with `00`: 65.
+  match @keyfile.parse_private_file(ecdsa_file(ECDSA_BODY_521_SHORT)) {
+    Ecdsa(pair, _) => assert_eq(pair.scalar.length(), 65)
+    _ => abort("the short P-521 fixture did not read")
   }
 }
 

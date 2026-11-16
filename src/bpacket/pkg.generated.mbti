@@ -74,6 +74,8 @@ pub fn u32_to_8_le(FixedArray[Byte], Int32, UInt32) -> Unit
 
 pub fn u8_to_32_le(FixedArray[Byte], Int32) -> UInt32
 
+pub fn we_need_for(String, String) -> Int32
+
 // Errors
 
 // Types and methods

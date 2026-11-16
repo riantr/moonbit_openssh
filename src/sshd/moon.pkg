@@ -1,0 +1,63 @@
+///| `src/sshd` -- the SERVER half of SSH.
+///
+/// Loop #93.  `src/sshclient` is the client: it dials out, it proposes, it
+/// verifies the other side's signature.  This package is the mirror -- it
+/// listens, it answers, it is the one whose host key gets signed.
+///
+/// The split is the same one `src/sftpserver` made one layer down (Loop #92):
+/// **the rules live in `src/`, the driver only moves bytes.**  `cmd/sshd`
+/// accepts a socket and runs this state machine; it decides nothing.
+///
+/// ## What this loop covers, and what it does not
+///
+/// The slice is the whole handshake up to a **publickey authentication**:
+///
+///   1. the identification exchange,
+///   2. the key exchange, in the SERVER role,
+///   3. the switch to the encrypted transport,
+///   4. `ssh-userauth` service negotiation,
+///   5. the `publickey` method, with the client's signature verified.
+///
+/// The connection protocol -- channels, `exec`, `shell`, `subsystem` -- is the
+/// NEXT loop.  It is not a detail that was skipped: it is a different
+/// protocol (RFC 4254) with its own rules, and the handshake has to be
+/// finished and PROVEN first, because every one of those rules is expressed
+/// in terms of a session that exists.
+///
+/// ## Why the algorithms are the ones they are
+///
+/// The proposal here is `diffie-hellman-group14-sha256` + `aes128-ctr` +
+/// `hmac-sha2-256` + `ssh-ed25519`.  That is not a preference:
+///
+///   * it is what the real `sshd` on this machine negotiated with the real
+///     `ssh.exe`, captured byte for byte (`.loop93/`), and
+///   * it is what this repository's own client already speaks
+///     (`src/sshclient/live.mbt`), so the client and the server here are two
+///     halves of ONE implementation and not two dialects.
+///
+/// `curve25519-sha256` would also work and the primitives for it are in the
+/// tree (`src/kexc25519`), but choosing it would mean the server's transcript
+/// could no longer be compared field by field with the real server's.  A
+/// comparison that cannot be made is a claim that cannot be checked.
+///
+/// ## The oracle
+///
+/// The peer is the real OpenSSH client (`ssh.exe`), and the gate reads its
+/// own words: a server that completes the handshake and verifies the
+/// signature makes the client print `Authenticated to ... using publickey`.
+/// That sentence is the client's verdict on us, not ours on ourselves.
+import {
+  "moonbitlang/core/encoding/base64",
+  "openssh/openssh_moonbit/src/bigint",
+  "openssh/openssh_moonbit/src/bpacket",
+  "openssh/openssh_moonbit/src/hostkey",
+  "openssh/openssh_moonbit/src/kexc25519",
+  "openssh/openssh_moonbit/src/kexdh",
+  "openssh/openssh_moonbit/src/kexflow",
+  "openssh/openssh_moonbit/src/rng",
+  "openssh/openssh_moonbit/src/sshwire",
+  "openssh/openssh_moonbit/src/transport",
+  "openssh/openssh_moonbit/src/userauth",
+}
+
+pkgtype(kind: "library")

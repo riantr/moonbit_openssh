@@ -472,13 +472,17 @@ QA_CATEGORIES = [
         command=[
             MOON + ["test", "-p", "src/bpacket", "--target", "native"],
             MOON + ["test", "-p", "src/kexflow", "--target", "native"],
+            MOON + ["test", "-p", "src/sshd", "--target", "native"],
         ],
         tier="qa",
         evidence=(
             "`moon test src/<pkg>` over the composite packages, as distinct from "
             "the unit-test row's leaf packages. Probed: src/bpacket exit 0 "
             "'Total tests: 25, passed: 25, failed: 0'; src/kexflow exit 0 "
-            "'Total tests: 15, passed: 15, failed: 0'. src/channel is "
+            "'Total tests: 15, passed: 15, failed: 0'; src/sshd exit 0 "
+            "'Total tests: 15, passed: 15, failed: 0' -- and src/sshd is "
+            "'15, passed: 15, failed: 0' on js, wasm and wasm-gc as well, so "
+            "the server's rules are not tied to one backend. src/channel is "
             "deliberately NOT listed: it has no *_test.mbt, and "
             "`moon test -p src/channel` exits 0 while printing 'Total tests: 0' "
             "and 'Warning: no test entry found' -- a green that ran nothing. Its "

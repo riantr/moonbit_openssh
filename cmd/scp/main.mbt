@@ -34,11 +34,11 @@
 ///|
 /// `argv0: ` plus the sentence, or the sentence alone for the `perror`
 /// group.  Every measured line is `<argv0>: <words>` except that group.
-fn add_line(out : StringBuilder, prog : String, e : @scp.ScpError) -> Unit {
-  if @scp.needs_argv0_prefix(e) {
+fn add_line(out : StringBuilder, prog : String, e : @scplib.ScpError) -> Unit {
+  if @scplib.needs_argv0_prefix(e) {
     out.write_string(prog + ": ")
   }
-  out.write_string(@scp.text_crlf(@scp.scp_error_text(e) + "\n"))
+  out.write_string(@scplib.text_crlf(@scplib.scp_error_text(e) + "\n"))
 }
 
 ///|
@@ -49,52 +49,54 @@ fn main {
   for i = 1; i < argv.length(); i = i + 1 {
     args.push(argv[i])
   }
-  match @scp.parse_args(args) {
-    @scp.ParsedArgs::Refused(e) => {
+  match @scplib.parse_args(args) {
+    @scplib.ParsedArgs::Refused(e) => {
       // getopt's sentence, then the usage block, then 1.
-      @scp.write_stderr(
-        @scp.text_crlf(
-          prog + ": " + @scp.arg_error_text(e) + "\n" + @scp.usage_text(),
+      @scplib.write_stderr(
+        @scplib.text_crlf(
+          prog + ": " + @scplib.arg_error_text(e) + "\n" + @scplib.usage_text(),
         ),
       )
       @env.exit(1)
     }
-    @scp.ParsedArgs::ProtocolV1 => {
-      @scp.write_stderr(
-        @scp.text_crlf(prog + ": " + @scp.unsupported_protocol_v1_text() + "\n"),
+    @scplib.ParsedArgs::ProtocolV1 => {
+      @scplib.write_stderr(
+        @scplib.text_crlf(
+          prog + ": " + @scplib.unsupported_protocol_v1_text() + "\n",
+        ),
       )
       @env.exit(255)
     }
-    @scp.ParsedArgs::BadPort(v) => {
+    @scplib.ParsedArgs::BadPort(v) => {
       // The one message with a bare `\n`: the tool writes the text raw
       // and only the trailing newline is translated.
-      @scp.write_stderr(prog + ": " + @scp.port_error_text(v) + "\r\n")
+      @scplib.write_stderr(prog + ": " + @scplib.port_error_text(v) + "\r\n")
       @env.exit(255)
     }
-    @scp.ParsedArgs::NeedUsage => {
-      @scp.write_stderr(@scp.text_crlf(@scp.usage_text()))
+    @scplib.ParsedArgs::NeedUsage => {
+      @scplib.write_stderr(@scplib.text_crlf(@scplib.usage_text()))
       @env.exit(1)
     }
-    @scp.ParsedArgs::Options(o) => run(prog, o)
+    @scplib.ParsedArgs::Options(o) => run(prog, o)
   }
 }
 
 ///|
-fn run(prog : String, o : @scp.ScpOptions) -> Unit {
-  let fs = @scp.real_local_fs()
-  let report = @scp.ScpReport::new()
-  let sources = @scp.sources_of(o)
-  let target = @scp.target_of(o)
-  let mut needs_remote = !@scp.is_local(target)
+fn run(prog : String, o : @scplib.ScpOptions) -> Unit {
+  let fs = @scplib.real_local_fs()
+  let report = @scplib.ScpReport::new()
+  let sources = @scplib.sources_of(o)
+  let target = @scplib.target_of(o)
+  let mut needs_remote = !@scplib.is_local(target)
   let hosts : Array[String] = []
   // Loop #91: the login name comes from the first remote spec, the same
   // one the connection is made to.  `user@host:path` is the only place
   // `scp` can learn it.
   let mut remote_user : String? = None
   for i = 0; i < sources.length(); i = i + 1 {
-    match @scp.split_spec(sources[i]) {
-      @scp.Spec::Local(_) => ()
-      @scp.Spec::Remote(user, host, _) => {
+    match @scplib.split_spec(sources[i]) {
+      @scplib.Spec::Local(_) => ()
+      @scplib.Spec::Remote(user, host, _) => {
         needs_remote = true
         hosts.push(host)
         if remote_user is None {
@@ -103,9 +105,9 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
       }
     }
   }
-  match @scp.split_spec(target) {
-    @scp.Spec::Local(_) => ()
-    @scp.Spec::Remote(user, host, _) => {
+  match @scplib.split_spec(target) {
+    @scplib.Spec::Local(_) => ()
+    @scplib.Spec::Remote(user, host, _) => {
       hosts.push(host)
       if remote_user is None {
         remote_user = user
@@ -122,7 +124,9 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
       }
     }
     if different {
-      report.push(@scp.ScpError::Perror(hosts[0], "one connection, one host"))
+      report.push(
+        @scplib.ScpError::Perror(hosts[0], "one connection, one host"),
+      )
       finish(prog, report)
       return
     }
@@ -134,7 +138,7 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
     }
     match spawn_drive(o.sftp_server_path) {
       Err(why) => {
-        report.push(@scp.ScpError::Perror(o.sftp_server_path, why))
+        report.push(@scplib.ScpError::Perror(o.sftp_server_path, why))
         finish(prog, report)
       }
       Ok(proc) => {
@@ -142,13 +146,13 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
         match drive.handshake() {
           Err(_) => {
             report.push(
-              @scp.ScpError::Perror(o.sftp_server_path, "no SFTP handshake"),
+              @scplib.ScpError::Perror(o.sftp_server_path, "no SFTP handshake"),
             )
             proc.close()
             finish(prog, report)
           }
           Ok(_) => {
-            @scp.run_copy(o, fs, Some(drive), report)
+            @scplib.run_copy(o, fs, Some(drive), report)
             proc.close_stdin()
             let _ = proc.wait()
             proc.close()
@@ -159,7 +163,7 @@ fn run(prog : String, o : @scp.ScpOptions) -> Unit {
     }
   } else {
     // Both ends are on this machine: no drive, no process.
-    @scp.run_copy(o, fs, None, report)
+    @scplib.run_copy(o, fs, None, report)
     finish(prog, report)
   }
 }
@@ -186,11 +190,11 @@ fn drive_over(proc : @subproc.Proc) -> @sftpdrive.SftpDrive {
 }
 
 ///|
-fn finish(prog : String, report : @scp.ScpReport) -> Unit {
+fn finish(prog : String, report : @scplib.ScpReport) -> Unit {
   let out = StringBuilder()
   for i = 0; i < report.lines.length(); i = i + 1 {
     add_line(out, prog, report.lines[i])
   }
-  @scp.write_stderr(out.to_string())
-  @env.exit(@scp.scp_exit_code(report.exit()))
+  @scplib.write_stderr(out.to_string())
+  @env.exit(@scplib.scp_exit_code(report.exit()))
 }

@@ -117,6 +117,36 @@ pub fn ecdsa_scalar_max(curve : String) -> Int32 {
 }
 
 ///|
+/// The curve's byte width for the private scalar: 32, 48 or 66.
+///
+/// This is the width of the NUMBER, and it is not the width the file
+/// stores.  An `mpint` is stored minimally: leading zeros are gone, and a
+/// `00` is added back only when the top bit of the first byte is set.  So
+/// the stored length of a valid scalar is not one number, it is a RANGE:
+///
+/// | curve | the number | the stored length can be |
+/// |---|---|---|
+/// | P-256 | 32 bytes | 32 (top bit clear) or 33 (`00` + 32) |
+/// | P-384 | 48 bytes | 48 or 49 |
+/// | P-521 | 66 bytes | 65, 66 or 67 |
+///
+/// **P-521 is the one with THREE.**  Its order starts `01`, so a scalar
+/// below 2^520 has a `00` as its first byte of the 66-byte form; that
+/// zero is not a sign byte (the value is positive) so it is stripped, and
+/// the stored length is 65.  A scalar at or above 2^520 keeps 66 bytes,
+/// and one at or above 2^520 with the top bit set gets a `00` in front
+/// and 67.
+///
+/// Which is exactly the shape of the bug this function exists to describe:
+/// a reader that accepts only 66 and 67 rejects **one key in 256** --
+/// the ones whose scalar's 66-byte form starts with `00`.  The gate did
+/// not find that for two loops, because the fixture it used happened to
+/// be one of the other 255.  See `host/loop91_fixtures.py`.
+pub fn ecdsa_scalar_width(curve : String) -> Int32 {
+  ecdsa_point_width(curve) / 2
+}
+
+///|
 /// The wire form of the public half: `string type || string curve || string Q`.
 ///
 /// This is what the private file's public blob holds, byte for byte, and
@@ -198,9 +228,24 @@ fn parse_ecdsa_fields(
                 None => Parsed::Malformed("the ECDSA private scalar is missing")
                 Some((raw_d, a3)) => {
                   let d = strip_mpint_zero(raw_d)
-                  if d.length() > ecdsa_scalar_max(curve) ||
-                    d.length() == 0 ||
-                    d.length() < ecdsa_scalar_max(curve) - 1 {
+                  // The scalar is an mpint, so its stored length is a
+                  // RANGE and not a number: 1 .. width bytes, after the
+                  // one leading zero (if any) is removed.  The upper
+                  // bound is the curve's byte width -- a scalar longer
+                  // than that is not a scalar of this curve.  The lower
+                  // bound is 1, because a scalar of zero is not a scalar
+                  // at all.
+                  //
+                  // The check used to be "the length is width or width+1",
+                  // which is one too few at the bottom: an mpint strips
+                  // the leading zeros of a smaller number, so a scalar
+                  // below 2^(8*(width-1)) is stored in fewer bytes.  That
+                  // is one key in 256, and the reader said it was
+                  // malformed.  A truncated file is still caught -- by
+                  // the check words and the padding, which are what say
+                  // whether the block is a whole one.
+                  let width = ecdsa_scalar_width(curve)
+                  if d.length() > width || d.length() == 0 {
                     Parsed::Malformed(
                       "the ECDSA scalar is " +
                       d.length().to_string() +

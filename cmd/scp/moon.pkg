@@ -4,7 +4,7 @@ import {
   "openssh/openssh_moonbit/src/ecdsa",
   "openssh/openssh_moonbit/src/keyfile",
   "openssh/openssh_moonbit/src/knownhosts",
-  "openssh/openssh_moonbit/src/scp",
+  "openssh/openssh_moonbit/src/scp" @scplib,
   "openssh/openssh_moonbit/src/sftpdrive",
   "openssh/openssh_moonbit/src/sshclient",
   "openssh/openssh_moonbit/src/subproc",

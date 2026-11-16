@@ -1,0 +1,19 @@
+import {
+  "moonbitlang/core/env",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "openssh/openssh_moonbit/src/keyfile",
+  "openssh/openssh_moonbit/src/sshd" @sshdsrv,
+  "openssh/openssh_moonbit/src/tcp",
+}
+
+///| Native only: this driver listens on a TCP socket and reads files, and
+/// neither has a browser target.  The rules it drives (`src/sshd`) are
+/// transport-agnostic and build on all four targets -- that is where the
+/// tests live.
+
+pkgtype(kind: "executable")
+
+options(
+  supported_targets: "+native",
+)

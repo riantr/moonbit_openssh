@@ -46,6 +46,18 @@ pub fn Proposal::default_client(strict_kex : Bool) -> Proposal
   //   协商结果仅记录不使用)※见 §5 决策 D3
   // comp×2: "none";lang×2: ""
 
+pub fn Proposal::default_server() -> Proposal
+  // Loop #93:the SERVER's list, and it is MEASURED rather than chosen.
+  // The real sshd on this machine negotiated exactly these four names with
+  // the real ssh.exe, and the transcript was captured byte for byte:
+  //   kex "diffie-hellman-group14-sha256";hostkey "ssh-ed25519"
+  //   enc×2 "aes128-ctr";mac×2 "hmac-sha2-256";comp×2 "none";lang×2 ""
+  // It is a strict SUBSET of the real server's proposal, so a client lands
+  // on the same algorithms it lands on against the real server -- which is
+  // what makes the two transcripts comparable field by field.
+  // The strict-kex marker is NOT sent:the real sshd 8.0 does not send it
+  // either, and the real client completes the handshake without it.
+
 pub fn kexinit_payload(cookie : FixedArray[Byte], p : Proposal) -> FixedArray[Byte]
   // kex_prop2buf 布局:cookie‖10×cstring‖u8(0)‖u32(0);不含 type 字节
 

@@ -287,6 +287,65 @@ const KEY_CASES = [
   ["mpint/k0", "P-256 with the top bit set"],
 ];
 
+// The magic every OPENSSH PRIVATE KEY file starts with.
+const OPENSSH_KEY_MAGIC = "openssh-key-v1";
+
+// Read the private scalar `d` out of an unencrypted OPENSSH PRIVATE KEY.
+//
+// This is a SECOND implementation of the format, on purpose: the fixture
+// script says which key it made, and a gate that believes the maker is a
+// gate that believes a comment.  The scalar is an mpint -- a value whose
+// top bit is set carries a leading 0x00 and is one byte longer than the
+// curve's width -- and that leading byte is the whole point of the
+// `mpint/k0` fixture.
+function mpintScalarIsHighBit(keyPath) {
+  let text;
+  try {
+    text = fs.readFileSync(keyPath, "utf8");
+  } catch {
+    return false;
+  }
+  const m = text.match(/-----BEGIN OPENSSH PRIVATE KEY-----([\s\S]*?)-----END OPENSSH PRIVATE KEY-----/);
+  if (!m) return false;
+  let raw;
+  try {
+    raw = Buffer.from(m[1].replace(/\s+/g, ""), "base64");
+  } catch {
+    return false;
+  }
+  const readString = (buf, at) => {
+    if (at + 4 > buf.length) return null;
+    const n = buf.readUInt32BE(at);
+    if (at + 4 + n > buf.length) return null;
+    return [buf.subarray(at + 4, at + 4 + n), at + 4 + n];
+  };
+  let at = OPENSSH_KEY_MAGIC.length + 1; // "openssh-key-v1" and a NUL
+  if (raw.subarray(0, OPENSSH_KEY_MAGIC.length).toString("latin1") !== OPENSSH_KEY_MAGIC) {
+    return false;
+  }
+  for (let i = 0; i < 3; i++) {
+    const s = readString(raw, at);
+    if (!s) return false;
+    at = s[1]; // ciphername, kdfname, kdfoptions
+  }
+  at += 4; // numkeys
+  const pub = readString(raw, at);
+  if (!pub) return false;
+  at = pub[1];
+  const priv = readString(raw, at);
+  if (!priv) return false;
+  let b = 8; // the two check words
+  for (let i = 0; i < 3; i++) {
+    // ktype, curve, public point
+    const s = readString(priv[0], b);
+    if (!s) return false;
+    b = s[1];
+  }
+  const d = readString(priv[0], b);
+  if (!d) return false;
+  return d[0].length === 33 && d[0][0] === 0x00;
+}
+
 function sectionA() {
   console.log("\nA. the key file, against ssh-keygen");
 
@@ -408,6 +467,38 @@ async function main() {
   // thing to print and a useless thing to compare.
   fs.mkdirSync(STATE, { recursive: true });
   fs.rmSync(knownHosts, { force: true });
+
+  // The key fixtures are MADE here, by a script that is in the repository.
+  //
+  // They used to be files that happened to be on the machine that wrote
+  // this gate: made by hand, under `.loop91/`, which is gitignored, by
+  // nothing in the tree.  So the gate was green on that machine and red
+  // on a fresh clone, and the red was an ENOENT on a file nobody could
+  // produce.  That is the same shape as Loop #69's `host/sshd_setup.mjs`
+  // defect -- a claim about the machine that is not in the repository is a
+  // coincidence that happens to hold on your machine.
+  //
+  // They are regenerated every run on purpose: a fixture that survived
+  // from an earlier run is a fixture whose provenance is a claim, and the
+  // whole point of the mpint one is that it has a 33-byte scalar, which
+  // is a property of ONE key and not of the directory.
+  console.log("\nmaking the key fixtures");
+  const fixtures = spawnSync(
+    "python",
+    ["host/loop91_fixtures.py", "--dir", FIXTURES],
+    { cwd: ROOT, encoding: "utf8" },
+  );
+  ok("the fixtures are made by a script in the repository",
+    fixtures.status === 0,
+    (fixtures.stdout || "").trim().split("\n").slice(-1)[0] ||
+    (fixtures.stderr || "").trim().slice(-300));
+  // And they are the RIGHT ones: the mpint case is a 33-byte scalar whose
+  // first byte is 0x00, and the rest are the three curves.  Asserting the
+  // shape is what makes "the file exists" a claim about the code.
+  const mpintKey = path.join(FIXTURES, "mpint", "k0");
+  ok("the mpint fixture really is a high-bit scalar",
+    fs.existsSync(mpintKey) && mpintScalarIsHighBit(mpintKey),
+    fs.existsSync(mpintKey) ? "the scalar is not 33 bytes starting 00" : `missing ${mpintKey}`);
 
   sectionA();
 

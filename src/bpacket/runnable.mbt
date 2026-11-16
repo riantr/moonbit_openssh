@@ -143,6 +143,35 @@ pub fn transport_params(
 }
 
 ///|
+/// How many bytes of key material the key derivation has to produce for a
+/// negotiated cipher and MAC.
+///
+/// RFC 4253 §7.2 derives six values (A..F) and OpenSSH derives them all to
+/// one length, taking the shorter one's prefix (kex.c:1155): the length is
+/// the maximum over the cipher key, the block size, the IV and the MAC key,
+/// NOT the cipher key alone.  `derive_keys` truncates to this, so a length
+/// that is too small silently produces short keys.
+///
+/// **This lives here rather than in a transport layer because the table it
+/// reads lives here.**  It used to be `sshclient::live::we_need_for`, and
+/// when Loop #93 added the server side, the server needed the same rule --
+/// and a server that imports the client package to get it inverts the
+/// dependency arrow between the two halves of SSH.  So the rule moved down
+/// to the package that owns the parameter table, and the client's function
+/// became a call to it.
+pub fn we_need_for(cipher : String, mac : String) -> Int32 {
+  let (key_len, block_size, iv_len, mac_key_len) = transport_params(cipher, mac)
+  let m = key_len
+  let m = if block_size > m { block_size } else { m }
+  let m = if iv_len > m { iv_len } else { m }
+  if mac_key_len > m {
+    mac_key_len
+  } else {
+    m
+  }
+}
+
+///|
 /// Authentication **tag** length carried on the wire for this cipher -- the
 /// counterpart of OpenSSH's `auth_len` column (cipher.c).
 ///

@@ -197,24 +197,11 @@ pub(all) struct LiveReport {
 /// 统一按这个长度派生,短的那个取前缀——这一点在 kex.c:1155 对 A..F 一视同仁,
 /// 不是只对加密密钥取 key_len。
 pub fn we_need_for(cipher : String, mac : String) -> Int32 {
-  // The parameter table lives in src/bpacket; this must not be a second and
-  // looser copy of it. Loop #60 found four cipher and five MAC names here, of
-  // which only aes128-ctr + hmac-sha2-256 has a packet-layer path. The caller
-  // below truncates the derived key to 16 bytes unconditionally, so an
-  // `aes256-ctr` agreement would have run aes128-ctr with half the key and
-  // reported nothing. Latent -- no live proposal offered it -- but it failed
-  // open rather than closed.
-  let (key_len, block_size, iv_len, mac_key_len) = @bpacket.transport_params(
-    cipher, mac,
-  )
-  let m = key_len
-  let m = if block_size > m { block_size } else { m }
-  let m = if iv_len > m { iv_len } else { m }
-  if mac_key_len > m {
-    mac_key_len
-  } else {
-    m
-  }
+  // The rule and the parameter table it reads live in `src/bpacket` (Loop #93
+  // moved them there, because the server side needs the same rule and must
+  // not depend on the client package to get it).  This stays as the client's
+  // name for it, because the client's call sites and the gate read it.
+  @bpacket.we_need_for(cipher, mac)
 }
 
 ///|

@@ -124,7 +124,7 @@
         "hostkey_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 135,
+      "uncovered_lines": 134,
       "files_reported": 12,
       "report": true
     },
@@ -145,7 +145,7 @@
         "privkey_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 29,
+      "uncovered_lines": 8,
       "files_reported": 3,
       "report": true
     },
@@ -155,7 +155,7 @@
         "kexflow_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 73,
+      "uncovered_lines": 70,
       "files_reported": 3,
       "report": true
     },
@@ -287,6 +287,16 @@
       "report": true
     },
     {
+      "package": "src/sshd",
+      "test_files": [
+        "sshd_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 115,
+      "files_reported": 5,
+      "report": true
+    },
+    {
       "package": "src/subproc",
       "test_files": [
         "subproc_native_test.mbt",
@@ -346,6 +356,7 @@
     "src/sha256",
     "src/sha512",
     "src/sshconfig",
+    "src/sshd",
     "src/subproc",
     "src/x25519"
   ]

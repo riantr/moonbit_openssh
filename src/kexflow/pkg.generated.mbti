@@ -128,6 +128,7 @@ pub(all) struct Proposal {
   lang_stoc : String
 }
 pub fn Proposal::default_client(Bool) -> Self
+pub fn Proposal::default_server() -> Self
 
 pub(all) enum ReplyOutcome {
   Established(Established)
