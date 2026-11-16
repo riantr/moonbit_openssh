@@ -10987,6 +10987,214 @@ OpenSSH replaced four extensions with two.  The rule is deliberately
 one-directional, and the negative controls in `host/loop92_init_rule.mjs`
 say so.
 
+## Loop #94: `sshd` -- the connection protocol, and the message numbers that were wrong
+
+Loop #93 finished the handshake.  What was left between a logged-in client
+and a command is RFC 4254: the session channel, the `exec` request, the
+command's two output streams, its exit status and the close.
+
+### The slice
+
+`src/sshd/channelserver.mbt` is the server's half of RFC 4254.  It accepts
+one session channel, runs the command the peer asks for, and reports what
+happened.  The driver (`cmd/sshd`) supplies a `CommandRunner` -- a function
+that runs a command -- because starting a process is native-only work and
+`src/sshd` builds on all four backends.  That is the same shape
+`src/sftpserver`'s `ServerFs` uses for the filesystem.
+
+### Three witnesses, because one of them lies
+
+The real `sshd` on this machine (`C:\Program Files\OpenSSH-Win64\sshd.exe`,
+OpenSSH_for_Windows_8.0) was measured three ways: its own DEBUG3 log, the
+real client's `-vvv` log, and paramiko -- an independent implementation --
+reading the same bytes.
+
+The client's log line
+
+    channel 0: open confirm rwindow 0 rmax 32768
+
+says the window is ZERO.  It is not: paramiko read the same
+CHANNEL_OPEN_CONFIRMATION and says the window is **2097152**.  The client
+prints the window it has AVAILABLE, not the window the server offered, so
+that line is a witness about the client.  Believing it would have produced a
+server that grants the peer nothing, and the peer would have said nothing
+about it -- it would simply have stopped sending.
+
+The server's DEBUG3 log names every packet it sends, and it is the record
+of the order:
+
+    send packet: type 91    (CHANNEL_OPEN_CONFIRMATION)
+    send packet: type 99    (CHANNEL_SUCCESS, the answer to "exec")
+    send packet: type 96    (CHANNEL_EOF)
+    send packet: type 98    (CHANNEL_REQUEST "exit-status")
+    send packet: type 97    (CHANNEL_CLOSE)
+
+Two things in that list are easy to get wrong, and both were measured:
+
+* **the EOF comes BEFORE the exit-status.**  The exit status is a
+  CHANNEL_REQUEST, not a byte of stdout, and the real server sends it after
+  closing its own output direction.  A client that waits for the exit status
+  before reading the data deadlocks.
+* **the exit-status request carries `want_reply = FALSE`.**  The server
+  tells the client the status and does not wait for an answer.
+
+The real client also sends two GLOBAL_REQUESTs (`no-more-sessions@openssh.com`
+and `hostkeys-00@openssh.com`, both `want_reply = FALSE`) before the exec.
+The real server answers neither, and so does this one: a server that
+answered would put a packet in the peer's stream that the peer is not
+expecting.
+
+### The command is `cmd.exe /c "<command>"`, and the quotes are load-bearing
+
+The real server's log says:
+
+    spawn_argv[0]: "c:\windows\system32\cmd.exe" /c "cmd /c echo loop94-stdout"
+
+The command string is ONE argument, wrapped in quotes.  cmd.exe's rule for
+the argument of `/c` is: if the first character is a quote, strip it and
+remove the LAST quote character on the command line.  So
+
+    cmd /c "cmd /c echo hello"
+
+echoes `hello"` -- with a trailing quote -- and **that quote is in the bytes
+the client receives**.  It is not decoration, and it is why the comparison
+against the real server has to be byte for byte.
+
+### The dead end: `> out 2> err` on the command line
+
+The obvious way to separate a command's stdout from its stderr is to
+redirect them to two files.  It does not work here, and the reason is the
+same quote rule: with the redirections on the command line, the LAST quote
+on the line is the one closing `err`, so the whole tail becomes the command
+and `echo` prints it.  Measured (`.loop94/cmdline_probe.py`):
+
+    cmdline: cmd.exe /c "cmd /c echo loop94-stdout" > "...o.bin" 2> "...e.bin"
+    piped out=b'loop94-stdout" > "...\\o.bin" 2> "...\\e.bin\r\n'
+
+The separation has to happen in the **handles**, which is what the third
+pipe in `src/subproc` is for.
+
+### `src/subproc` grew a third pipe
+
+`src/subproc` had stdout on a pipe and stderr *inherited* -- which is right
+for `scp -D`, where a configuration error is worth seeing on the terminal,
+and wrong for a server that has to report the two streams separately.
+
+The addition is a third pipe plus the machinery to read two pipes without
+deadlocking: a child that fills the stderr pipe (64 KB) while the parent is
+blocked reading stdout stops writing, and the parent never gets to the
+stderr it was waiting for.  So the parent waits on **both** pipes and the
+process at once (`mb_subproc_wait_any`), and reads only what is there.
+
+There is also a deadline, and it is not the same thing as a per-wait
+timeout: a per-wait timeout bounds how long the parent waits for the NEXT
+thing, not how long the child may run -- a command that writes a byte every
+millisecond would never be interrupted by one.  The deadline (`GetTickCount64`
+on the C side) is what says "this command has had its turn".
+
+### The message numbers in `src/sshwire` were wrong, and no test could see it
+
+`src/sshwire/msg.mbt` numbered the connection protocol like this:
+
+    CHANNEL_DATA      0x5e
+    CHANNEL_EOF       0x5f     <- wrong
+    CHANNEL_CLOSE     0x60     <- wrong
+    CHANNEL_REQUEST   0x62
+
+-- that is, it skipped `SSH_MSG_CHANNEL_EXTENDED_DATA` (0x5f) and shifted EOF
+and CLOSE down by one.  RFC 4254 §5.1 and the real server both say EOF is
+96 and CLOSE is 97, and the real server's log says so in as many words
+("send packet: type 96", "send packet: type 97").
+
+**Why it stayed wrong for so long:** every test that used those constants
+also BUILT packets with them.  `src/sshclient/client.mbt` is a mock server,
+and it sent its EOF as 0x5f; the test then checked that the packet it
+received was "an EOF" by comparing against the same constant.  A mock and
+the code that checks the mock agree with each other by construction.
+
+The real client was never affected: `src/channel` does not use that table at
+all, it uses the literal bytes (0x5e / 0x60 / 0x61), which is why it talks
+to the real server correctly every day.  So the table was a SECOND copy of a
+rule that already existed, and the copy was the one that was wrong.  The
+same shape as Loop #92's INIT comparison and Loop #60's `we_need_for`: a
+second copy of a rule is where the bug lives.
+
+### The gates that caught this loop's own work
+
+Three standing gates went red while this loop was in progress, and each one
+was measuring something adjacent to the change:
+
+| the gate measured | what it claimed | what was true |
+|---|---|---|
+| `src/sshclient/live.mbt` contains `@bpacket.transport_params` | "the cipher rule is in `src/bpacket`" | the rule had MOVED to `src/bpacket` -- the gate measured an address, not a property |
+| the accept table of warning sites | "no new warnings" | two of the new functions were never called, and an unused function is a warning |
+| the coverage report | "these packages are reportable" | the coverage probe ran while this file was half-edited, so the tests did not build |
+
+The first one is the interesting one, and it is the third time this
+repository has been broken by measuring a place instead of a thing.  The
+gate now checks BOTH ends of the delegation chain: that `src/bpacket`'s
+`we_need_for` reads the parameter table and names no cipher literal, and
+that the client's function delegates to it.
+
+The second one had an honest fix that is worth naming: the warning accept
+table is keyed by `file:line`, so "adding the warning to the table" would
+have made the gate green while leaving two dead functions in the tree.  The
+functions were deleted instead -- `subproc_avail_raw` and
+`subproc_exited_raw` were written for a design that the deadline replaced.
+
+The third one was self-inflicted and is recorded as such: the gate was run
+while `src/subproc` was mid-edit.  The lesson is the one this file already
+carries twice -- **do not edit the tree while a gate that builds the tree is
+running** -- and it is here because it happened anyway.
+
+### Two defects that only the real client could find
+
+Both were in the code that looked finished, and both produced output that
+was *the right shape*:
+
+  1. **The right length, all zeros.**  `Proc::read_into` read through
+     `Bytes::from_array(buf)`, which COPIES -- so C filled the copy and the
+     caller's array kept the zeros it was made with.  The client received
+     sixteen zero bytes for `echo loop94-stdout`.  A check on the LENGTH
+     passes; only a check on the BYTES catches it.
+
+  2. **A close that was really a reset.**  The server sent its
+     CHANNEL_CLOSE and closed the socket immediately.  The client's
+     answering CLOSE was still in flight, so the close became a TCP RESET,
+     and the reset discarded the exit status that had just been sent.  The
+     client said `Connection reset` and exited 255 -- while the server's own
+     report said `exit_status: 0 / stdout_bytes: 16`.  Both halves were
+     telling the truth about different things.
+
+The second one is why the channel phase now DRAINS until the peer's CLOSE
+arrives, and why `ServerReport` carries `peer_closed`: a boolean that is
+only true when the drain ran is what makes the drain testable, because on a
+fast loopback connection the RESET itself is not reliably observable.
+
+### A gate that measured its own harness
+
+`verify_loop94.mjs` ran the real client with `spawnSync` while the server
+under test was a `spawn`ed child whose stdout was read with events.
+`spawnSync` blocks the event loop, so those events could not be delivered
+until the client was done -- and by then the gate had already concluded that
+the server never reported the command.  Three checks failed against a server
+whose report was correct.
+
+The fix is `spawn` plus `await`, and the shape of the mistake is worth
+keeping: **a gate that uses a blocking call next to an asynchronous subject
+is measuring its own harness.**
+
+The mutation suite then caught the same class of error from the other side.
+Its first version searched the whole gate output for the word `error` to
+decide a mutation was INVALID, which made three VALID mutations look
+invalid -- because a failing unit test prints `Error:`, and that is the
+mutation being CAUGHT, not the tree failing to build.  The rule this file
+already states is the fix: **look for the named check first; the build
+result is one specific check, not a word anywhere in the output.**  After
+that, two more mutations had to name `the src/sshd unit tests pass` as their
+target, because the unit tests -- not the end-to-end comparison -- are what
+actually catch an inverted window constant and a swapped recipient/sender.
+
 ## The rest of the tool set -- what is done, and what is not
 
 The goal for this repository is the whole OpenSSH tool set in MoonBit.

@@ -667,3 +667,242 @@ test "t15_the_server_proposal_is_the_measured_one" {
   sdt_eq_str(p.comp_ctos, "none", "the compression")
   sdt_eq_str(p.comp_stoc, "none", "the compression")
 }
+
+///|
+/// The bytes the real `ssh.exe` sends in a CHANNEL_OPEN, measured:
+///
+///     00000007 "session" 00000000 00200000 00008000
+///
+/// 23 bytes, and there is no `string sender channel` in it.  A server that
+/// reads one takes the window size for the channel number, which is the bug
+/// Loop #93 found and the reason this payload is a fixture rather than
+/// something built by the code under test.
+fn sdt_channel_open_bytes() -> FixedArray[Byte] {
+  FixedArray::from_array([
+    b'\x00', b'\x00', b'\x00', b'\x07', b's', b'e', b's', b's', b'i', b'o', b'n',
+    b'\x00', b'\x00', b'\x00', b'\x00', b'\x00', b'\x20', b'\x00', b'\x00', b'\x00',
+    b'\x00', b'\x80', b'\x00',
+  ])
+}
+
+///|
+test "t16_channel_open_reads_all_four_fields" {
+  let payload = sdt_channel_open_bytes()
+  sdt_eq_int(payload.length(), 23, "the measured CHANNEL_OPEN is 23 bytes")
+  match @sshd.sd_parse_channel_open(payload) {
+    None => abort("t16: the measured open did not parse")
+    Some(o) => {
+      sdt_eq_str(o.channel_type, "session", "the channel type")
+      sdt_eq_int(o.peer_channel.reinterpret_as_int(), 0, "the peer's channel")
+      sdt_eq_int(
+        o.peer_window.reinterpret_as_int(),
+        2097152,
+        "the peer's window (0x00200000) -- NOT the channel number",
+      )
+      sdt_eq_int(
+        o.peer_max_packet.reinterpret_as_int(),
+        32768,
+        "the peer's maximum packet (0x00008000)",
+      )
+    }
+  }
+  // A payload that stops before the window is not an open.  The points are
+  // chosen off the MEASURED payload, not off round numbers: its channel type
+  // is seven bytes, so the three u32 fields start at offset 11 and a copy cut
+  // at 11, 15 or 19 runs out inside one of them.
+  //
+  // Slicing an all-zero payload would not test this: a zero length prefix
+  // makes the type zero bytes long, the fields start at 4, and everything up
+  // to 16 bytes parses happily.  The truncation has to be taken from a
+  // payload that is really shaped like an open.
+  for cut in [11, 15, 19] {
+    let short = match @sshd.sd_slice(payload, 0, cut) {
+      None => abort("t16: could not cut the payload")
+      Some(v) => v
+    }
+    sdt_true(
+      @sshd.sd_parse_channel_open(short) is None,
+      "an open cut at " + cut.to_string() + " bytes is refused",
+    )
+  }
+}
+
+///|
+test "t17_open_confirmation_is_four_fields_with_the_peer_first" {
+  // The order surprises people: RECIPIENT is the peer's number, SENDER is
+  // ours.  Getting them the other way round does not fail the handshake --
+  // it makes every later packet address a channel that does not exist.
+  let got = @sshd.sd_open_confirmation_payload(0U, 7U, 2097152U, 32768U)
+  let want = FixedArray::from_array([
+    b'\x00', b'\x00', b'\x00', b'\x00', // recipient: the peer's 0
+     b'\x00', b'\x00', b'\x00', b'\x07', // sender: ours
+     b'\x00', b'\x20', b'\x00', b'\x00', // window 2097152
+     b'\x00', b'\x00', b'\x80', b'\x00', // max packet 32768
+  ])
+  sdt_bytes_eq(got, want, "the confirmation payload")
+}
+
+///|
+test "t18_open_failure_carries_the_language_tag" {
+  // FOUR fields.  Three leaves the peer reading the next packet's bytes as
+  // the language tag -- the bug that made Loop #93's refusal unreadable.
+  let got = @sshd.sd_open_failure_payload(0U, 3U, "no")
+  let mut off = 0
+  let lens : Array[Int32] = []
+  // recipient, reason: two u32
+  off = 8
+  for _ in 0..<2 {
+    match @sshd.sd_read_string(got, off) {
+      None => abort("t18: a string field did not parse")
+      Some((body, next)) => {
+        lens.push(body.length())
+        off = next
+      }
+    }
+  }
+  sdt_eq_int(lens.length(), 2, "two string fields after the two u32 fields")
+  sdt_eq_int(lens[0], 2, "the description is `no`")
+  sdt_eq_int(lens[1], 0, "the language tag is present and empty")
+  sdt_eq_int(off, got.length(), "no trailing bytes")
+}
+
+///|
+test "t19_extended_data_and_exit_status_are_shaped_right" {
+  let data = FixedArray::from_array([b'a', b'b'])
+  let ext = @sshd.sd_extended_data_payload(3U, @sshd.EXTENDED_DATA_STDERR, data)
+  let want_ext = FixedArray::from_array([
+    b'\x00', b'\x00', b'\x00', b'\x03', // recipient
+     b'\x00', b'\x00', b'\x00', b'\x01', // code 1: stderr
+     b'\x00', b'\x00', b'\x00', b'\x02', b'a', b'b',
+  ])
+  sdt_bytes_eq(ext, want_ext, "the extended data payload")
+
+  let st = @sshd.sd_exit_status_payload(3U, 7)
+  // uint32 3 || string "exit-status" || boolean FALSE || uint32 7
+  sdt_eq_int(st[0].to_int(), 0, "recipient high byte")
+  sdt_eq_int(st[3].to_int(), 3, "recipient")
+  match @sshd.sd_read_string(st, 4) {
+    None => abort("t19: the request name did not parse")
+    Some((name, off)) => {
+      sdt_eq_str(
+        @sshd.sd_bytes_to_string(name),
+        "exit-status",
+        "the request name",
+      )
+      sdt_eq_int(st[off].to_int(), 0, "want_reply is FALSE")
+      match @sshd.sd_read_u32(st, off + 1) {
+        None => abort("t19: the status did not parse")
+        Some(v) => sdt_eq_int(v.reinterpret_as_int(), 7, "the exit status")
+      }
+      sdt_eq_int(off + 5, st.length(), "no trailing bytes")
+    }
+  }
+}
+
+///|
+test "t20_channel_request_parses_exec" {
+  let payload = sdt_cat_all([
+    @sshwire.write_u32(0U),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("exec")),
+    FixedArray::from_array([b'\x01']),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("echo hi")),
+  ])
+  match @sshd.sd_parse_channel_request(payload) {
+    None => abort("t20: the exec request did not parse")
+    Some(r) => {
+      sdt_eq_int(r.recipient.reinterpret_as_int(), 0, "the channel")
+      sdt_eq_str(r.request_type, "exec", "the request type")
+      sdt_true(r.want_reply, "exec asks for a reply")
+      match @sshd.sd_read_string(r.extra, 0) {
+        None => abort("t20: the command did not parse")
+        Some((cmd, _)) =>
+          sdt_eq_str(@sshd.sd_bytes_to_string(cmd), "echo hi", "the command")
+      }
+    }
+  }
+}
+
+///|
+test "t21_chunk_size_is_the_smaller_of_window_and_max_packet" {
+  // The peer's maximum packet is the ceiling for one CHANNEL_DATA, and what
+  // is left of its window is the other.  Taking the wrong one sends a packet
+  // the peer either refuses (too large) or counts against a window it does
+  // not have.
+  sdt_eq_int(
+    @sshd.sd_chunk_size(2097152U, 32768U),
+    32768,
+    "a wide window and the default maximum",
+  )
+  sdt_eq_int(@sshd.sd_chunk_size(1000U, 32768U), 1000, "a narrow window")
+  sdt_eq_int(@sshd.sd_chunk_size(2097152U, 4096U), 4096, "a small maximum")
+  sdt_eq_int(@sshd.sd_chunk_size(0U, 32768U), 0, "an empty window")
+  // A maximum above the default is clamped: 32 KiB is what this server
+  // reads and writes, and a larger figure would only be a promise it does
+  // not keep.
+  sdt_eq_int(@sshd.sd_chunk_size(2097152U, 65536U), 32768, "clamped at 32 KiB")
+}
+
+///|
+test "t22_the_wire_numbers_are_the_ones_the_real_server_sends" {
+  // The table in `src/sshwire` was wrong until Loop #94: EOF and CLOSE were
+  // one byte low and CHANNEL_EXTENDED_DATA was missing.  Nothing caught it,
+  // because every test that used the constants also BUILT packets with them.
+  // These are the numbers RFC 4254 §5.1 gives and the real server logs.
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_OPEN.to_int(), 90, "OPEN")
+  sdt_eq_int(
+    @sshwire.SSH_MSG_CHANNEL_OPEN_CONFIRMATION.to_int(),
+    91,
+    "OPEN_CONFIRMATION",
+  )
+  sdt_eq_int(
+    @sshwire.SSH_MSG_CHANNEL_WINDOW_ADJUST.to_int(),
+    93,
+    "WINDOW_ADJUST",
+  )
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_DATA.to_int(), 94, "DATA")
+  sdt_eq_int(
+    @sshwire.SSH_MSG_CHANNEL_EXTENDED_DATA.to_int(),
+    95,
+    "EXTENDED_DATA",
+  )
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_EOF.to_int(), 96, "EOF")
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_CLOSE.to_int(), 97, "CLOSE")
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_REQUEST.to_int(), 98, "REQUEST")
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_SUCCESS.to_int(), 99, "SUCCESS")
+  sdt_eq_int(@sshwire.SSH_MSG_CHANNEL_FAILURE.to_int(), 100, "FAILURE")
+  sdt_eq_int(@sshwire.SSH_MSG_GLOBAL_REQUEST.to_int(), 80, "GLOBAL_REQUEST")
+  // The server advertises the numbers the real server was measured to
+  // advertise (paramiko read 2097152 and 32768 off the real server's bytes).
+  sdt_eq_int(
+    @sshd.SERVER_WINDOW.reinterpret_as_int(),
+    2097152,
+    "the advertised window",
+  )
+  sdt_eq_int(
+    @sshd.SERVER_MAX_PACKET.reinterpret_as_int(),
+    32768,
+    "the advertised maximum",
+  )
+}
+
+///|
+test "t23_a_command_runner_is_a_function_the_server_calls" {
+  // The shape matters: the state machine does not know how to start a
+  // process, so it calls a function.  This test is that the function is
+  // called with the COMMAND AS THE PEER SENT IT and that its three answers
+  // reach the report -- nothing about processes.
+  let seen = Ref("")
+  let runner = @sshd.CommandRunner::make(fn(cmd) {
+    seen.val = cmd
+    @sshd.CommandResult::make(
+      FixedArray::from_array([b'o', b'k']),
+      FixedArray::from_array([b'e']),
+      42,
+    )
+  })
+  let r = (runner.run_fn)("cmd /c echo hi")
+  sdt_eq_str(seen.val, "cmd /c echo hi", "the runner saw the peer's command")
+  sdt_eq_int(r.stdout.length(), 2, "stdout")
+  sdt_eq_int(r.stderr.length(), 1, "stderr")
+  sdt_eq_int(r.code, 42, "the exit status")
+}

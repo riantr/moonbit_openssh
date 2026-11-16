@@ -381,18 +381,56 @@ const srvNoPath = srv.names.filter((n) => n.tag === "NO-PATH");
     bad("src/kex_names/algorithms.mbt exists");
   }
 
+  // The rule this section protects: the cipher and MAC parameters live in
+  // `src/bpacket`, and nothing above it hardcodes a cipher name or a key
+  // length.
+  //
+  // Loop #93 moved the RULE ITSELF down into `src/bpacket`: the server side
+  // needs the same rule, and a server that imports the client package to
+  // get it inverts the dependency between the two halves of SSH.  So the
+  // rule now lives where the parameter table lives, and the client's
+  // function is a call to it.
+  //
+  // The gate follows the code rather than the old address.  Checking
+  // `live.mbt` for `@bpacket.transport_params` would have kept the letter of
+  // the old rule and lost its point: the delegation chain is now one hop
+  // longer, and the property that matters -- no cipher literal anywhere
+  // above the table -- is checked at BOTH ends of it.
   const livePath = join(root, "src", "sshclient", "live.mbt");
   const live = readFileSync(livePath, "utf8");
+  const runnablePath = join(root, "src", "bpacket", "runnable.mbt");
+  const runnable = readFileSync(runnablePath, "utf8");
+  const cipherLiterals = (src) =>
+    [...src.matchAll(/"([^"]*(?:aes|chacha|hmac)[^"]*)"/g)].map((m) => m[1]);
+
   const body = functionBody(live, "pub fn we_need_for");
   expect("we_need_for was found", !!body);
   if (body) {
-    const literals = [...body.matchAll(/"([^"]*(?:aes|chacha|hmac)[^"]*)"/g)].map((m) => m[1]);
+    const literals = cipherLiterals(body);
     expect(
       "we_need_for names no cipher/MAC literal (it delegates to src/bpacket)",
       literals.length === 0,
       literals.join(", "),
     );
-    expect("we_need_for delegates to bpacket.transport_params", body.includes("@bpacket.transport_params"));
+    expect(
+      "we_need_for delegates to bpacket.we_need_for",
+      body.includes("@bpacket.we_need_for"),
+    );
+  }
+
+  const ruleBody = functionBody(runnable, "pub fn we_need_for");
+  expect("the rule itself lives in src/bpacket", !!ruleBody);
+  if (ruleBody) {
+    const literals = cipherLiterals(ruleBody);
+    expect(
+      "src/bpacket's we_need_for names no cipher/MAC literal",
+      literals.length === 0,
+      literals.join(", "),
+    );
+    expect(
+      "src/bpacket's we_need_for reads the parameter table",
+      ruleBody.includes("transport_params("),
+    );
   }
   expect(
     "live.mbt no longer hardcodes a 16-byte session key",

@@ -61,3 +61,49 @@ fn subproc_kill_raw(h : Int64) -> Unit {
 fn subproc_close_raw(h : Int64) -> Unit {
   let _ = h
 }
+
+///|
+fn subproc_spawn2_raw(
+  image : Bytes,
+  image_len : Int32,
+  args : Bytes,
+  args_len : Int32,
+  capture_err : Int32,
+) -> Int64 {
+  let _ = image
+  let _ = image_len
+  let _ = args
+  let _ = args_len
+  let _ = capture_err
+  -1L
+}
+
+///|
+fn subproc_read2_raw(
+  h : Int64,
+  which : Int32,
+  buf : Bytes,
+  off : Int32,
+  n : Int32,
+) -> Int64 {
+  let _ = h
+  let _ = which
+  let _ = buf
+  let _ = off
+  let _ = n
+  -1L
+}
+
+///|
+fn subproc_wait_any_raw(h : Int64, timeout_ms : Int32) -> Int64 {
+  let _ = h
+  let _ = timeout_ms
+  -1L
+}
+
+///|
+fn subproc_set_timeout_raw(h : Int64, timeout_ms : Int32) -> Int32 {
+  let _ = h
+  let _ = timeout_ms
+  -1
+}

@@ -199,3 +199,204 @@ fn utf8_bytes(s : String) -> FixedArray[Byte] {
   }
   out
 }
+
+///|
+/// The child's standard output.
+pub const STREAM_STDOUT : Int32 = 0
+
+///|
+/// The child's standard error.
+pub const STREAM_STDERR : Int32 = 1
+
+///|
+/// How many bytes of a captured stream are kept.
+///
+/// A cap, not a promise: a command that writes more has its output cut, and
+/// `Capture::truncated` says so.  The alternative -- no cap -- means a
+/// command that writes forever takes the server's memory with it.
+pub const CAPTURE_CAPACITY : Int32 = 1048576
+
+///|
+/// Start `image` with `args`, its stdout AND its stderr on separate pipes.
+///
+/// The difference from `proc_spawn` is the stderr: there it is inherited,
+/// and here it is a pipe the caller can read.  A server that runs a command
+/// has to be able to say which of the command's two streams a byte came
+/// from, and inherited stderr cannot do that.
+pub fn proc_spawn_capture(image : String, args : String) -> Proc? {
+  let image_bytes = utf8_bytes(image)
+  let arg_bytes = utf8_bytes(args)
+  let h = subproc_spawn2_raw(
+    Bytes::from_array(image_bytes),
+    image_bytes.length(),
+    Bytes::from_array(arg_bytes),
+    arg_bytes.length(),
+    1,
+  )
+  if h == NO_PROC {
+    None
+  } else {
+    Some({ handle: h, closed: false, })
+  }
+}
+
+///|
+/// Wait until one of the captured streams has something, the child exits, or
+/// the timeout expires.
+///
+/// Returns 1 for stdout, 2 for stderr, 3 for both, 0 for a timeout, and -1
+/// when the child has exited and both pipes are closed -- which is the only
+/// answer that means "there is nothing more".
+pub fn Proc::wait_any(self : Proc, timeout_ms : Int32) -> Int32 {
+  if self.closed {
+    return -1
+  }
+  let r = subproc_wait_any_raw(self.handle, timeout_ms)
+  if r < 0L {
+    -1
+  } else {
+    r.to_int()
+  }
+}
+
+///|
+/// Read what is waiting on a stream into `buf` at `off`.
+///
+/// Returns the number of bytes read.  It never waits for more than what is
+/// there: the caller has already been told there is something.
+///
+/// ## Why the bytes come back through a `Bytes`
+///
+/// `Bytes::from_array` COPIES.  Reading straight into
+/// `Bytes::from_array(buf)` would hand C a copy, C would fill the copy, and
+/// the caller's `FixedArray` would still hold the zeros it was made with --
+/// a read that reports the right LENGTH and every byte zero.  That is not a
+/// hypothetical: it is what this function did first, and it took the real
+/// `ssh.exe` returning sixteen zero bytes for `echo loop94-stdout` to show
+/// it.  So the read fills a `Bytes`, and the bytes are copied back
+/// explicitly.
+pub fn Proc::read_into(
+  self : Proc,
+  which : Int32,
+  buf : FixedArray[Byte],
+  off : Int32,
+  n : Int32,
+) -> Int32 {
+  if self.closed || n <= 0 || off < 0 || off + n > buf.length() {
+    return 0
+  }
+  let scratch = Bytes::from_array(FixedArray::make(n, b'\x00'))
+  let got = subproc_read2_raw(self.handle, which, scratch, 0, n)
+  let k = if got <= 0L { 0 } else { got.to_int() }
+  for i = 0; i < k; i = i + 1 {
+    buf[off + i] = scratch[i]
+  }
+  k
+}
+
+///|
+/// Give the child a deadline: `timeout_ms` from now, after which the waits
+/// time out even if the child is still running.
+///
+/// A per-wait timeout bounds how long the parent waits for the NEXT thing,
+/// not how long the child may run -- a command that writes a byte every
+/// millisecond would never be interrupted by one.  This is the knob that
+/// says "this command has had its turn".
+pub fn Proc::set_deadline(self : Proc, timeout_ms : Int32) -> Unit {
+  if self.closed {
+    return
+  }
+  let _ = subproc_set_timeout_raw(self.handle, timeout_ms)
+}
+
+///|
+/// What a command produced.
+pub struct Capture {
+  /// Everything the command wrote to its standard output.
+  stdout : FixedArray[Byte]
+  /// Everything the command wrote to its standard error.
+  stderr : FixedArray[Byte]
+  /// The command's exit status.
+  code : Int32
+  /// Whether either stream was longer than `CAPTURE_CAPACITY` and was cut.
+  truncated : Bool
+}
+
+///|
+/// Run `image` with `args` to completion and return what it produced.
+///
+/// The child's stdin is closed immediately: a command that waits for input
+/// would otherwise wait for a caller that does not exist.
+///
+/// `timeout_ms` bounds the whole run.  A command that outlives it is killed
+/// and the answer is `None` -- a server that waits forever on a command
+/// that never ends is a server that never answers.
+pub fn proc_capture(
+  image : String,
+  args : String,
+  timeout_ms : Int32,
+) -> Capture? {
+  let p = match proc_spawn_capture(image, args) {
+    None => return None
+    Some(v) => v
+  }
+  p.close_stdin()
+  p.set_deadline(timeout_ms)
+  let out_buf = FixedArray::make(CAPTURE_CAPACITY, b'\x00')
+  let err_buf = FixedArray::make(CAPTURE_CAPACITY, b'\x00')
+  let mut out_len = 0
+  let mut err_len = 0
+  let mut truncated = false
+  let mut timed_out = false
+  let mut done = false
+  while !done {
+    let r = p.wait_any(timeout_ms)
+    if r == -1 {
+      done = true
+    } else if r == 0 {
+      timed_out = true
+      done = true
+    } else {
+      if (r & 1) != 0 {
+        if out_len < CAPTURE_CAPACITY {
+          let got = p.read_into(
+            STREAM_STDOUT,
+            out_buf,
+            out_len,
+            CAPTURE_CAPACITY - out_len,
+          )
+          out_len = out_len + got
+        } else {
+          truncated = true
+        }
+      }
+      if (r & 2) != 0 {
+        if err_len < CAPTURE_CAPACITY {
+          let got = p.read_into(
+            STREAM_STDERR,
+            err_buf,
+            err_len,
+            CAPTURE_CAPACITY - err_len,
+          )
+          err_len = err_len + got
+        } else {
+          truncated = true
+        }
+      }
+    }
+  }
+  let code = p.wait()
+  p.close()
+  if timed_out {
+    return None
+  }
+  let out = FixedArray::make(out_len, b'\x00')
+  for i = 0; i < out_len; i = i + 1 {
+    out[i] = out_buf[i]
+  }
+  let err = FixedArray::make(err_len, b'\x00')
+  for i = 0; i < err_len; i = i + 1 {
+    err[i] = err_buf[i]
+  }
+  Some({ stdout: out, stderr: err, code, truncated, })
+}

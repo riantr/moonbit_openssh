@@ -45,9 +45,11 @@ typedef struct {
 	HANDLE process;
 	HANDLE to_child;	/* parent writes, child reads as stdin */
 	HANDLE from_child;	/* child writes as stdout, parent reads */
+	HANDLE err_from_child;	/* child writes as stderr, parent reads */
 	int stdin_closed;
 	int exited;
 	int exit_code;
+	ULONGLONG deadline_ms;	/* 0 = no deadline */
 } MbSubproc;
 
 /*
@@ -121,6 +123,16 @@ mb_subproc_build_cmdline(const unsigned char *image, int image_len,
 }
 
 /*
+ * The two spawn entry points.
+ *
+ * `mb_subproc_spawn2` is defined below and `mb_subproc_spawn` calls it, so
+ * the prototype comes first.
+ */
+long long mb_subproc_spawn2(const unsigned char *image, int image_len,
+                             const unsigned char *args, int args_len,
+                             int capture_err);
+
+/*
  * Start `image` with `args`, its stdin and stdout on pipes.
  *
  * Returns an opaque handle, or -1.  The child's stderr is inherited
@@ -132,11 +144,56 @@ long long
 mb_subproc_spawn(const unsigned char *image, int image_len,
                  const unsigned char *args, int args_len)
 {
+	return mb_subproc_spawn2(image, image_len, args, args_len, 0);
+}
+
+/*
+ * Start `image` with `args`, its stdin and stdout on pipes, and -- when
+ * `capture_err` is non-zero -- its stderr on a THIRD pipe instead of
+ * inheriting ours.
+ *
+ * WHY A THIRD PIPE
+ * ----------------
+ * A server that runs a command has to report the command's stdout and the
+ * command's stderr as two different things: in SSH they are different
+ * channels (SSH_MSG_CHANNEL_DATA and SSH_MSG_CHANNEL_EXTENDED_DATA), and
+ * merging them would make the two indistinguishable on the wire.
+ *
+ * The obvious way to get two files instead of two pipes -- putting
+ * `> out 2> err` on the command line -- CANNOT work here, and the reason
+ * is worth writing down because it looks so reasonable:
+ *
+ *   cmd.exe /c "<command>" > "out" 2> "err"
+ *
+ * cmd.exe's rule for the argument of /c is: if the first character is a
+ * quote, strip it and remove the LAST quote character on the command line,
+ * preserving any text after it.  With the redirections appended, the last
+ * quote is the one closing "err", so the /c argument becomes
+ *
+ *   <command>" > "out" 2> "err"
+ *
+ * -- the redirections become part of the command, and `echo` prints them.
+ * Measured: the whole tail came out on stdout.
+ *
+ * And the quote that the redirections would have cost is not cosmetic: the
+ * real OpenSSH server runs `cmd.exe /c "<command>"`, and the trailing quote
+ * that rule leaves behind is visible in the bytes the client receives
+ * (`echo hello` comes back as `hello"`).  A command line with the
+ * redirections inside the quotes produces `hello` instead -- a different
+ * byte.  So the command line has to stay exactly `cmd.exe /c "<command>"`,
+ * and the separation has to happen in the handles, which is what this
+ * function does.
+ */
+long long
+mb_subproc_spawn2(const unsigned char *image, int image_len,
+                  const unsigned char *args, int args_len, int capture_err)
+{
 	MbSubproc *sp;
 	SECURITY_ATTRIBUTES sa;
 	STARTUPINFOW si;
 	PROCESS_INFORMATION pi;
 	HANDLE child_in = INVALID_HANDLE_VALUE, child_out = INVALID_HANDLE_VALUE;
+	HANDLE child_err = INVALID_HANDLE_VALUE;
 	WCHAR *cmdline = NULL;
 
 	sp = (MbSubproc *)calloc(1, sizeof(*sp));
@@ -145,6 +202,7 @@ mb_subproc_spawn(const unsigned char *image, int image_len,
 	sp->process = INVALID_HANDLE_VALUE;
 	sp->to_child = INVALID_HANDLE_VALUE;
 	sp->from_child = INVALID_HANDLE_VALUE;
+	sp->err_from_child = INVALID_HANDLE_VALUE;
 
 	memset(&sa, 0, sizeof(sa));
 	sa.nLength = sizeof(sa);
@@ -161,6 +219,12 @@ mb_subproc_spawn(const unsigned char *image, int image_len,
 		goto fail;
 	if (!SetHandleInformation(sp->from_child, HANDLE_FLAG_INHERIT, 0))
 		goto fail;
+	if (capture_err) {
+		if (!CreatePipe(&sp->err_from_child, &child_err, &sa, 0))
+			goto fail;
+		if (!SetHandleInformation(sp->err_from_child, HANDLE_FLAG_INHERIT, 0))
+			goto fail;
+	}
 
 	cmdline = mb_subproc_build_cmdline(image, image_len, args, args_len);
 	if (cmdline == NULL)
@@ -171,7 +235,7 @@ mb_subproc_spawn(const unsigned char *image, int image_len,
 	si.dwFlags = STARTF_USESTDHANDLES;
 	si.hStdInput = child_in;
 	si.hStdOutput = child_out;
-	si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+	si.hStdError = capture_err ? child_err : GetStdHandle(STD_ERROR_HANDLE);
 
 	/*
 	 * `lpApplicationName` is NULL on purpose, and this is measured, not
@@ -192,6 +256,8 @@ mb_subproc_spawn(const unsigned char *image, int image_len,
 	/* The child's ends belong to the child now. */
 	CloseHandle(child_in);
 	CloseHandle(child_out);
+	if (child_err != INVALID_HANDLE_VALUE)
+		CloseHandle(child_err);
 	free(cmdline);
 	sp->process = pi.hProcess;
 	CloseHandle(pi.hThread);
@@ -204,12 +270,16 @@ fail:
 			CloseHandle(child_in);
 		if (child_out != INVALID_HANDLE_VALUE)
 			CloseHandle(child_out);
+		if (child_err != INVALID_HANDLE_VALUE)
+			CloseHandle(child_err);
 		if (cmdline != NULL)
 			free(cmdline);
 		if (sp->to_child != INVALID_HANDLE_VALUE)
 			CloseHandle(sp->to_child);
 		if (sp->from_child != INVALID_HANDLE_VALUE)
 			CloseHandle(sp->from_child);
+		if (sp->err_from_child != INVALID_HANDLE_VALUE)
+			CloseHandle(sp->err_from_child);
 		free(sp);
 		SetLastError(saved);
 		return MB_SUBPROC_INVALID;
@@ -268,6 +338,188 @@ mb_subproc_read(long long h, unsigned char *buf, int n)
 		return -1;
 	}
 	return (long long)got;
+}
+
+/*
+ * The pipe a `which` selects: 0 is stdout, 1 is stderr.
+ */
+static HANDLE
+mb_subproc_pipe(MbSubproc *sp, int which)
+{
+	if (which == 1)
+		return sp->err_from_child;
+	return sp->from_child;
+}
+
+/*
+ * Read up to `n` bytes from the stdout (which=0) or the stderr (which=1)
+ * pipe, into `buf + off`.
+ *
+ * Returns the number read, 0 at the end of that stream, -1 on error.
+ *
+ * The offset is there for the same reason it is on the write: the caller
+ * accumulates into one buffer, and copying each chunk into a new array
+ * would make the whole capture quadratic.
+ */
+long long
+mb_subproc_read2(long long h, int which, unsigned char *buf, int off, int n)
+{
+	MbSubproc *sp = (MbSubproc *)(intptr_t)h;
+	HANDLE pipe;
+	DWORD got = 0;
+
+	if (sp == NULL || buf == NULL || n <= 0 || off < 0)
+		return -1;
+	pipe = mb_subproc_pipe(sp, which);
+	if (pipe == INVALID_HANDLE_VALUE)
+		return 0;
+	if (!ReadFile(pipe, buf + off, (DWORD)n, &got, NULL)) {
+		if (GetLastError() == ERROR_BROKEN_PIPE)
+			return 0;
+		return -1;
+	}
+	return (long long)got;
+}
+
+/*
+ * Is the pipe still open for writing?
+ *
+ * 1 for a live pipe, 0 for one whose writing end has been closed (the end of
+ * that stream).  A pipe that has been closed is ALSO waitable -- waiting on
+ * it returns immediately -- so it has to be taken out of the wait set, or
+ * the reader spins.
+ */
+static int
+mb_subproc_pipe_live(HANDLE pipe)
+{
+	DWORD avail = 0;
+
+	if (pipe == INVALID_HANDLE_VALUE)
+		return 0;
+	if (!PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL)) {
+		if (GetLastError() == ERROR_BROKEN_PIPE)
+			return 0;
+		return 1;
+	}
+	return 1;
+}
+
+/*
+ * Give the child a deadline: after `timeout_ms` milliseconds from now, the
+ * waits start timing out even if the child is still alive.
+ *
+ * WHY A DEADLINE AND NOT A TIMEOUT PER WAIT
+ * -----------------------------------------
+ * A per-wait timeout bounds how long the parent waits for the NEXT thing,
+ * not how long the child may run.  A command that writes a byte every
+ * millisecond would never be interrupted by it, and a server that waits for
+ * such a command waits forever.  The deadline is what says "this command
+ * has had its turn".
+ */
+int
+mb_subproc_set_timeout(long long h, int timeout_ms)
+{
+	MbSubproc *sp = (MbSubproc *)(intptr_t)h;
+
+	if (sp == NULL)
+		return -1;
+	if (timeout_ms <= 0) {
+		sp->deadline_ms = 0;
+		return 0;
+	}
+	sp->deadline_ms = GetTickCount64() + (ULONGLONG)timeout_ms;
+	return 0;
+}
+
+/*
+ * Wait until one of the pipes has something to say, or the child exits, or
+ * the timeout expires.
+ *
+ * Returns:
+ *   1  the stdout pipe is ready
+ *   2  the stderr pipe is ready
+ *   3  both are ready
+ *   0  the timeout expired (or the deadline passed)
+ *  -1  the child has exited and both pipes are closed -- nothing more will
+ *      ever arrive
+ *
+ * WHY THE WAIT IS HERE AND NOT IN THE CALLER
+ * -------------------------------------------
+ * Two pipes and one reader is a deadlock: a child that fills the stderr pipe
+ * (64 KB) while the parent is blocked reading stdout stops writing, and the
+ * parent never gets to the stderr it was waiting for.  So the parent must be
+ * able to wait on BOTH at once, and it must not spin while it waits.  The
+ * wait set is therefore the two live pipes plus the process itself: a pipe
+ * becomes waitable when it has data, and the process becomes waitable when
+ * it is gone.
+ */
+long long
+mb_subproc_wait_any(long long h, int timeout_ms)
+{
+	MbSubproc *sp = (MbSubproc *)(intptr_t)h;
+	HANDLE set[3];
+	int n = 0;
+	int idx_stdout = -1, idx_stderr = -1, idx_proc = -1;
+	DWORD r;
+	DWORD wait_ms;
+
+	if (sp == NULL)
+		return -1;
+	if (sp->deadline_ms) {
+		ULONGLONG now = GetTickCount64();
+		if (now >= sp->deadline_ms)
+			return 0;
+		wait_ms = (DWORD)(sp->deadline_ms - now);
+		if (timeout_ms >= 0 && (DWORD)timeout_ms < wait_ms)
+			wait_ms = (DWORD)timeout_ms;
+	} else {
+		wait_ms = timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms;
+	}
+	for (;;) {
+		n = 0;
+		idx_stdout = idx_stderr = idx_proc = -1;
+		if (mb_subproc_pipe_live(sp->from_child)) {
+			set[n] = sp->from_child;
+			idx_stdout = n;
+			n++;
+		}
+		if (sp->err_from_child != INVALID_HANDLE_VALUE &&
+		    mb_subproc_pipe_live(sp->err_from_child)) {
+			set[n] = sp->err_from_child;
+			idx_stderr = n;
+			n++;
+		}
+		if (sp->process != INVALID_HANDLE_VALUE) {
+			set[n] = sp->process;
+			idx_proc = n;
+			n++;
+		}
+		if (n == 0)
+			return -1;
+		r = WaitForMultipleObjects((DWORD)n, set, FALSE, wait_ms);
+		if (r == WAIT_TIMEOUT)
+			return 0;
+		if (r == WAIT_FAILED)
+			return -1;
+		if ((int)(r - WAIT_OBJECT_0) == idx_proc) {
+			/* The child is gone.  Its output may still be in the
+			 * pipes, so the answer is "not done" until they are
+			 * both closed as well. */
+			if (!mb_subproc_pipe_live(sp->from_child) &&
+			    (sp->err_from_child == INVALID_HANDLE_VALUE ||
+			     !mb_subproc_pipe_live(sp->err_from_child)))
+				return -1;
+			continue;
+		}
+		{
+			int ready = 0;
+			if ((int)(r - WAIT_OBJECT_0) == idx_stdout)
+				ready |= 1;
+			if ((int)(r - WAIT_OBJECT_0) == idx_stderr)
+				ready |= 2;
+			return ready;
+		}
+	}
 }
 
 /*
@@ -343,6 +595,8 @@ mb_subproc_close(long long h)
 		CloseHandle(sp->to_child);
 	if (sp->from_child != INVALID_HANDLE_VALUE)
 		CloseHandle(sp->from_child);
+	if (sp->err_from_child != INVALID_HANDLE_VALUE)
+		CloseHandle(sp->err_from_child);
 	if (sp->process != INVALID_HANDLE_VALUE)
 		CloseHandle(sp->process);
 	free(sp);

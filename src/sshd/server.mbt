@@ -76,6 +76,23 @@ pub struct ServerReport {
   user : String
   /// Whether the authentication succeeded.
   authenticated : Bool
+  /// The command that was run on the channel, or "" if none was.
+  command : String
+  /// The command's exit status, or -1 if no command ran.
+  exit_status : Int32
+  /// How many bytes of the command's stdout were sent.
+  stdout_bytes : Int32
+  /// How many bytes of the command's stderr were sent.
+  stderr_bytes : Int32
+  /// Whether the peer's CHANNEL_CLOSE was read before the connection closed.
+  ///
+  /// This is the observable side of the drain at the end of the channel
+  /// phase: without it the server closes while the peer's answering CLOSE is
+  /// still in flight, the close becomes a TCP RESET, and the reset discards
+  /// whatever the peer has not read yet.  A boolean is a thinner signal than
+  /// "the client got its bytes", but it is the one that can be printed, and
+  /// it is what a mutation that removes the drain turns to false.
+  peer_closed : Bool
   /// The number of packets exchanged, for diagnostics.
   packets : Int32
 }
@@ -106,14 +123,20 @@ pub(all) enum ServerError {
 }
 
 ///|
-/// Run one connection, from the identification to the authentication.
+/// Run one connection, from the identification to the authentication, and
+/// then through the channel phase.
 ///
 /// `conn` is any transport, so the whole state machine can be driven by a
 /// test without a socket -- which is how the unit tests exercise the
 /// handshake without a peer.
+///
+/// `runner` is how commands are run.  The server does not know how to start
+/// a process -- that is native-only work -- so the driver supplies the
+/// function; see `CommandRunner`.
 pub fn[T : @transport.Transport] serve(
   conn : T,
   cfg : ServerConfig,
+  runner : CommandRunner,
 ) -> Result[ServerReport, ServerError] {
   let counters = { sent: 0, recv: 0, }
   let send_ctx = @bpacket.SendCtx::new()
@@ -388,19 +411,25 @@ pub fn[T : @transport.Transport] serve(
   }
   // ---- 7. the connection protocol ----
   //
-  // Not this loop's job (RFC 4254 is the next one), but the peer opens a
-  // channel as soon as it is authenticated, and a server that says nothing
-  // leaves the client waiting.  So the channel is REFUSED, explicitly, and
-  // the connection is closed.
+  // The peer opens a channel as soon as it is authenticated, and RFC 4254 is
+  // where the session happens: the channel, the `exec` request, the
+  // command's two output streams, its exit status and the close.
   //
-  // Refusing is better than closing in silence for two reasons: the peer
-  // learns that the refusal is about the channel and not about the
-  // connection, and the socket is closed with an empty receive buffer, so
-  // the close is a FIN and not a reset -- a reset would throw away the
-  // USERAUTH_SUCCESS we just sent, and the client would report a
-  // connection error instead of a successful authentication.
+  // Loop #93 refused the channel here, with a refusal the peer could read.
+  // Loop #94 implements it, and the rules it follows were measured against
+  // the real server rather than recalled -- see `channelserver.mbt`.
+  let mut command = ""
+  let mut exit_status = -1
+  let mut stdout_bytes = 0
+  let mut stderr_bytes = 0
+  let mut peer_closed = false
   if authenticated {
-    sd_refuse_channel(conn, counters, send_ctx, recv_ctx)
+    let ch = serve_channels(conn, counters, send_ctx, recv_ctx, runner)
+    command = ch.command
+    exit_status = ch.exit_status
+    stdout_bytes = ch.stdout_bytes
+    stderr_bytes = ch.stderr_bytes
+    peer_closed = ch.peer_closed
   }
   Ok({
     client_ident,
@@ -411,6 +440,11 @@ pub fn[T : @transport.Transport] serve(
     session_id: kex.session_id,
     user,
     authenticated,
+    command,
+    exit_status,
+    stdout_bytes,
+    stderr_bytes,
+    peer_closed,
     packets: tries + tries2 + tries3 + tries4 + tries5,
   })
 }
@@ -462,75 +496,6 @@ pub fn sd_channel_open_number(payload : FixedArray[Byte]) -> UInt32? {
     Some(v) => v
   }
   sd_read_u32(payload, off1)
-}
-
-///|
-/// Read the peer's channel open and refuse it.
-///
-/// The refusal carries reason 1 (`SSH_OPEN_ADMINISTRATIVELY_PROHIBITED`) and
-/// a description that says what is true: this server authenticates and then
-/// stops.  A peer reading that knows the authentication SUCCEEDED and the
-/// channel is what is missing.
-///
-/// ## The two things that are easy to get wrong, and how they were found
-///
-/// Both were found by running the real `ssh.exe` against this server and
-/// reading what it said:
-///
-///   * **The channel number.**  RFC 4254 §5.4 names the "recipient channel"
-///     -- which is the number the PEER used to open the channel, not a number
-///     of our own choosing.  Refusing channel 1 when the peer opened channel
-///     0 makes the peer answer `open failure packet referred to nonexistent
-///     channel 1`: the refusal was addressed to a channel that does not
-///     exist, so the peer could not tell which open had failed.
-///   * **The language tag.**  The failure payload is
-///     `uint32 recipient || uint32 reason || string description ||
-///     string language tag` -- FOUR fields, not three.  Leaving the tag out
-///     leaves the peer reading the next packet's bytes as the tag.
-///
-/// The channel number is read from the open itself rather than remembered,
-/// because the peer's numbering is the peer's business.
-fn[T : @transport.Transport] sd_refuse_channel(
-  conn : T,
-  counters : WireCounters,
-  send_ctx : @bpacket.SendCtx,
-  recv_ctx : @bpacket.RecvCtx,
-) -> Unit {
-  let mut tries = 0
-  while tries < 8 {
-    match sd_recv_packet(conn, counters, recv_ctx) {
-      Closed => return
-      BadPacket(_) => return
-      Packet(t, payload) => {
-        tries = tries + 1
-        if t == @sshwire.SSH_MSG_CHANNEL_OPEN {
-          let peer_channel = match sd_channel_open_number(payload) {
-            None => return
-            Some(v) => v
-          }
-          let reason = sd_cat3(
-            @sshwire.write_u32(peer_channel),
-            @sshwire.write_u32(1U),
-            sd_cat2(
-              @sshwire.write_ssh_string(
-                sd_ascii("channels are not implemented by this server yet"),
-              ),
-              // the language tag: present, and empty
-              @sshwire.write_ssh_string(FixedArray::make(0, b'\x00')),
-            ),
-          )
-          let _ = sd_send_packet(
-            conn,
-            counters,
-            send_ctx,
-            @sshwire.SSH_MSG_CHANNEL_OPEN_FAILURE,
-            reason,
-          )
-          return
-        }
-      }
-    }
-  }
 }
 
 ///|

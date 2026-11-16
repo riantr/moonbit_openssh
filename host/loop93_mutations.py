@@ -60,6 +60,12 @@ FILES = [
     os.path.join(ROOT, "src", "sshd", "kexserver.mbt"),
     os.path.join(ROOT, "src", "sshd", "server.mbt"),
     os.path.join(ROOT, "src", "sshd", "authserver.mbt"),
+    # Loop #94 moved the channel code out of `server.mbt` and into this file.
+    # It is in this list because one of the mutations below is about the
+    # channel a packet is addressed to, and that payload is built here now --
+    # a mutation whose anchor is in a file the harness does not back up is a
+    # mutation that corrupts the tree instead of testing it.
+    os.path.join(ROOT, "src", "sshd", "channelserver.mbt"),
     os.path.join(ROOT, "src", "kexflow", "proposal.mbt"),
     os.path.join(ROOT, "cmd", "sshd", "main.mbt"),
 ]
@@ -174,58 +180,42 @@ MUTATIONS = [
         "the identification string is ours",
     ),
     (
-        # The channel the refusal names.  RFC 4254 §5.4: the "recipient
-        # channel" is the number the PEER opened.  A constant addresses the
-        # refusal to a channel that does not exist, and the peer says so.
-        "the refusal names a channel of our own choosing",
-        "            @sshwire.write_u32(peer_channel),",
-        "            @sshwire.write_u32(1U),",
-        "the channel refusal is addressed to the channel the peer opened",
+        # The channel this server addresses.  RFC 4254 §5.1: the "recipient
+        # channel" is the number the PEER opened.  A constant addresses every
+        # packet to a channel that does not exist, and the peer says so.
+        #
+        # This used to break the REFUSAL, which Loop #94 replaced with a
+        # confirmation.  The property did not change, only the message that
+        # carries it: the confirmation has the same recipient field, so the
+        # anchor moved to `sd_open_confirmation_payload` and the mutation is
+        # the same idea one message over.  Deleting it instead would have
+        # quietly dropped a claim that is still worth defending.
+        "the confirmation names a channel of our own choosing",
+        "  sd_cat2(@sshwire.write_u32(peer_channel), @sshwire.write_u32(our_channel)),",
+        "  sd_cat2(@sshwire.write_u32(1U), @sshwire.write_u32(our_channel)),",
+        "the channel is addressed by the number the peer opened",
     ),
     (
         # The `SSH_MSG_CHANNEL_OPEN` payload is four fields -- there is no
         # `string sender channel` between the type and the number.  Reading
         # one takes the window size for the channel number.
+        #
+        # This mutation used to inject into `sd_channel_open_number`, which
+        # Loop #94 stopped calling: the channel phase reads the whole open
+        # through `sd_parse_channel_open`, because it needs the window and
+        # the maximum packet size as well as the number.  So the anchor
+        # moved, and the mutation now breaks the reader the server actually
+        # uses.  The check it has to turn red is still this loop's, because
+        # what it protects is the same thing it always was: the number the
+        # peer opened, not a number of our own choosing.
         "the channel open is read with one string too many",
-        "  let (_type_b, off1) = match sd_read_string(payload, 0) {\n"
+        "  let peer_channel = match sd_read_u32(payload, off1) {",
+        "  let (_ghost, ghost_off) = match sd_read_string(payload, off1) {\n"
         "    None => return None\n"
         "    Some(v) => v\n"
         "  }\n"
-        "  sd_read_u32(payload, off1)",
-        "  let (_type_b, off1) = match sd_read_string(payload, 0) {\n"
-        "    None => return None\n"
-        "    Some(v) => v\n"
-        "  }\n"
-        "  let (_sender_b, off2) = match sd_read_string(payload, off1) {\n"
-        "    None => return None\n"
-        "    Some(v) => v\n"
-        "  }\n"
-        "  sd_read_u32(payload, off2)",
-        "the channel refusal is addressed to the channel the peer opened",
-    ),
-    (
-        # The language tag of the refusal.  The payload is FOUR fields; a
-        # peer reading three runs out of message in the wrong place.
-        "the refusal leaves out the language tag",
-        "            sd_cat2(\n"
-        "              @sshwire.write_ssh_string(\n"
-        "                sd_ascii(\"channels are not implemented by this server yet\"),\n"
-        "              ),\n"
-        "              // the language tag: present, and empty\n"
-        "              @sshwire.write_ssh_string(FixedArray::make(0, b'\\x00')),\n"
-        "            ),",
-        "            @sshwire.write_ssh_string(\n"
-        "              sd_ascii(\"channels are not implemented by this server yet\"),\n"
-        "            ),",
-        "the channel refusal says why",
-    ),
-    (
-        # The reason code of the refusal: 1 is
-        # SSH_OPEN_ADMINISTRATIVELY_PROHIBITED, and the peer prints it.
-        "the refusal gives the wrong reason",
-        "            @sshwire.write_u32(1U),",
-        "            @sshwire.write_u32(2U),",
-        "the channel refusal says why",
+        "  let peer_channel = match sd_read_u32(payload, ghost_off) {",
+        "the channel is addressed by the number the peer opened",
     ),
 ]
 

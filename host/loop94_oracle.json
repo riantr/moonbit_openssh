@@ -1,0 +1,64 @@
+{
+  "measured_on": "OpenSSH for Windows sshd, this machine",
+  "note": "What the real server produced for each command. Regenerate with: python host/loop94_oracle.py",
+  "commands": [
+    {
+      "id": "stdout",
+      "command": "cmd /c echo loop94-stdout",
+      "code": 0,
+      "stdoutHex": "6c6f6f7039342d7374646f7574220d0a",
+      "stderrHex": ""
+    },
+    {
+      "id": "stderr",
+      "command": "cmd /c echo loop94-stderr 1>&2",
+      "code": 0,
+      "stdoutHex": "",
+      "stderrHex": "6c6f6f7039342d737464657272200d0a"
+    },
+    {
+      "id": "both",
+      "command": "cmd /c echo out-part & echo err-part 1>&2",
+      "code": 0,
+      "stdoutHex": "6f75742d70617274200d0a",
+      "stderrHex": "6572722d70617274200d0a"
+    },
+    {
+      "id": "exit3",
+      "command": "cmd /c exit 3",
+      "code": 3,
+      "stdoutHex": "",
+      "stderrHex": ""
+    },
+    {
+      "id": "binary",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File EMIT_PS1",
+      "code": 7,
+      "stdoutHex": "000102fffe0a0d00",
+      "stderrHex": ""
+    },
+    {
+      "id": "silent",
+      "command": "cmd /c rem nothing to say",
+      "code": 0,
+      "stdoutHex": "",
+      "stderrHex": ""
+    }
+  ],
+  "sshd_log_sent_types": [
+    20,
+    31,
+    21,
+    7,
+    6,
+    51,
+    60,
+    52,
+    80,
+    91,
+    99,
+    96,
+    98,
+    97
+  ]
+}

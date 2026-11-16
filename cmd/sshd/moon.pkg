@@ -4,6 +4,7 @@ import {
   "moonbitlang/async/fs",
   "openssh/openssh_moonbit/src/keyfile",
   "openssh/openssh_moonbit/src/sshd" @sshdsrv,
+  "openssh/openssh_moonbit/src/subproc",
   "openssh/openssh_moonbit/src/tcp",
 }
 

@@ -382,26 +382,40 @@ async function main() {
     client.stderr.slice(-2000),
   );
 
-  // ---- the channel refusal ----
+  // ---- the channel: refused in this loop, accepted from Loop #94 on ----
   //
-  // The channel layer is the NEXT loop.  What this loop owes the peer is a
-  // refusal it can read: addressed to the channel the peer opened, with the
-  // language tag the format asks for.  The bug this loop found named channel
-  // 2097152 (the window size) and the client answered `open failure packet
-  // referred to nonexistent channel 2097152`.
+  // Loop #93 finished the handshake and REFUSED the channel, because RFC 4254
+  // was the next loop.  The refusal had to be one the peer could read:
+  // addressed to the channel the peer opened, and carrying the language tag
+  // the format asks for.  The bug this loop found named channel 2097152 (the
+  // window size) and the client answered `open failure packet referred to
+  // nonexistent channel 2097152`.
+  //
+  // Loop #94 implemented the channel, so "the refusal says why" and "the exec
+  // did not run" are no longer true of this server -- and a gate that asserted
+  // them would now be asserting that a working feature is broken.  They are
+  // replaced by their opposites, which is what this loop's own claim turns
+  // into once the next loop lands: the channel is ACCEPTED and the command
+  // RUNS.
+  //
+  // The first check is kept unchanged, because what it protects is not the
+  // refusal but the CHANNEL NUMBER: a server that addresses the peer's
+  // channel by a number of its own choosing still produces
+  // `nonexistent channel`, whether it is refusing or confirming.  That is
+  // why this gate is still the place for it.
   ok(
-    "the channel refusal is addressed to the channel the peer opened",
+    "the channel is addressed by the number the peer opened",
     !client.stderr.includes("nonexistent channel"),
     client.stderr.slice(-2000),
   );
   ok(
-    "the channel refusal says why",
-    client.stderr.includes("open failed: administratively prohibited"),
+    "the channel is accepted rather than refused",
+    !client.stderr.includes("open failed"),
     client.stderr.slice(-2000),
   );
   ok(
-    "the exec did not run",
-    !client.stdout.includes("hello"),
+    "the exec runs, because Loop #94 implemented the channel",
+    client.stdout.includes("hello"),
     client.stdout,
   );
 

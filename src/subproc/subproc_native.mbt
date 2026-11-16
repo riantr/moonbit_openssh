@@ -44,6 +44,32 @@ extern "c" fn mb_subproc_kill(h : Int64) -> Int32 = "mb_subproc_kill"
 extern "c" fn mb_subproc_close(h : Int64) -> Int32 = "mb_subproc_close"
 
 ///|
+#borrow(image, args)
+extern "c" fn mb_subproc_spawn2(
+  image : Bytes,
+  image_len : Int32,
+  args : Bytes,
+  args_len : Int32,
+  capture_err : Int32,
+) -> Int64 = "mb_subproc_spawn2"
+
+///|
+#borrow(buf)
+extern "c" fn mb_subproc_read2(
+  h : Int64,
+  which : Int32,
+  buf : Bytes,
+  off : Int32,
+  n : Int32,
+) -> Int64 = "mb_subproc_read2"
+
+///|
+extern "c" fn mb_subproc_wait_any(h : Int64, timeout_ms : Int32) -> Int64 = "mb_subproc_wait_any"
+
+///|
+extern "c" fn mb_subproc_set_timeout(h : Int64, timeout_ms : Int32) -> Int32 = "mb_subproc_set_timeout"
+
+///|
 fn subproc_spawn_raw(
   image : Bytes,
   image_len : Int32,
@@ -81,4 +107,36 @@ fn subproc_kill_raw(h : Int64) -> Unit {
 ///|
 fn subproc_close_raw(h : Int64) -> Unit {
   let _ = mb_subproc_close(h)
+}
+
+///|
+fn subproc_spawn2_raw(
+  image : Bytes,
+  image_len : Int32,
+  args : Bytes,
+  args_len : Int32,
+  capture_err : Int32,
+) -> Int64 {
+  mb_subproc_spawn2(image, image_len, args, args_len, capture_err)
+}
+
+///|
+fn subproc_read2_raw(
+  h : Int64,
+  which : Int32,
+  buf : Bytes,
+  off : Int32,
+  n : Int32,
+) -> Int64 {
+  mb_subproc_read2(h, which, buf, off, n)
+}
+
+///|
+fn subproc_wait_any_raw(h : Int64, timeout_ms : Int32) -> Int64 {
+  mb_subproc_wait_any(h, timeout_ms)
+}
+
+///|
+fn subproc_set_timeout_raw(h : Int64, timeout_ms : Int32) -> Int32 {
+  mb_subproc_set_timeout(h, timeout_ms)
 }

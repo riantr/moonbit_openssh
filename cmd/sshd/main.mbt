@@ -41,6 +41,61 @@
 /// so a gate can branch on it without reading the report at all.
 
 ///|
+/// Run a command the way the real OpenSSH server runs one.
+///
+/// The real server's own DEBUG3 log says what it does:
+///
+/// ```
+///   spawn_argv[0]: "c:\windows\system32\cmd.exe" /c "cmd /c echo hello"
+/// ```
+///
+/// -- the login shell is `cmd.exe`, and the command string is ONE argument,
+/// wrapped in quotes.  The quotes are not decoration: cmd.exe's rule for
+/// the argument of `/c` is "strip the leading quote, remove the LAST quote
+/// character on the command line", so `cmd /c "cmd /c echo hello"` echoes
+/// `hello"` -- with a trailing quote -- and the client receives that quote.
+///
+/// The two streams are separated by the PIPES and not by redirections on the
+/// command line.  With `> out 2> err` appended, the last quote on the line
+/// is the one closing "err", the whole tail becomes the command, and `echo`
+/// prints it.  Measured, in `.loop94/cmdline_probe.py`.
+///
+/// ## Why the image is the bare name
+///
+/// This used to be `C:\Windows\System32\cmd.exe` spelled out, and
+/// `verify_loop71.mjs` failed it -- correctly: that is a claim about one
+/// machine's layout.  `src/subproc` passes `lpApplicationName = NULL`, so
+/// Win32 resolves the first token of the command line through the same
+/// search path the shell uses, and `cmd.exe` is found there.
+///
+/// Measured three ways before choosing (`.loop94/comspec_probe.py`): a bare
+/// `cmd.exe`, `%ComSpec%`, and `%SystemRoot%\System32\cmd.exe` all run and
+/// all produce the SAME bytes, including the trailing quote.  The bare name
+/// is the one that asserts nothing about where the shell lives.
+fn run_command(command : String) -> @sshdsrv.CommandResult {
+  let image = "cmd.exe"
+  let args = "/c \"" + command + "\""
+  match @subproc.proc_capture(image, args, COMMAND_TIMEOUT_MS) {
+    None =>
+      @sshdsrv.CommandResult::make(
+        FixedArray::make(0, b'\x00'),
+        FixedArray::make(0, b'\x00'),
+        -1,
+      )
+    Some(c) => {
+      if c.truncated {
+        eprintln("command output was longer than the capture limit and was cut")
+      }
+      @sshdsrv.CommandResult::make(c.stdout, c.stderr, c.code)
+    }
+  }
+}
+
+///|
+/// How long a command may run before the server stops waiting for it.
+const COMMAND_TIMEOUT_MS : Int32 = 120000
+
+///|
 async fn main {
   let args = @env.args()
   let mut port = 0
@@ -139,7 +194,8 @@ async fn main {
     @tcp.Accepted(conn, ip, peer_port) => {
       eprintln("peer: " + ip + ":" + peer_port.to_string())
       let cfg = @sshdsrv.ServerConfig::make(ident, seed, authorized_text)
-      match @sshdsrv.serve(conn, cfg) {
+      let runner = @sshdsrv.CommandRunner::make(run_command)
+      match @sshdsrv.serve(conn, cfg, runner) {
         Err(e) => {
           eprintln("server_error: " + @sshdsrv.sd_server_error_label(e))
           conn.close()
@@ -157,6 +213,19 @@ async fn main {
           )
           println("user: " + report.user)
           println("session_id: " + @sshdsrv.sd_hex(report.session_id))
+          println("command: " + report.command)
+          println("exit_status: " + report.exit_status.to_string())
+          println("stdout_bytes: " + report.stdout_bytes.to_string())
+          println("stderr_bytes: " + report.stderr_bytes.to_string())
+          // Only 1 when the server READ the peer's CHANNEL_CLOSE before it
+          // closed the connection.  Closing while that answer is in flight
+          // is what turns the close into a TCP RESET, which discards what
+          // the peer has not read yet -- so this line is how the drain
+          // stays observable, and a gate that removes the drain sees this
+          // line go to 0.
+          println(
+            "peer_closed: " + (if report.peer_closed { "1" } else { "0" }),
+          )
           conn.close()
           listener.close()
           if report.authenticated {
