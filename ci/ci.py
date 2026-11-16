@@ -695,7 +695,12 @@ def release_gate(failed, ran, tiers, args):
     print("  TAGGED %s at %s" % (want, subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
         stdout=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()))
-    print("  push policy: gitee now; github only if a GitHub remote is added.")
+    # The remote has existed since 2026-10-19; the old wording ("only if a
+    # GitHub remote is added") described a policy that stopped being true and
+    # would have let a reader believe GitHub was never pushed. Say what the
+    # rule actually is now: a green run and this tag are the only gate.
+    print("  push policy: gitee now; github after this green run and this tag."
+          + ("" if have_github else "  (no GitHub remote configured yet.)"))
     return 0
 
 
