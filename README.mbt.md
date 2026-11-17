@@ -168,16 +168,27 @@ Three rules are enforced by code rather than by intent:
   -- after it, a disagreement could only be recorded as a mistake.
   `ci/publish.py --check --next-tag vX.Y.Z` asks the same question from the
   packaging side.
-- **Publishing needs a human credential and is never assumed.** `--publish`
-  runs after the tag exists; if `moon whoami` cannot name a user it refuses
-  loudly and prints `moon login` instead of skipping. A release that silently
-  did not publish would be worse than a failed one.
+- **Publishing happens on GitHub, from the tag, with a stored credential.**
+  A tag push triggers the `publish` job, and the workflow a tag push runs is the
+  one in the tagged commit -- so the job that publishes is part of what the tag
+  names. The runner restores `%USERPROFILE%\.moon\credentials.json` from the
+  `MOONCAKES_CREDENTIAL` secret (measured: a JSON object with one key, `token`),
+  then asks `moon whoami` and reads the TEXT, because a stale login exits 0
+  while printing "username is unavailable". It refuses to publish when the tag
+  is not the version `moon.mod` names. A release that silently did not publish
+  would be worse than a failed one.
+- **The same gate runs locally, for the tag.** `--tag` still asks
+  `ci/release.py`; `--publish` there refuses without a login rather than
+  skipping, so the two paths cannot disagree about what "published" means.
 
 ```powershell
 python ci\publish.py --check                      # offline: manifest + metadata
-python ci\publish.py --check --next-tag v0.1.2    # ...and the version match
-python ci\publish.py --dry-run                    # the toolchain validates it
-python ci\ci.py --tiers env,build,gates,qa --tag --publish
+python ci\publish.py --check --next-tag v0.1.3    # ...and the version match
+python ci\ci.py --tiers env,build,gates,qa --tag   # tags; the tag push publishes
+
+# one-time: give the runner the login state that `moon login` wrote
+Get-Content -Raw "$env:USERPROFILE\.moon\credentials.json" |
+  gh secret set MOONCAKES_CREDENTIAL
 ```
 
 ### Gates

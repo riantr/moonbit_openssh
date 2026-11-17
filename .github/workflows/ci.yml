@@ -464,3 +464,99 @@ jobs:
         # This job is allowed to fail: a red gate is the expected state most
         # of the time, and hiding that would defeat its purpose.
         run: python ci/ci.py --tiers env,build,gates,qa --check-release
+
+  publish:
+    # Tag pushes only, and the tag push is what makes this job safe: the
+    # workflow that runs for a tag event is the one IN the tagged commit, so
+    # this job is part of what the tag names.
+    #
+    # Loop #96: publication used to be local-only because `moon login` is a
+    # browser interaction. The owner asked for it to happen here instead, so
+    # the mechanism was MEASURED rather than assumed: `moon login` writes
+    # `%USERPROFILE%\.moon\credentials.json`, a JSON object with exactly one
+    # key, `token`, 32 characters. The runner therefore restores that one file
+    # from a secret and runs `ci/publish.py --publish` unchanged -- the same
+    # gate, the same refusals, no second implementation of the release rule.
+    #
+    # What this job does NOT do is trust the secret: it asks `moon whoami` and
+    # reads the TEXT, because a stale login exits 0 while printing "username
+    # is unavailable" (measured on this repository more than once).
+    name: publish to mooncakes.io
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The gate below asks `git tag --points-at HEAD`, so the tag ref has
+          # to exist in the clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up MoonBit
+        uses: ./.github/actions/setup-moonbit
+
+      - name: Update MoonBit dependencies
+        run: moon update
+
+      - name: Restore the mooncakes.io credential
+        shell: pwsh
+        env:
+          MOONCAKES_CREDENTIAL: ${{ secrets.MOONCAKES_CREDENTIAL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:MOONCAKES_CREDENTIAL)) {
+            Write-Error ('no MOONCAKES_CREDENTIAL secret. It must hold the whole ' +
+              'login file that `moon login` writes (a JSON object with one key, ' +
+              '`token`). Set it with: gh secret set MOONCAKES_CREDENTIAL')
+            exit 1
+          }
+          $dir = Join-Path $env:USERPROFILE '.moon'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $path = Join-Path $dir 'credentials.json'
+          # Byte for byte: this file IS the login state.
+          [System.IO.File]::WriteAllText($path, $env:MOONCAKES_CREDENTIAL,
+            (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "wrote $path ($((Get-Item $path).Length) bytes)"
+
+      - name: The credential names a user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $who = (moon whoami 2>&1 | Out-String).Trim()
+          Write-Host "moon whoami: $who"
+          # Decided on the TEXT, not the exit code -- the lesson ci/publish.py
+          # already records: a stale login exits 0.
+          if ($who -match 'unavailable' -or [string]::IsNullOrWhiteSpace($who)) {
+            Write-Error ('the restored credential has no usable username. Run ' +
+              '`moon login` again and update the secret with the new file.')
+            exit 1
+          }
+
+      - name: This run's tag is the one moon.mod names
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch --tags --force origin
+          $ver = (Select-String -Path 'moon.mod' -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $want = "v$ver"
+          $onHead = @(git tag --points-at HEAD) -split "`n" |
+                    ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          Write-Host "moon.mod: $ver ; this run: $env:GITHUB_REF_NAME ; tags on HEAD: $($onHead -join ', ')"
+          if ($env:GITHUB_REF_NAME -ne $want) {
+            Write-Error "this run is for $env:GITHUB_REF_NAME but moon.mod says $want"
+            exit 1
+          }
+          if ($onHead -notcontains $want) {
+            Write-Error "$want is not a tag on HEAD after fetching -- refusing to publish a tree whose tag cannot be checked"
+            exit 1
+          }
+
+      - name: Publish
+        run: python ci/publish.py --publish
+        env:
+          PYTHONIOENCODING: utf-8
