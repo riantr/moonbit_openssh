@@ -506,20 +506,43 @@ jobs:
       - name: Restore the mooncakes.io credential
         shell: pwsh
         env:
-          MOONCAKES_CREDENTIAL: ${{ secrets.MOONCAKES_CREDENTIAL }}
+          MOONCAKES_RIANTR_TOKEN: ${{ secrets.MOONCAKES_RIANTR_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ([string]::IsNullOrWhiteSpace($env:MOONCAKES_CREDENTIAL)) {
-            Write-Error ('no MOONCAKES_CREDENTIAL secret. It must hold the whole ' +
-              'login file that `moon login` writes (a JSON object with one key, ' +
-              '`token`). Set it with: gh secret set MOONCAKES_CREDENTIAL')
+          $raw = $env:MOONCAKES_RIANTR_TOKEN
+          if ([string]::IsNullOrWhiteSpace($raw)) {
+            Write-Error ('no MOONCAKES_RIANTR_TOKEN secret. It must hold either the ' +
+              'whole login file that `moon login` writes or just its token.')
             exit 1
           }
+          $text = $raw.Trim()
+          # Two shapes are accepted, because the secret is pasted by hand: the
+          # login file itself (measured: a JSON object with ONE key, `token`,
+          # 32 characters) or the bare token. A bare token is wrapped into the
+          # file's own shape rather than written raw, because a credentials.json
+          # that is not JSON is not a login -- and `moon` would then answer with
+          # the stale-login text, which reads like a bad token rather than a bad
+          # file.
+          if (-not $text.StartsWith('{')) {
+            $text = '{"token": "' + $text + '"}'
+          }
+          try {
+            $parsed = $text | ConvertFrom-Json
+          } catch {
+            Write-Error "the secret is neither the login JSON nor a bare token: $($_.Exception.Message)"
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($parsed.token)) {
+            Write-Error 'the secret has no `token` value; the login file needs one'
+            exit 1
+          }
+          # Length only. Printing the token would put a credential in a log that
+          # outlives the run.
+          Write-Host "token length: $($parsed.token.Length) characters"
           $dir = Join-Path $env:USERPROFILE '.moon'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $path = Join-Path $dir 'credentials.json'
-          # Byte for byte: this file IS the login state.
-          [System.IO.File]::WriteAllText($path, $env:MOONCAKES_CREDENTIAL,
+          [System.IO.File]::WriteAllText($path, $text,
             (New-Object System.Text.UTF8Encoding($false)))
           Write-Host "wrote $path ($((Get-Item $path).Length) bytes)"
 

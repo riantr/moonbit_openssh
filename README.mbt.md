@@ -172,7 +172,10 @@ Three rules are enforced by code rather than by intent:
   A tag push triggers the `publish` job, and the workflow a tag push runs is the
   one in the tagged commit -- so the job that publishes is part of what the tag
   names. The runner restores `%USERPROFILE%\.moon\credentials.json` from the
-  `MOONCAKES_CREDENTIAL` secret (measured: a JSON object with one key, `token`),
+  `MOONCAKES_RIANTR_TOKEN` secret -- measured to be a JSON object with one key,
+  `token`, 32 characters -- and accepts either that whole file or the bare
+  token, wrapping the latter into the file's own shape because a
+  `credentials.json` that is not JSON is not a login,
   then asks `moon whoami` and reads the TEXT, because a stale login exits 0
   while printing "username is unavailable". It refuses to publish when the tag
   is not the version `moon.mod` names. A release that silently did not publish
@@ -188,7 +191,7 @@ python ci\ci.py --tiers env,build,gates,qa --tag   # tags; the tag push publishe
 
 # one-time: give the runner the login state that `moon login` wrote
 Get-Content -Raw "$env:USERPROFILE\.moon\credentials.json" |
-  gh secret set MOONCAKES_CREDENTIAL
+  gh secret set MOONCAKES_RIANTR_TOKEN
 ```
 
 ### Gates
