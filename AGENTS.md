@@ -11601,4 +11601,71 @@ escaped.  Noise in a runner log is a place where a real warning can hide.
     loop94 negative control   exit 3, SKIP (refused key, reproduced)
     files touched             host/verify_loop92.mjs, host/loop94_oracle.py
 
+## Loop #97: the tag trigger that was not there, and the frozen assumption
+
+Publishing 0.1.3 from CI took three attempts, and each failed for a different
+reason that no local green run could have found:
+
+1. **The secret carried a BOM.** It was written with
+   `Get-Content -Raw ... | gh secret set`, and PowerShell put a UTF-8 BOM in
+   front of the JSON.  The runner then said
+
+       the secret is neither the login JSON nor a bare token:
+       Unexpected character encountered while parsing value: ﻿.
+
+   The FILE has no BOM -- measured: first bytes are `7B 0A 20 20` (`{\n  `) --
+   so the BOM came from the pipe, not from `moon login`.  Writing the bytes
+   from Python (`subprocess.run(..., input=data)`) removed it.  A secret is a
+   byte string; a shell pipeline is not a byte-preserving channel.
+2. **`on.push` had `branches: ["**"]` and no `tags:`.**  A tag push matches
+   neither filter, so the workflow never ran and the publish job's
+   `if: startsWith(github.ref, 'refs/tags/v')` was never evaluated.  The tag
+   reached GitHub and produced no run at all.
+3. **`--frozen` on a fresh runner.**  `ci/publish.py`'s dry run passed
+   `--frozen`, and the runner answered
+
+       Failed to sync dependencies: `frozen` is set, so the build system cannot
+       change the modules directory, but new modules need to be installed
+
+   `--frozen` encodes "the `.mooncakes` of a developer machine, already synced
+   by every prior build".  The publish job runs `moon update` and nothing else,
+   so that history does not exist there.  The flag is gone from `dry_run()`;
+   what the dry run exists to check is the REGISTRY, not the freeze.
+
+What the failures nevertheless proved, on the runner (run 44059001768):
+
+    token length: 32 characters
+    wrote C:\Users\runneradmin\.moon\credentials.json (116 bytes)
+    moon whoami: Logged in as riantr
+    This run's tag is the one moon.mod names      success
+
+So the credential path and the tag/version invariant are real.  Only the
+trigger and the dependency assumption were wrong.
+
+**Decision (the owner's):** bump to **0.1.4** and let the rebuilt chain publish
+that, rather than publishing 0.1.3 locally or through a branch dispatch.
+**0.1.3 is therefore a tag that exists and was never released** -- recorded
+here so nobody wonders later, and so nobody "fixes" it by moving the tag.
+
+Changes: `push.tags: ["v*"]`; `gates` and `release-gate` skip tag pushes, so a
+tag push runs only `publish`; `dry_run()` no longer passes `--frozen`.
+
+### The rule this loop adds
+
+**A workflow that publishes on a tag must be tested by a tag push, not by a
+dispatch.** `workflow_dispatch --ref v0.1.3` makes `github.ref` equal
+`refs/tags/v0.1.3`, so the job's `if` is satisfied and the job runs -- while
+the trigger that would fire in production (`on.push.tags`) still does not
+exist.  Dispatch is how the missing trigger stayed invisible through two
+attempts.
+
+### Numbers
+
+    attempts before the trigger was found   2 dispatches
+    runner proof of the credential          whoami: Logged in as riantr
+    secret bytes                            116 (32-character token)
+    runner-minutes saved per tag push       ~45 (gates skipped)
+    0.1.3                                   tagged, never published
+
+
 

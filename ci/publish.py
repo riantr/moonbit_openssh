@@ -366,10 +366,22 @@ def whoami():
 def dry_run():
     """Ask the toolchain to validate publication without releasing anything.
 
-    `--frozen` keeps dependency syncing out of it; the registry check that the
-    dry run exists to perform still happens.
+    Measured on GitHub run 44059001768 (a fresh windows-latest runner, the
+    first CI publication attempt for 0.1.3): with `--frozen`, the dry run died
+    before the registry check it exists to perform --
+
+        Failed to sync dependencies: `frozen` is set, so the build system
+        cannot change the modules directory, but new modules need to be
+        installed
+
+    `--frozen` assumes the `.mooncakes` of a developer machine, where every
+    prior build has already synced the tree.  A runner has no such history:
+    its `moon update` refreshes the index but the gate that would sync
+    (`moon package --list`) is not part of this job.  The dry run's purpose is
+    the REGISTRY check, not the dependency freeze, so syncing during it is
+    what a fresh machine needs and what a warm machine does anyway.
     """
-    rc, out = run(["cmd", "/c", "moon", "publish", "--dry-run", "--frozen"],
+    rc, out = run(["cmd", "/c", "moon", "publish", "--dry-run"],
                   timeout=1800)
     return rc, out
 
