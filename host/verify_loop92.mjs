@@ -691,12 +691,66 @@ const CASES = [
     ],
   },
   {
+    // The cap belongs to each server's own implementation, so this reply is
+    // judged by OUR contract and a prefix relation, never by equality with the
+    // peer -- the same defect the INIT reply had, one layer down.
+    //
+    // Measured: our cap is 65536 bytes; this machine's OpenSSH 9.5 caps at
+    // 65536 too, which is why the equality check passed here for months; the
+    // runner's OpenSSH 8.0 caps at 102400 (GitHub run 44039917227, reply 2:
+    // real `00019000` against ours `00010000`).  A gate that demanded equality
+    // was asserting that every machine runs the same OpenSSH build.
     name: "a READ never returns more than 65536 bytes",
     steps: [
       [rOpen(35, "big.bin", FXF_READ), 1],
       [rRead(36, Buffer.from([0, 0, 0, 0]), 0, 400000), 1],
       [rClose(37, Buffer.from([0, 0, 0, 0])), 1],
     ],
+    // Returns true when it took responsibility for reply `i`.
+    judge: (i, realHex, oursHex, diffs) => {
+      if (i !== 2) return false; // reply 2 is the READ (0 is the INIT)
+      const parse = (hex, who) => {
+        const buf = Buffer.from(hex, "hex");
+        if (buf.length < 9) {
+          diffs.push(`${who}: the reply is ${buf.length} bytes, too short for DATA`);
+          return null;
+        }
+        if (buf[0] !== 0x67) {
+          diffs.push(`${who}: type is 0x${buf[0].toString(16)}, expected 0x67 (DATA)`);
+          return null;
+        }
+        const id = buf.readUInt32BE(1);
+        const n = buf.readUInt32BE(5);
+        if (buf.length !== 9 + n) {
+          diffs.push(`${who}: the length field says ${n} but the reply is ${buf.length} bytes`);
+          return null;
+        }
+        return { id, n, data: buf.subarray(9) };
+      };
+      const real = parse(realHex, "real");
+      const ours = parse(oursHex, "ours");
+      if (!real || !ours) return true;
+      if (ours.id !== 36) diffs.push(`ours: id is ${ours.id}, expected 36`);
+      if (real.id !== ours.id) diffs.push(`the ids differ: real=${real.id} ours=${ours.id}`);
+      // OUR contract: never more than 65536 bytes, whatever was asked for.
+      if (ours.n !== 65536) {
+        diffs.push(`ours: returned ${ours.n} bytes for a 400000-byte read, our cap is 65536`);
+      }
+      if (real.n <= 0 || real.n > 400000) {
+        diffs.push(`real: returned ${real.n} bytes of a 400000-byte read`);
+      }
+      // big.bin is 0x79 repeated, so each payload is a prefix of the other's
+      // data.  This still fails if either server returns the wrong bytes.
+      const k = Math.min(real.n, ours.n);
+      if (!real.data.subarray(0, k).equals(ours.data.subarray(0, k))) {
+        diffs.push(`the first ${k} payload bytes differ`);
+      }
+      if (ours.data.some((b) => b !== 0x79)) {
+        diffs.push("ours: the payload is not big.bin's byte");
+      }
+      console.log(`    measured  our cap 65536, the real server's ${real.n} (its own choice)`);
+      return true;
+    },
   },
 ];
 
@@ -825,6 +879,13 @@ async function main() {
     for (let i = 1; i < Math.max(real.replies.length, ours.replies.length); i++) {
       const a = real.replies[i];
       const b = ours.replies[i];
+      // A case may own one reply when the two servers legitimately disagree
+      // about a number that belongs to each implementation rather than to the
+      // protocol (the READ cap). Everything else stays byte equality, and the
+      // judge still fails on wrong bytes -- see the case's own comments.
+      if (c.judge && a !== undefined && b !== undefined && c.judge(i, a, b, diffs)) {
+        continue;
+      }
       if (a !== b) {
         diffs.push(`reply ${i} differs`);
         diffs.push(`  real ${a}`);

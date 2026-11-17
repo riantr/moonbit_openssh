@@ -34,7 +34,7 @@ ones that are not printable.  So each stream is stored as hex.
 ## Why `cmd.exe /c "<command>"`
 
 Measured from the real server's DEBUG3 log, which printed the shell it
-spawned as `<windows>\system32\cmd.exe` and the argument as `/c "<command>"`
+spawned as `<windows>\\system32\\cmd.exe` and the argument as `/c "<command>"`
 -- spelled here without the drive letter, because a drive letter in a file
 is a claim about one machine and this is a quotation, not a path this file
 uses.  The command string is ONE argument, wrapped in quotes, and the
@@ -201,6 +201,28 @@ def measure():
                 "stdoutHex": r.stdout.hex(),
                 "stderrHex": r.stderr.hex(),
             })
+        # A real sshd that STARTS but refuses this machine's test key has
+        # measured nothing, so it must not be reported as a recording that
+        # disagrees.  Measured on GitHub run 44039917227 (a windows-latest
+        # runner, whose Windows OpenSSH is an older build with different
+        # default key algorithms): all six commands exited 255 with
+        # "Permission denied (publickey,password)." -- and the gate called that
+        # "the committed recording and the live measurement differ", which is a
+        # claim about our bytes when no byte was measured.
+        #
+        # Raising SystemExit here reuses the contract this file already
+        # documents: exit 3 in --check mode means "no usable real sshd here,
+        # the caller may skip", exit 2 in write mode means "a recording was
+        # wanted and could not be made".  A machine that CAN authenticate still
+        # gets the strict comparison below.
+        if results and all(r["code"] == 255 for r in results):
+            stderrs = [bytes.fromhex(r["stderrHex"]).decode("utf-8", "replace")
+                       for r in results]
+            if all("permission denied" in s.lower() for s in stderrs):
+                raise SystemExit(
+                    "the real sshd here refuses the test key, so nothing was "
+                    "measured: %s" % stderrs[0].strip())
+
         recording = {
             "measured_on": "OpenSSH for Windows sshd, this machine",
             "note": ("What the real server produced for each command. "

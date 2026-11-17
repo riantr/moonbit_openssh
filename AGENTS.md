@@ -11519,3 +11519,86 @@ still exact and has nothing to find.
     browser demo artefact      34,536 bytes, WebAssembly.validate true
     8-way target agreement     one hash, 69c1f46b5e554b4d
 
+## Loop #96: two gates that were measuring the runner
+
+The GitHub mirror had been three loops stale, so the first run on the renamed
+module (run **44039917227**, 2026-11-17, `windows-latest`) was really a report
+about Loop #92 dressed as a report about Loop #95. It went **7 red gates ->
+2**.  The five that healed without being touched are the interesting part:
+
+    loop80, loop82, loop83, loop84, loop85, loop91   now green
+    loop92, loop94                                   still red
+
+`loop91` was fixed by #93 itself (`host/loop91_fixtures.py` regenerates the
+ECDSA fixtures the gate used to find lying around).  `loop83`/`loop84`/
+`loop85` only ever failed by cascading `loop82 harness still green 35/36`.
+And `loop80`/`loop82` -- which #93-#95 never edited -- went green because of
+the **`cmd/scp` duplicate-alias warning** that #93 fixed with `@scplib`: those
+two gates hash `moon run`'s combined stdout+stderr, and a workspace warning
+carrying an absolute path (`\\?\D:\a\...\cmd\scp\moon.pkg`) had been entering
+every hash.  A cold runner printed it; a warm developer tree did not.  That is
+the same defect as the ones below, seen one layer up: **the judgement included
+the toolchain, not just the program.**
+
+### The cap that belongs to each server, not to the protocol
+
+`loop92`'s case "a READ never returns more than 65536 bytes" compares our
+reply with the real `sftp-server.exe`'s, byte for byte.  On the runner:
+
+    reply 2   real ...0001 9000...   = 102400 bytes   (OpenSSH 8.0)
+              ours ...0001 0000...   =  65536 bytes   (our own cap)
+
+Both numbers are each server's own choice, and this machine's OpenSSH 9.5
+caps at 65536 too -- which is exactly why the equality check had been passing
+here for months: **the gate was asserting that every machine runs the same
+OpenSSH build.**  The case now owns reply 2 through a `judge` hook: ours must
+be exactly 65536, both replies must be DATA for id 36, both payloads must be
+prefixes of the same file, and the peer's cap is printed as a measurement
+instead of being demanded.  Every other reply is still byte equality.
+
+### A server that refuses the key measured nothing
+
+`loop94` reported "the committed recording and the live measurement differ".
+What the live measurement actually contained was six commands that all exited
+**255** with `Permission denied (publickey,password).` -- the runner's Windows
+OpenSSH is an older build and refused our nistp256 test key.  The gate turned
+"could not authenticate" into "our bytes moved", which is a claim about our
+code supported by no measurement at all.
+
+The file already had the right contract, and the gate already honoured it:
+`host/loop94_oracle.py` documents exit **3** as "no usable real sshd here, the
+caller may skip", and `verify_loop94.mjs` prints `skip` for it.  `measure()`
+raised that only when `sshd.exe` was *absent*, never when it started and
+refused.  It now raises it when every command exited 255 and every stderr says
+"permission denied".
+
+Negative control, because a skip path that cannot fire is not a fix:
+`.loop95/negctl_loop94.py` plants an **RSA** user key (the shared
+`sshd_setup.mjs` pins accepted user-key algorithms to ECDSA), reproducing the
+runner's condition on a machine that can otherwise authenticate:
+
+    planted an RSA user key (the pinned real sshd accepts ECDSA only)
+    oracle exit: 3
+      SKIP: the real sshd here refuses the test key, so nothing was measured:
+      hp@127.0.0.1: Permission denied (publickey,password,keyboard-interactive).
+    negative control: PASS -- the skip path fires
+
+The positive path is unchanged: `loop94` still runs **49/49** here, taking the
+strict comparison, because this machine authenticates.  A machine that *can*
+drive the real server still gets the strict comparison; a machine that cannot
+now says so instead of accusing the recording.
+
+The same docstring also emitted `SyntaxWarning: invalid escape sequence '\s'`
+on every run (it quotes `<windows>\system32\cmd.exe`); that backslash is now
+escaped.  Noise in a runner log is a place where a real warning can hide.
+
+### Numbers
+
+    GitHub run 44039917227    7 red gates -> 2
+    loop92 after the fix      38 passed, 0 failed
+                              measured: our cap 65536, the real server's 65536
+    loop94 after the fix      49/49
+    loop94 negative control   exit 3, SKIP (refused key, reproduced)
+    files touched             host/verify_loop92.mjs, host/loop94_oracle.py
+
+
