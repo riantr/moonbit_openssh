@@ -1,5 +1,5 @@
 import {
-  "openssh/openssh_moonbit/src/tcp",
+  "riantr/moonbit_openssh/src/tcp",
 }
 
 pkgtype(kind: "library")

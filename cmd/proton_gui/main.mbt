@@ -141,7 +141,7 @@ async fn fault_all(
 /// like the rest of this package.
 fn console_html() -> String {
   let head = "<html>\n" +
-    "  <head><meta charset=\"utf-8\"><title>openssh_moonbit fault console</title>\n" +
+    "  <head><meta charset=\"utf-8\"><title>moonbit_openssh fault console</title>\n" +
     "  <style>\n" +
     "    body { font-family: Consolas, monospace; background: #14161a; color: #d8dee9; padding: 16px; }\n" +
     "    h2 { color: #88c0d0; margin-top: 0; }\n" +
@@ -157,7 +157,7 @@ fn console_html() -> String {
     "    .lbl { color: #4c566a; }\n" +
     "  </style></head>\n" +
     "  <body>\n" +
-    "    <h2>openssh_moonbit SFTP fault console</h2>\n" +
+    "    <h2>moonbit_openssh SFTP fault console</h2>\n" +
     "    <p class=\"intent\">Replies OpenSSH never sends, driven through " +
     "<code>src/sftp</code>'s state machine. Expectations come from " +
     "<code>host/sftp_fault_oracle.py</code>, an independent implementation.</p>\n" +
@@ -217,7 +217,7 @@ fn console_html() -> String {
 ///|
 async fn main {
   @proton.html(
-    "openssh_moonbit fault console",
+    "moonbit_openssh fault console",
     console_html(),
     width=980,
     height=720,

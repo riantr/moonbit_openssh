@@ -37,10 +37,10 @@
 /// to something it did not do is worse than an agent that says no.
 import {
   "moonbitlang/core/encoding/utf8",
-  "openssh/openssh_moonbit/src/agent",
-  "openssh/openssh_moonbit/src/ed25519",
-  "openssh/openssh_moonbit/src/keyfile",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/agent",
+  "riantr/moonbit_openssh/src/ed25519",
+  "riantr/moonbit_openssh/src/keyfile",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 pkgtype(kind: "library")

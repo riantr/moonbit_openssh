@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/cmd/sftp_test"
+package "riantr/moonbit_openssh/cmd/sftp_test"
 
 // Values
 pub const CAPTURE_EXTENSIONS : Int32 = 6

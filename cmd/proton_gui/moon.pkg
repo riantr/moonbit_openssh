@@ -22,7 +22,7 @@ import {
   "moonbit-community/proton_contract",
   "moonbitlang/async",
   "moonbitlang/core/json",
-  "openssh/openssh_moonbit/src/sftp",
+  "riantr/moonbit_openssh/src/sftp",
 }
 
 pkgtype(kind: "executable")

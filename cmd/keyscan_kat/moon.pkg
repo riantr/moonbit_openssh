@@ -1,5 +1,5 @@
 import {
-  "openssh/openssh_moonbit/src/knownhosts",
+  "riantr/moonbit_openssh/src/knownhosts",
 }
 
 pkgtype(kind: "executable")

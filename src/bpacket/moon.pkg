@@ -6,6 +6,6 @@
 ///
 /// 依赖方向是单向的:aes / hmac 都不认识 SSH 的概念,不存在环。
 import {
-  "openssh/openssh_moonbit/src/aes",
-  "openssh/openssh_moonbit/src/hmac",
+  "riantr/moonbit_openssh/src/aes",
+  "riantr/moonbit_openssh/src/hmac",
 }

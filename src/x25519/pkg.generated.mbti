@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/x25519"
+package "riantr/moonbit_openssh/src/x25519"
 
 // Values
 pub fn fe_add(FixedArray[UInt32], FixedArray[UInt32], FixedArray[UInt32]) -> Unit

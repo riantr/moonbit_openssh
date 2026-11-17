@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/bpacket"
+package "riantr/moonbit_openssh/src/bpacket"
 
 // Values
 pub const AESCTR_BLOCK : Int32 = 16

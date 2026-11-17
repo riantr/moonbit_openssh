@@ -1,9 +1,9 @@
 import {
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/tcp",
-  "openssh/openssh_moonbit/src/sshclient",
-  "openssh/openssh_moonbit/src/knownhosts",
-  "openssh/openssh_moonbit/src/bigint",
+  "riantr/moonbit_openssh/src/tcp",
+  "riantr/moonbit_openssh/src/sshclient",
+  "riantr/moonbit_openssh/src/knownhosts",
+  "riantr/moonbit_openssh/src/bigint",
 }
 
 pkgtype(kind: "executable")

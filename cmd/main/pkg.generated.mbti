@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/cmd/main"
+package "riantr/moonbit_openssh/cmd/main"
 
 // Values
 

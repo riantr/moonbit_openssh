@@ -4,9 +4,9 @@
 /// `src/tcp`, which is native-only, and a KAT that can only run on one backend
 /// is a quarter of the coverage the rest of this repo insists on.
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/userauth",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/userauth",
 }
 
 pkgtype(kind: "executable")

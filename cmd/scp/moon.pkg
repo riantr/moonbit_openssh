@@ -1,14 +1,14 @@
 import {
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/keyfile",
-  "openssh/openssh_moonbit/src/knownhosts",
-  "openssh/openssh_moonbit/src/scp" @scplib,
-  "openssh/openssh_moonbit/src/sftpdrive",
-  "openssh/openssh_moonbit/src/sshclient",
-  "openssh/openssh_moonbit/src/subproc",
-  "openssh/openssh_moonbit/src/tcp",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/keyfile",
+  "riantr/moonbit_openssh/src/knownhosts",
+  "riantr/moonbit_openssh/src/scp" @scplib,
+  "riantr/moonbit_openssh/src/sftpdrive",
+  "riantr/moonbit_openssh/src/sshclient",
+  "riantr/moonbit_openssh/src/subproc",
+  "riantr/moonbit_openssh/src/tcp",
 }
 
 pkgtype(kind: "executable")

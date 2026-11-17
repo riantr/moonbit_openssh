@@ -1,7 +1,7 @@
 import {
-  "openssh/openssh_moonbit/src/sshwire",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/bigint",
+  "riantr/moonbit_openssh/src/sshwire",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/bigint",
 }
 
 ///| Loop #34: the RFC 4252 section 7 publickey authentication request.

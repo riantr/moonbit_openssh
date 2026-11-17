@@ -39,11 +39,24 @@ log(wasmOutput);
 log('✓ SSH-WASM Demo completed successfully (browser-equivalent test)');
 
 // 3. 验证输出 byte-exact (Loop #20: 12 行 hex dump,含 AEAD 加密路径)
+//
+// 这条期望值是 Loop #20 记录的,2026-11 重新测量后刷新了两行:
+//   kexinit_len      241 -> 181
+//   client_sent_total 507 -> 443
+// 差额全部来自 KEXINIT 变短,不是加密路径变了。原因是 Loop #60 加了
+// `src/kexflow/runnable.mbt`:客户端提案只许写「packet transport 真能跑」的算法,
+// 于是提案里那几个跑不了的算法名被删掉,60 字节正好对上。
+//
+// 按「量出来,不要背」重测过两次,互相独立:
+//   1. `moon run cmd/main --target native` 直接跑 -> 181 / 443
+//   2. `node host/verify.mjs` 4 target × 2 mode 八路互等 -> 全部 181/443,
+//      唯一 hash 69c1f46b5e554b4d(它同时重写了 host/outputs.json)
+// 其余各行(client_pub / server_pub / shared_K / kexdh_init / 各 wire_len)未变。
 const expected = `=== SSH-WASM Demo (Loop #20) ===
 client_pub: 8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a
 server_pub: d13f5c5b91ae760ed147df65aebb97f5369640e47c03938f9f4c4e209c61ca02
 shared_K: 7bda42e82d49a492388ef14fa2110d20d82465de9d1ca39482282f752b31590f
-kexinit_len: 241
+kexinit_len: 181
 kexinit_head16: 0102030405060708090a0b0c0d0e0f10
 kexdh_init_len: 37
 kexdh_init: 1e000000208520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a
@@ -51,7 +64,7 @@ packet_test_len: 17
 userauth_wire_len: 68
 channel_open_wire_len: 52
 channel_exec_wire_len: 60
-client_sent_total: 507
+client_sent_total: 443
 `;
 
 const normalized = wasmOutput.replace(/\r\n/g, '\n').trim();

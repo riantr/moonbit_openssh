@@ -15,7 +15,7 @@ s_block = grab('sig_bytes')
 
 PKG = '''///| cmd/%s -- Loop #29 G3 benchmark
 import {
-  "openssh/openssh_moonbit/src/bigint",
+  "riantr/moonbit_openssh/src/bigint",
 }
 
 pkgtype(kind: "executable")

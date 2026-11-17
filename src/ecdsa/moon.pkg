@@ -1,8 +1,8 @@
 ///| ECDSA package -- NIST P-256 / P-384 host key support (Loop #30)
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/sha256",
-  "openssh/openssh_moonbit/src/sha512",
-  "openssh/openssh_moonbit/src/hmac",
-  "openssh/openssh_moonbit/src/hmac_sha384",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/sha256",
+  "riantr/moonbit_openssh/src/sha512",
+  "riantr/moonbit_openssh/src/hmac",
+  "riantr/moonbit_openssh/src/hmac_sha384",
 }

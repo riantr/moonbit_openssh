@@ -22,7 +22,7 @@
 ///     framing is a byte stream layered on a byte stream, and `SftpInbuf` in
 ///     stream.mbt is where that gets reassembled.
 import {
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 pkgtype(kind: "library")

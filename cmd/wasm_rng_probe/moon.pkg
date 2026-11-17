@@ -17,7 +17,7 @@
 ///|   declaration costs nothing and makes the toolchain refuse the other
 ///|   targets instead of failing there with a confusing [4067].
 import {
-  "openssh/openssh_moonbit/src/rng",
+  "riantr/moonbit_openssh/src/rng",
 }
 
 pkgtype(kind: "executable")

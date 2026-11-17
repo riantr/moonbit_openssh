@@ -5,18 +5,18 @@ import {
   "moonbitlang/async",
   // Loop #58: 读 `--config` 需要 fs;`main` 本来就已经是 async。
   "moonbitlang/async/fs",
-  "openssh/openssh_moonbit/src/khfile",
-  "openssh/openssh_moonbit/src/tcp",
-  "openssh/openssh_moonbit/src/sshclient",
+  "riantr/moonbit_openssh/src/khfile",
+  "riantr/moonbit_openssh/src/tcp",
+  "riantr/moonbit_openssh/src/sshclient",
   // Loop #80: `--agent` 把一条 TCP 连接包成 agent 通道。协议在 `src/agent`,
   // 这里只提供「怎么把连接递进去」。
-  "openssh/openssh_moonbit/src/agent",
-  "openssh/openssh_moonbit/src/sshconfig",
-  "openssh/openssh_moonbit/src/knownhosts",
-  "openssh/openssh_moonbit/src/sftp",
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/sha256",
+  "riantr/moonbit_openssh/src/agent",
+  "riantr/moonbit_openssh/src/sshconfig",
+  "riantr/moonbit_openssh/src/knownhosts",
+  "riantr/moonbit_openssh/src/sftp",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/sha256",
 }
 
 pkgtype(kind: "executable")

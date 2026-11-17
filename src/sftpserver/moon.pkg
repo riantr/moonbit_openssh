@@ -30,8 +30,8 @@
 ///   * an enumeration ends with STATUS EOF, not with an empty NAME.
 ///   * `-p` uploads use FSETSTAT on the HANDLE, not SETSTAT on the path.
 import {
-  "openssh/openssh_moonbit/src/sftp",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/sftp",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 pkgtype(kind: "library")

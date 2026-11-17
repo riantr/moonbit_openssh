@@ -3,7 +3,7 @@
 /// 输出 10 行 byte-exact,跨 4 target × 2 mode
 
 import {
-  "openssh/openssh_moonbit/src/sshconfig",
+  "riantr/moonbit_openssh/src/sshconfig",
 }
 
 pkgtype(kind: "executable")

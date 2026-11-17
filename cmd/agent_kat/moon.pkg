@@ -6,11 +6,11 @@
 ///| protocol is pure byte assembly -- no socket anywhere -- so it runs on
 ///| every target and must come out identical on all of them.
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/userauth",
-  "openssh/openssh_moonbit/src/agent",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/userauth",
+  "riantr/moonbit_openssh/src/agent",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 pkgtype(kind: "executable")

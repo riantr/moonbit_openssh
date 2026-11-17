@@ -144,7 +144,7 @@ The 6 SHA-512 files are direct copies of `src/sha512/` (Loop #5). Already passed
 
 The `hmac_sha512` package contains its **own copy** of SHA-512 (6 files) because `moon 0.1.20260608` does not support:
 ```moonbit
-import "openssh/openssh_moonbit/sha512"  // ❌ Error 4042
+import "riantr/moonbit_openssh/sha512"  // ❌ Error 4042
 ```
 
 This is the **same workaround as Loop #3 HMAC-SHA256** and is documented in `api.mbt:11-12`.

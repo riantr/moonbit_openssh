@@ -68,10 +68,10 @@ fn main {
 ```moonbit
 import {
   "moonbitlang/core/builtin",
-  "openssh/openssh_moonbit/x25519",
-  "openssh/openssh_moonbit/sha256",
-  "openssh/openssh_moonbit/bpacket",
-  "openssh/openssh_moonbit/hostkey",
+  "riantr/moonbit_openssh/x25519",
+  "riantr/moonbit_openssh/sha256",
+  "riantr/moonbit_openssh/bpacket",
+  "riantr/moonbit_openssh/hostkey",
 }
 ```
 

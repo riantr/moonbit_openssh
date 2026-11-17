@@ -9,19 +9,19 @@
 //   "moonbitlang/x@0.4.6",
 // }
 
-name = "openssh/openssh_moonbit"
+name = "riantr/moonbit_openssh"
 
-version = "0.1.0"
+version = "0.1.2"
 
 readme = "README.mbt.md"
 
-repository = ""
+repository = "https://github.com/riantr/moonbit_openssh"
 
-license = "Apache-2.0"
+license = "MIT"
 
-keywords = [ ]
+keywords = [ "ssh", "openssh", "crypto", "sftp" ]
 
-description = ""
+description = "An OpenSSH-compatible SSH client, server and SFTP stack written from scratch in MoonBit."
 
 import {
   "moonbitlang/async@0.22.2",

@@ -1,5 +1,5 @@
 import {
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 ///| Loop #35: SSH connection protocol channels (RFC 4254).

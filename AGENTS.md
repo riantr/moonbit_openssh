@@ -6153,7 +6153,7 @@ string `error` in moon's output. moon says:
 
     Error: failed to run build for target Js
     Caused by:
-      Package 'openssh/openssh_moonbit/cmd/ssh_live' does not support target
+      Package 'riantr/moonbit_openssh/cmd/ssh_live' does not support target
       backend 'js'. Supported backends: [native]
 
 Capital `E`. A case-sensitive search for `error` does not match it, so **a
@@ -10846,7 +10846,7 @@ matching.**  Measured, to be sure of the direction: the stdout alone hashes
 to exactly the recorded baseline (`1bbbc364fb3d5e51` for `u128_test`), and
 stdout+stderr does not.  The fix is the alias:
 
-    import { "openssh/openssh_moonbit/src/scp" @scplib, ... }
+    import { "riantr/moonbit_openssh/src/scp" @scplib, ... }
 
 and `cmd/sshd` does the same with `@sshdsrv`, because `src/sshd` has the same
 name as `cmd/sshd`.  **A package that imports a package with its own name
@@ -11252,3 +11252,270 @@ one is testable against a real counterpart with the machinery this
 repository already has, and `sshd` is the only one that is really
 several loops.  The first two are done; `sshd` is under way, and its
 handshake is proven against the real client.
+
+## Loop #95: the module identity, and the two records that must agree
+
+This loop had no protocol in it.  It renamed the module, fixed the README,
+and put the mooncakes.io release inside CI -- and along the way it found
+one corruption that a search-and-replace was about to cause, one gate that
+a search could not see, and one pin that had been describing Loop #20
+since Loop #20.
+
+### The rename is one token, and the token has two homes
+
+The module moved from its repository-shaped name to `riantr/moonbit_openssh`
+-- publisher/package, which is what the registry needs and what a user
+types.  That is 111 tracked files and 263 occurrences: 54 `moon.pkg`
+import edges, `moon.mod`'s `name`, the checked-in `pkg.generated.mbti`
+files, four functional Python tools (`host/collect_warnings.py`'s accept
+table is keyed by package path, `host/cov_conflict.py` matches a package
+prefix, two mutation harnesses anchor on `moon.pkg` text), and the prose.
+
+The rename was done as a whole-token byte substitution over
+`git ls-files`, which is safe for a reason worth writing down:
+replacement offsets are the failure mode of *positional* edits, and a
+whole-token substitution has no positions.  Completeness is then asked as
+a separate question -- `git grep -l` over the whole tracked tree -- rather
+than inferred from the edit's own report.
+
+### The completeness check that reported complete while a gate was red
+
+The `git grep -l -F` above came back clean, and two gates failed anyway:
+
+    loop64:  FAIL  src/transport imports src/tcp
+    loop65:  FAIL  verify_loop64 still passes   (nested)
+
+The cause is a form of the old path that a plain-text search cannot see.
+`host/verify_loop64.mjs` spelled the module path inside **RegExp
+literals**, where every separator is escaped:
+
+    /openssh\/<old package>\/src\/tcp/
+
+Backslash-slash is not backslash-slash to `git grep -F "publisher/package"`:
+the bytes differ, so the "is the rename complete" question was answered
+about the *plain* form only, and the answer was true and useless at the
+same time.
+
+Two fixes, both worth keeping:
+
+* `host/verify_loop64.mjs` now READS the module name from `moon.mod`
+  instead of hardcoding it into two regexes.  A rename can no longer make
+  this gate red at all, which is better than a rename that remembers to
+  edit the gate.
+* `ci/publish.py` greps **three** spellings of the old path -- plain,
+  escaped-separator (JS regex), and doubled-escape (JS string holding a
+  path) -- each assembled from parts so the check cannot match itself.
+  The negative case is what proved the point: the first, single-form
+  version of this very check had *reported the rename complete* while
+  loop64 was red.
+
+The remaining occurrences of the bare project name are filesystem
+records: the repository directory itself is not renamed, so comments
+citing a `E:\...\<old-name>\...` path still name a real place.  Those are
+left alone; a comment about where the checkout lives is not a module
+claim.  Two empty `moon new` scaffold files at the root were renamed with
+the package (`<old-name>_test.mbt` -> the new package's name), because a
+blackbox test file's name is the package's name and the package follows
+the module.
+
+### The gate that caught my own docstring
+
+The publication gate's own documentation tripped `host/verify_loop71.mjs`:
+
+    FAIL  no tracked file asserts a machine-specific absolute path
+    1 hit(s) in 1 file(s):
+        ci/publish.py:236  ...   Package to \\?\E:\..._build\publish\...
+
+Writing down what `moon package --list` prints meant writing down a path, and
+a path with a drive letter is a claim that every machine has it.  The gate is
+right and the paragraph was wrong: it now says `Package to ` followed by the
+Windows extended-length prefix and the artefact's own absolute path, names
+why the drive letter is withheld, and keeps the fact that matters (the last
+line is an artefact, not a file to publish).
+
+Two things worth keeping from this:
+
+* `.md` is blanked by that gate whole, for a good reason -- but a **docstring
+  in a `.py` file is not blanked**, and it is just as much prose. The gate
+  scans code, so documentation that lives in code is scanned as code.
+* The loop had already written down that a gate "knowing something is wrong
+  without saying what" is the expensive failure. This one said exactly what
+  and where, in the first four lines, which is why the fix took one edit.
+
+The release run that found it had 43 of 54 gates green and was stopped rather
+than finished: a failed step means the release gate WILL refuse the tag, so
+the remaining 25 minutes could not change the outcome.
+
+### A search-and-replace inside the wasm would have corrupted it
+
+
+`host/main.wasm` is a checked-in artefact of `cmd/main` (see the README's
+*Known gaps*), and it contains the module name in the `name` custom
+section behind a LEB128 length prefix.  The bytes, before the rename:
+
+    2E 04 6e 61 6d 65 00 27 26 <38 bytes: the old module name>/cmd/main@0.1.0
+
+`0x26` is 38: the length of the old name, which is 38 bytes.  The new name
+is 37.  Substituting the bytes and leaving the prefix alone makes the
+section read one byte past the end of the string -- and
+`WebAssembly.validate` does not reliably report that, because a custom
+section is allowed to contain arbitrary bytes.
+
+So the artefact was rebuilt from source instead
+(`moon build --target wasm-gc --release cmd/main`), and the result was
+checked three ways: the section table walks to exactly EOF, the name now
+sits behind `0x25` (37) with a run length of 37, and
+`WebAssembly.validate` returns true.  The lesson is not "wasm is
+special": it is that a checked-in binary with a length-prefixed string is
+not a text file that happens to be unreadable.
+
+### The pin that was measuring Loop #20
+
+`host/browser_test.mjs` asserts the demo's output byte for byte, and it
+expected `kexinit_len: 241` and `client_sent_total: 507`.  The rebuilt
+artefact produced `181` and `443`.  Both numbers are load-bearing, so the
+question was which one was current.
+
+It was not the pin.  `moon run cmd/main --target native` -- no wasm
+involved -- also prints 181/443, and `node host/verify.mjs` compares all
+four targets in both modes against each other and found **one** hash,
+`69c1f46b5e554b4d`, for all eight.  The cause is 60 bytes of KEXINIT:
+Loop #60 added `src/kexflow/runnable.mbt`, which keeps the proposal to
+algorithms the packet transport can actually run, so several algorithm
+names left the proposal.  The pin had been describing a state of the
+source that no longer existed since Loop #20 -- nothing ran the test, so
+nothing said so.
+
+Two consequences are recorded rather than absorbed:
+
+* `host/outputs.json` is a **generated** file -- `host/verify.mjs` rewrites
+  it on every run, and it had not been regenerated since that loop.  It is
+  refreshed here, not edited.
+* The historical documents under `docs/socket/loop1*-summary.md` keep
+  their 241/507.  They are measurements of the day they were written;
+  rewriting history to match today would make them worthless.
+
+### A gate that failed on its own cleanup
+
+The third release run reached **85/86 steps** and stopped on one:
+
+    FAIL  verify_loop92.mjs   exit 1   72.0s
+
+Inside it, all 30 protocol checks PASSED.  The failure was the last line of the
+bed teardown:
+
+    Error: EPERM, Permission denied: \\?\...\.loop92\gate92
+        at Object.rmSync (node:fs)   <- freshBed()
+
+Windows keeps a directory handle alive for a moment after the process holding
+it exits, so `rmSync` on the freshly-used bed loses the race against the child
+that just died.  It passed locally and on the earlier gates-only run because
+that machine was idler.
+
+`rmTreeSync` now retries EPERM/EBUSY with backoff (8 tries, 120 ms x n) and
+still throws on the last one, with a message naming the likely cause.  Retrying
+a cleanup is not the same as retrying an assertion: the failure is not
+swallowed, only the window is widened.  Green locally afterwards: 38 passed,
+0 failed.
+
+The point worth keeping: **the release gate did its job.**  A failed step meant
+`v0.1.2` was NOT created, and the run's own output says so:
+
+    REFUSED: 1 step(s) failed: verify_loop92.mjs
+    no tag was created. This holds even when asked for explicitly
+
+A run that had reported green here would have tagged a tree whose own gate was
+red 30 seconds earlier.
+
+### The two records
+
+
+A git tag and a mooncakes.io version are two records of one claim: "this
+tree is the tested state".  Nothing in either toolchain compares them, so
+`version = "0.1.2"` next to a `v0.1.3` tag would publish a version that
+names no commit.  Three pieces now hold that:
+
+* `ci/publish.py --check` -- offline and credential-free.  It asserts the
+  file set `moon package` would ship contains `moon.mod` and the sources
+  and contains nothing under `_build/`, `.loop*/`, `ci/artifacts/` or
+  `.mooncakes/`; that `name`, `description`, `repository`, `license`,
+  `keywords` and `readme` are all present (description, repository and
+  keywords were **empty** before this row existed -- license was the one
+  field already set -- and `moon publish` warns about none of them); that
+  no tracked file still names the pre-rename module path;
+  and that the version is `X.Y.Z`.
+* `ci/release.py`'s `assert_version_matches_tag` -- a pure function, so
+  the engine self-check can prove all four of its cases without a
+  repository.  The release gate calls it **before** the tag exists,
+  because after the tag a disagreement can only be recorded as a mistake.
+* `ci.py --publish` -- reachable only together with `--tag`, i.e. only
+  through a green run that created the tag.  It does not skip when logged
+  out.
+
+### `moon whoami` exits 0 while saying it does not know who you are
+
+    Logged in, but username is unavailable. Please run `moon login` again.
+
+Exit code 0.  A `returncode == 0` check would call that authenticated and
+then fail at publish time.  So the decision is made on the text, and
+`--publish` refuses loudly with the one command a human must run, because
+a release that silently did not publish is the outcome a reader is least
+able to notice.
+
+### What `moon package --list` actually does
+
+Measured, because most of these contradict the obvious reading, and two of
+them were gotten wrong on the way:
+
+* **the file manifest goes to STDERR, and stdout is EMPTY** -- 0 bytes while
+  stderr carries the whole report.  The first reader of this command parsed
+  stdout, got zero entries, exit code 0, and called it "nothing to publish".
+  `ci/publish.py` now pins the rule with a fixture and a negative control
+  (`parse_manifest`), because a parsing rule that cannot be tested is how the
+  empty manifest got shipped;
+* the same stderr stream also carries `moon check`'s diagnostics, since the
+  command runs the check first: a `Running moon check ...` preamble,
+  `Warning: [0029]` blocks drawn with box characters, blank lines.  An entry
+  is therefore recognised by shape -- non-empty, no whitespace, no
+  box-drawing character -- which measured against one real output separates
+  953 entries from 137 diagnostic lines.  Box fragments need their own rule,
+  because `───╯` contains no whitespace at all;
+* the **last** line is not an entry.  It is `Package to ` followed by the
+  Windows extended-length path prefix and the artefact's own absolute path,
+  ending in `riantr-moonbit_openssh-<version>.zip` -- the artefact and the
+  machine's directory layout, not something being published.  No drive letter
+  is written down here on purpose: `host/verify_loop71.mjs` fails a tracked
+  file that asserts a machine-specific absolute path, and a docstring in a
+  `.py` file is a tracked file.  That gate caught the previous wording, with
+  the file and line;
+* it runs `moon check` first, so it is much heavier than "list some files";
+* `--dry-run` is **not implemented** for `package` ("dry-run is not
+  implemented for package", exit 1) -- it is implemented for `publish`;
+* `--frozen` is not cosmetic: without it the command syncs dependencies
+  first, and a probe was killed by a 600 s timeout before it printed
+  anything.
+
+It also exits **0** on this repository even though `moon check --target
+native` at the root is red (the js/wasm-only live packages).  Packaging
+does not build the packages that do not publish, so those are not the same
+question.
+
+### The gate that caught its own prose
+
+`check_rename_is_complete` greps the tracked tree for the old module path,
+and `ci/publish.py` is in that tree.  Written as a literal, the check
+matched itself and failed always -- which it did, on the first run, and
+the failure was the useful kind: it also flagged a QA evidence string that
+had reintroduced the token it was describing.  The token is now assembled
+from parts (`"openssh" + "/" + "openssh_" + "moonbit"`), so the check is
+still exact and has nothing to find.
+
+### Numbers
+
+    rename                     111 files, 263 occurrences, 0 left
+    engine self-check          24/24 -> 35/35 cases
+    QA matrix rows             20 -> 21 (`packaging`)
+    packaging manifest         954 entries (374 .mbt), parsed from stderr
+    browser demo artefact      34,536 bytes, WebAssembly.validate true
+    8-way target agreement     one hash, 69c1f46b5e554b4d
+

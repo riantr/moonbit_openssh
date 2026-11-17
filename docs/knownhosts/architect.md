@@ -20,7 +20,7 @@ src/knownhosts/
 // SSH known_hosts 解析 + host_key_check（last-match-wins 语义，
 // OpenSSH hostfile.c:790-963 + match.c:82-152 转写）。
 import {
-  "openssh/openssh_moonbit/src/hostkey",
+  "riantr/moonbit_openssh/src/hostkey",
 }
 ```
 

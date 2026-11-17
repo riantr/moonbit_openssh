@@ -49,7 +49,7 @@ def main():
         for key in table:
             owners[key].append(name)
 
-    prefix = "openssh/openssh_moonbit/" + want + "$"
+    prefix = "riantr/moonbit_openssh/" + want + "$"
     mine = {k: v for k, v in owners.items() if k.startswith(prefix)}
     if not mine:
         print("no key for %s in any dump" % want)

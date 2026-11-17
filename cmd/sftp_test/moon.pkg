@@ -5,7 +5,7 @@
 ///| reason `src/userauth` was split out for Loop #34 and `src/channel` for
 ///| Loop #35.
 import {
-  "openssh/openssh_moonbit/src/sftp",
+  "riantr/moonbit_openssh/src/sftp",
 }
 
 pkgtype(kind: "executable")

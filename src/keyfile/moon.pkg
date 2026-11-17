@@ -37,12 +37,12 @@
 import {
   "moonbitlang/core/encoding/base64",
   "moonbitlang/core/encoding/utf8",
-  "openssh/openssh_moonbit/src/aes",
-  "openssh/openssh_moonbit/src/bcrypt_pbkdf",
-  "openssh/openssh_moonbit/src/ed25519",
-  "openssh/openssh_moonbit/src/rng",
-  "openssh/openssh_moonbit/src/sha256",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/aes",
+  "riantr/moonbit_openssh/src/bcrypt_pbkdf",
+  "riantr/moonbit_openssh/src/ed25519",
+  "riantr/moonbit_openssh/src/rng",
+  "riantr/moonbit_openssh/src/sha256",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 // Loop #88: the rewrite tests that draw a salt or a check word need an

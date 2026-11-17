@@ -56,7 +56,7 @@ def _untracked(root):
 
 def make_sandbox(root):
     """Create an isolated copy. Returns its path, or raises RuntimeError."""
-    path = tempfile.mkdtemp(prefix="openssh_moonbit_sandbox_")
+    path = tempfile.mkdtemp(prefix="moonbit_openssh_sandbox_")
     target = os.path.join(path, "tree")
     r = subprocess.run(["git", "worktree", "add", "--detach", target, "HEAD"],
                        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

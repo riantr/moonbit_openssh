@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/aead"
+package "riantr/moonbit_openssh/src/aead"
 
 // Values
 pub fn add_block(UInt32, UInt32, UInt32, UInt32, UInt32, FixedArray[Byte], Bool) -> (UInt32, UInt32, UInt32, UInt32, UInt32)

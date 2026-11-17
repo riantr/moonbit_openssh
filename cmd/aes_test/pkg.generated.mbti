@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/cmd/aes_test"
+package "riantr/moonbit_openssh/cmd/aes_test"
 
 // Values
 

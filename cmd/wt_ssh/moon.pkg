@@ -1,15 +1,15 @@
 import {
   "moonbitlang/async",
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/wt",
-  "openssh/openssh_moonbit/src/wtlive",
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/sha256",
-  "openssh/openssh_moonbit/src/sshclient",
-  "openssh/openssh_moonbit/src/knownhosts",
-  "openssh/openssh_moonbit/src/khstore",
-  "openssh/openssh_moonbit/src/sftp",
+  "riantr/moonbit_openssh/src/wt",
+  "riantr/moonbit_openssh/src/wtlive",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/sha256",
+  "riantr/moonbit_openssh/src/sshclient",
+  "riantr/moonbit_openssh/src/knownhosts",
+  "riantr/moonbit_openssh/src/khstore",
+  "riantr/moonbit_openssh/src/sftp",
 }
 
 ///| Loop #32 G3 driver: js target only, runs inside a browser Web Worker.

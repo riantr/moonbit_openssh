@@ -31,11 +31,11 @@
 
 import {
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/sftp",
-  "openssh/openssh_moonbit/src/sshclient",
-  "openssh/openssh_moonbit/src/knownhosts",
-  "openssh/openssh_moonbit/src/tcp",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/sftp",
+  "riantr/moonbit_openssh/src/sshclient",
+  "riantr/moonbit_openssh/src/knownhosts",
+  "riantr/moonbit_openssh/src/tcp",
 }
 
 pkgtype(kind: "executable")

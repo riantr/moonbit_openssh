@@ -48,16 +48,16 @@
 /// That sentence is the client's verdict on us, not ours on ourselves.
 import {
   "moonbitlang/core/encoding/base64",
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/bpacket",
-  "openssh/openssh_moonbit/src/hostkey",
-  "openssh/openssh_moonbit/src/kexc25519",
-  "openssh/openssh_moonbit/src/kexdh",
-  "openssh/openssh_moonbit/src/kexflow",
-  "openssh/openssh_moonbit/src/rng",
-  "openssh/openssh_moonbit/src/sshwire",
-  "openssh/openssh_moonbit/src/transport",
-  "openssh/openssh_moonbit/src/userauth",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/bpacket",
+  "riantr/moonbit_openssh/src/hostkey",
+  "riantr/moonbit_openssh/src/kexc25519",
+  "riantr/moonbit_openssh/src/kexdh",
+  "riantr/moonbit_openssh/src/kexflow",
+  "riantr/moonbit_openssh/src/rng",
+  "riantr/moonbit_openssh/src/sshwire",
+  "riantr/moonbit_openssh/src/transport",
+  "riantr/moonbit_openssh/src/userauth",
 }
 
 pkgtype(kind: "library")

@@ -14,13 +14,17 @@
   says otherwise.
 * **Gitee may be pushed at any time.** It is the working remote.
 * **GitHub is pushed only when the local CI is green and a tag exists.**
-  Note: this repository currently has exactly one remote, `origin` -> gitee.
-  There is no GitHub remote configured, so that half of the rule is policy
-  with nothing to act on yet. It is written down so it is not silently
-  forgotten if a GitHub remote is ever added.
+  The GitHub remote exists (added 2026-10-19), so this half of the rule has
+  something to act on: `git push github main --follow-tags` after the tag.
+* **mooncakes.io is published only when CI is green, the tag exists, and
+  `moon.mod`'s `version` equals that tag.** The version/tag agreement is
+  enforced by `assert_version_matches_tag` below, and the publication itself
+  by `ci/publish.py`, which refuses loudly when no identity is logged in
+  rather than skipping.
 
 `next_tag` is deliberately a pure function so `--self-check` can test the
-numbering without a repository, a tag, or a network.
+numbering without a repository, a tag, or a network. `assert_version_matches_tag`
+is pure for the same reason.
 """
 
 import re
@@ -32,6 +36,12 @@ import re
 # no trailing digits (`nightly`) cannot be advanced this way and is refused
 # rather than guessed at.
 VERSION_TAG_RE = re.compile(r"^(?P<head>.+?)(?P<last>\d+)$")
+
+# The shape `moon.mod` must declare before it can be compared with a tag. Three
+# numeric components, nothing else: mooncakes.io treats the string as an
+# ordered version, and a version it cannot order is a version a user cannot
+# pin.
+VERSION_STRING_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 class TagError(Exception):
@@ -63,6 +73,33 @@ def next_tag(existing):
     # that uses v1.09 does not silently become v1.10 while we only meant v1.10.
     width = len(m.group("last"))
     return "%s%s" % (head, str(nxt).zfill(width))
+
+
+def assert_version_matches_tag(version, tag):
+    """The published version and the git tag must be the same claim.
+
+    A tag says "this exact tree was verified". `moon.mod`'s `version` says what
+    a `moon add` user receives. When they disagree, a published version cannot
+    be traced back to a commit -- and nothing in either toolchain checks it, so
+    it is checked here, before the tag exists.
+
+    `v` is stripped from the tag but not invented: a tag of `v0.1.2` must match
+    a version of `0.1.2`, and a tag without the prefix is accepted as-is.
+    """
+    if not VERSION_STRING_RE.match(version or ""):
+        raise TagError(
+            "moon.mod version %r is not X.Y.Z, so it cannot be compared with a "
+            "tag" % (version,)
+        )
+    wanted = tag[1:] if tag.startswith("v") else tag
+    if version != wanted:
+        raise TagError(
+            "moon.mod version is %r but the next tag is %r. Publishing %r would "
+            "release a version that names no commit. Bump `version` in moon.mod "
+            "to %r as part of the change being tagged." %
+            (version, tag, version, wanted)
+        )
+    return True
 
 
 def assert_tag_allowed(failed_steps, ran_steps, skipped_tiers):

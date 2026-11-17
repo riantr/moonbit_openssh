@@ -106,7 +106,7 @@ src/hmac_sha512/
 
 `moon 0.1.20260608` does **not** support cross-package imports:
 ```
-Error: [4042] Cannot find import 'openssh/openssh_moonbit/sha512'
+Error: [4042] Cannot find import 'riantr/moonbit_openssh/sha512'
 ```
 
 **Workaround (same as Loop #3):** Inline SHA-512 implementation directly into `hmac_sha512` package. This violates DRY but works around the compiler bug. The Loop #7+ clean-up may refactor this if/when cross-package imports work.

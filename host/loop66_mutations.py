@@ -56,8 +56,8 @@ MUTATIONS = [
     Mutation(
         "M2", "re-add the src/tcp dependency to src/sshclient",
         "src/sshclient/moon.pkg",
-        '  "openssh/openssh_moonbit/src/transport",',
-        '  "openssh/openssh_moonbit/src/transport",\n  "openssh/openssh_moonbit/src/tcp",',
+        '  "riantr/moonbit_openssh/src/transport",',
+        '  "riantr/moonbit_openssh/src/transport",\n  "riantr/moonbit_openssh/src/tcp",',
     ),
     Mutation(
         "M3", "delete src/khfile's moonbitlang/async -- the true fix, and a break",
@@ -94,7 +94,7 @@ MUTATIONS = [
         "M8", "add a genuinely dead import so the live equality must break",
         "cmd/aes_test/moon.pkg",
         "import {",
-        'import {\n  "openssh/openssh_moonbit/src/sshwire",',
+        'import {\n  "riantr/moonbit_openssh/src/sshwire",',
         live=True,
     ),
     # Moved here from host/loop67_mutations.py after it MISSED there. The reason

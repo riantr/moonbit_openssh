@@ -10,7 +10,7 @@
 /// 输出 8 行 hex dump + 协议字段,跨 4 target byte-exact
 
 import {
-  "openssh/openssh_moonbit/src/sshclient",
+  "riantr/moonbit_openssh/src/sshclient",
 }
 
 pkgtype(kind: "executable")

@@ -1,6 +1,6 @@
 import {
-  "openssh/openssh_moonbit/src/sftp",
-  "openssh/openssh_moonbit/src/sftpserver",
+  "riantr/moonbit_openssh/src/sftp",
+  "riantr/moonbit_openssh/src/sftpserver",
 }
 
 ///| Native only: this driver reads and writes raw bytes on a file

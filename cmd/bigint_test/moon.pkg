@@ -3,8 +3,8 @@
 /// Outputs ~10 lines byte-exact across 4 target × 2 mode
 
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/kexdh",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/kexdh",
 }
 
 pkgtype(kind: "executable")

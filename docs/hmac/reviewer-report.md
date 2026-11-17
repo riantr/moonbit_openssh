@@ -76,7 +76,7 @@ Verified against all 7 RFC 4231 test vectors.
 
 ### 2.3 Architecture note — Inline SHA-256 in HMAC package ✅
 
-Originally planned to import `@sha256` from hmac package. Discovered moon 0.1.20260608 doesn't support cross-package imports cleanly (`Cannot find import 'openssh/openssh_moonbit/sha256' in ...`).
+Originally planned to import `@sha256` from hmac package. Discovered moon 0.1.20260608 doesn't support cross-package imports cleanly (`Cannot find import 'riantr/moonbit_openssh/sha256' in ...`).
 
 **Decision:** Inlined SHA-256 (as `sha256_*` modules) into hmac package. This is functionally identical to having a separate package — just less DRY. Trade-off accepted; can refactor when moon import works.
 

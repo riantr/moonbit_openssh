@@ -18,9 +18,9 @@
 ///   - Loop #27 verifies with 512-bit RSA test vector only.
 
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/sha256",
-  "openssh/openssh_moonbit/src/sha512",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/sha256",
+  "riantr/moonbit_openssh/src/sha512",
 }
 
 pkgtype(kind: "library")

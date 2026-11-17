@@ -3,8 +3,8 @@
 /// 11 行 byte-exact 跨 4 target × 2 mode
 
 import {
-  "openssh/openssh_moonbit/src/aes",
-  "openssh/openssh_moonbit/src/kex_names",
+  "riantr/moonbit_openssh/src/aes",
+  "riantr/moonbit_openssh/src/kex_names",
 }
 
 pkgtype(kind: "executable")

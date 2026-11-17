@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/sha256"
+package "riantr/moonbit_openssh/src/sha256"
 
 // Values
 pub fn be32_to_8(FixedArray[Byte], Int32, UInt32) -> Unit

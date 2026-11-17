@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/hostkey"
+package "riantr/moonbit_openssh/src/hostkey"
 
 // Values
 pub const CA_PUB : String = "AAAAC3NzaC1lZDI1NTE5AAAAIPfAXCITZpnjH8qnict5ht7Nof2B/VP/xJKgnVFbsIQu"

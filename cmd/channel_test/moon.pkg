@@ -5,8 +5,8 @@
 ///| `src/userauth` was split out for Loop #34: a KAT that can only run where a
 ///| TCP stack exists is a quarter of the coverage this repo insists on.
 import {
-  "openssh/openssh_moonbit/src/channel",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/channel",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 pkgtype(kind: "executable")

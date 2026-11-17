@@ -118,7 +118,7 @@ def _is_hard_error(doc):
     with `"level": "error"` as well. Nor can a prefix test on the message --
     Loop #67 found that `moon check cmd/wt_ssh --target js` reports
 
-        The type @openssh/openssh_moonbit/src/wtlive.WtAuthReport has no field
+        The type @riantr/moonbit_openssh/src/wtlive.WtAuthReport has no field
         auth_method.
 
     with no "Error" prefix at all, and an earlier version of this function

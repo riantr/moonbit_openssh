@@ -9,7 +9,7 @@ cannot actually run in this toolchain was quietly left out of a run, and the
 run reported PASS. A summary that can omit a check is the same failure mode as
 a summary that can disagree with the exit code -- it is just quieter.
 
-So the 20 QA categories are a **declared registry**, and the summary prints every
+So the QA categories are a **declared registry**, and the summary prints every
 single one of them on every run, including the ones that cannot run. A category
 is only ever allowed to reach PASS because a command was executed and returned
 exit code 0. Nothing is inferred.
@@ -99,7 +99,7 @@ class QaCategory(object):
 
 
 # ---------------------------------------------------------------------------
-# The 20 categories.
+# The categories.
 #
 # Grouping note the output repeats: ids 2 and 15 each absorbed one extra id the
 # brief listed separately (`static-code-check`, `contract-test`). Shipping two
@@ -201,6 +201,38 @@ QA_CATEGORIES = [
             "*graph* is implemented. A vulnerable-dependency scan is "
             "NOT AVAILABLE -- moon has no advisory/vulnerability database "
             "command, and no database is consulted anywhere in the toolchain."
+        ),
+    ),
+    QaCategory(
+        id="packaging",
+        name_en="packaging / publication",
+        name_zh="打包与发布",
+        status="implemented",
+        command=[PY + [os.path.join("ci", "publish.py"), "--check"]],
+        tier="qa",
+        evidence=(
+            "Loop #95. `ci/publish.py --check` is credential-free and offline, "
+            "and asserts four things nothing else in the toolchain looks at: "
+            "(1) the file set `moon package --list --frozen` would publish "
+            "contains moon.mod and the .mbt sources and contains no path under "
+            "_build/, .loop*/, ci/artifacts/ or .mooncakes/ -- a published "
+            "package that includes build output ships something no gate ever "
+            "compiled; (2) moon.mod's name, description, repository, license, "
+            "keywords and readme are all present and the readme file exists -- "
+            "measured: description, repository and keywords were all EMPTY "
+            "before this row existed (license was the one field already set), "
+            "and `moon publish` warns about none of them; (3) no tracked file "
+            "still names the pre-rename module path "
+            "(the publisher/name pair this module used before Loop #95, "
+            "assembled in ci/publish.py so that this row cannot match itself), "
+            "checked with `git grep` over the whole "
+            "tracked tree rather than the compiled subset; (4) the version is "
+            "X.Y.Z, so it can be ordered by a user and compared with a tag. "
+            "`--frozen` is required, not cosmetic: without it `moon package` "
+            "syncs dependencies first and a probe was killed by a 600s timeout. "
+            "The version/tag agreement is NOT checked here (it needs the next "
+            "tag) -- that is `ci/release.py`'s assert_version_matches_tag, "
+            "called by the release gate before a tag may exist."
         ),
     ),
     QaCategory(
@@ -572,8 +604,10 @@ QA_CATEGORIES = [
 BY_ID = dict((c.id, c) for c in QA_CATEGORIES)
 
 # The brief's original 21 numbers minus 2 documented merges plus 1 deliberate
-# split (security-scan -> SAST + DAST) must land on exactly 20.
-EXPECTED_COUNT = 20
+# split (security-scan -> SAST + DAST) landed on 20. Loop #95 added one more,
+# `packaging`: the file set a `moon publish` would ship had no row anywhere,
+# which is how four empty moon.mod metadata fields survived to a release.
+EXPECTED_COUNT = 21
 
 assert len(QA_CATEGORIES) == EXPECTED_COUNT, (
     "the matrix must declare exactly %d categories, found %d"

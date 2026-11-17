@@ -15,7 +15,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/knownhosts",
+  "riantr/moonbit_openssh/src/knownhosts",
 }
 
 options(

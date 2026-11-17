@@ -11,10 +11,10 @@
 ///   - Loop #27+: 更复杂的 group 16/18 + ECDH
 
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/sha256",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/sha256",
   // Loop #84: the private exponent is drawn from the platform CSPRNG.
-  "openssh/openssh_moonbit/src/rng",
+  "riantr/moonbit_openssh/src/rng",
 }
 
 pkgtype(kind: "library")

@@ -8,9 +8,9 @@
 import {
   "moonbitlang/async",
   "moonbitlang/async/fs",
-  "openssh/openssh_moonbit/src/hostkey",
-  "openssh/openssh_moonbit/src/kexc25519",
-  "openssh/openssh_moonbit/src/kexflow",
+  "riantr/moonbit_openssh/src/hostkey",
+  "riantr/moonbit_openssh/src/kexc25519",
+  "riantr/moonbit_openssh/src/kexflow",
 }
 
 options(

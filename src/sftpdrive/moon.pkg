@@ -7,7 +7,7 @@
 /// which is what a known-answer test wants); this is the *interactive* one
 /// (`stat`, look, decide, ask again), which is what `scp` wants.
 import {
-  "openssh/openssh_moonbit/src/sftp",
+  "riantr/moonbit_openssh/src/sftp",
 }
 
 pkgtype(kind: "library")

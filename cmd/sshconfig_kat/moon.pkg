@@ -43,7 +43,7 @@ import {
   /// `core_package_not_imported` rather than an error -- so this was a
   /// deprecation that no build would have failed on.
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/sshconfig",
+  "riantr/moonbit_openssh/src/sshconfig",
 }
 
 options(

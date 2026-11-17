@@ -1,6 +1,6 @@
 import {
   "moonbitlang/async",
-  "openssh/openssh_moonbit/src/wt",
+  "riantr/moonbit_openssh/src/wt",
 }
 
 ///| Loop #32 G2 driver: js target only, runs inside a browser Web Worker.

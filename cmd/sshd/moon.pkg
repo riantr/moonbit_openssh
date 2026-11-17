@@ -2,10 +2,10 @@ import {
   "moonbitlang/core/env",
   "moonbitlang/async",
   "moonbitlang/async/fs",
-  "openssh/openssh_moonbit/src/keyfile",
-  "openssh/openssh_moonbit/src/sshd" @sshdsrv,
-  "openssh/openssh_moonbit/src/subproc",
-  "openssh/openssh_moonbit/src/tcp",
+  "riantr/moonbit_openssh/src/keyfile",
+  "riantr/moonbit_openssh/src/sshd" @sshdsrv,
+  "riantr/moonbit_openssh/src/subproc",
+  "riantr/moonbit_openssh/src/tcp",
 }
 
 ///| Native only: this driver listens on a TCP socket and reads files, and

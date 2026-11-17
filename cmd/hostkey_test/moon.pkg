@@ -5,8 +5,8 @@
 ///| `src/userauth` and `src/channel` were split out for Loops #34 and #35.
 
 import {
-  "openssh/openssh_moonbit/src/hostkey",
-  "openssh/openssh_moonbit/src/rsa",
+  "riantr/moonbit_openssh/src/hostkey",
+  "riantr/moonbit_openssh/src/rsa",
 }
 
 pkgtype(kind: "executable")

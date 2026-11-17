@@ -3,10 +3,10 @@
 /// Loop #17: SSH crypto demo (4 target byte-exact)
 /// Loop #18: + SSH wire framing + mock client flow (kex + auth + channel)
 import {
-  "openssh/openssh_moonbit/src/x25519",
-  "openssh/openssh_moonbit/src/kexflow",
-  "openssh/openssh_moonbit/src/sshwire",
-  "openssh/openssh_moonbit/src/sshclient",
+  "riantr/moonbit_openssh/src/x25519",
+  "riantr/moonbit_openssh/src/kexflow",
+  "riantr/moonbit_openssh/src/sshwire",
+  "riantr/moonbit_openssh/src/sshclient",
 }
 
 pkgtype(kind: "executable")

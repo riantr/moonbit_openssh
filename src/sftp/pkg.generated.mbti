@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/sftp"
+package "riantr/moonbit_openssh/src/sftp"
 
 // Values
 pub const ATTR_ACMODTIME : Int32 = 0x00000008

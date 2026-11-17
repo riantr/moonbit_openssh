@@ -37,8 +37,8 @@
 /// `probe_scp_D8.py`, not copied from `scp.c`.
 import {
   "moonbitlang/core/encoding/utf8",
-  "openssh/openssh_moonbit/src/sftp",
-  "openssh/openssh_moonbit/src/sftpdrive",
+  "riantr/moonbit_openssh/src/sftp",
+  "riantr/moonbit_openssh/src/sftpdrive",
 }
 
 pkgtype(kind: "library")

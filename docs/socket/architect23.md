@@ -180,9 +180,9 @@ fn compute_post_auth_total_length(stdout_msg : String) -> Int {
 ### C.1 cmd/ssh_full_ws/moon.pkg (wasm-only exec)
 ```moonbit
 import {
-  "openssh/openssh_moonbit/src/sshclient",
-  "openssh/openssh_moonbit/src/ws_socket",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/sshclient",
+  "riantr/moonbit_openssh/src/ws_socket",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 pkgtype(kind: "executable")
 ```

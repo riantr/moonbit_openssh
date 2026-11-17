@@ -380,6 +380,40 @@ const DECLARED_EXTS = [
   "lsetstat@openssh.com",
 ];
 
+// Windows keeps a directory handle alive for a moment after the process that
+// held it exits, so `rmSync` can fail with EPERM although nothing of ours is
+// still running.  Measured on the release run of 2026-11-17: this gate was
+// green locally, then red inside the release run with **all 30 protocol checks
+// passing** and only the bed teardown failing:
+//
+//     Error: EPERM, Permission denied: \\?\...\.loop92\gate92
+//         at Object.rmSync (node:fs)  <- freshBed()
+//
+// Retrying is not hiding the error: the last attempt still throws, and the
+// message says what to look for.  A gate that fails for a cleanup race is
+// worse than no gate, because it teaches the reader to re-run it.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function rmTreeSync(target, tries = 8) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (err.code !== "EPERM" && err.code !== "EBUSY") throw err;
+      sleepSync(120 * (i + 1));
+    }
+  }
+  throw new Error(
+    `could not remove ${target} after ${tries} tries (${lastErr.code}); on ` +
+    `Windows this is a handle still held by a child process -- check that every ` +
+    `spawned server was awaited before its directory is deleted`);
+}
+
 function freshBed() {
   // The read-only file cannot be removed while it is read-only, so the
   // attribute is taken off first.  `fs.rmSync` fails with EPERM
@@ -389,7 +423,7 @@ function freshBed() {
       try { fs.chmodSync(p, 0o666); } catch { /* gone */ }
     }
   }
-  fs.rmSync(BED, { recursive: true, force: true });
+  rmTreeSync(BED);
   fs.mkdirSync(BED, { recursive: true });
   fs.mkdirSync(path.join(BED, "dir"), { recursive: true });
   fs.mkdirSync(path.join(BED, "dir", "sub"), { recursive: true });

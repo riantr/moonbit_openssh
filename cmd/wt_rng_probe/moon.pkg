@@ -1,5 +1,5 @@
 import {
-  "openssh/openssh_moonbit/src/rng",
+  "riantr/moonbit_openssh/src/rng",
 }
 
 ///| Loop #84 browser probe: js target only, runs inside a browser Web Worker.

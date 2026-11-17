@@ -38,6 +38,27 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
+// The module name is READ from moon.mod rather than written into the regexes
+// below. Loop #95 renamed the module, and a hardcoded path in this file turned
+// two of its checks red for a reason that had nothing to do with the contract
+// they assert -- and worse, the escaped-separator form a RegExp literal uses is
+// invisible to a plain-text search for the old import path, so the rename's own
+// completeness check could not have found it. Reading the name is what makes
+// that class of miss impossible instead of merely fixed.
+const MODULE_NAME = (() => {
+  const mod = readFileSync(join(root, "moon.mod"), "utf8");
+  const m = mod.match(/^\s*name\s*=\s*"([^"]+)"/m);
+  if (!m) {
+    throw new Error("moon.mod declares no name; this gate cannot tell which module it is checking");
+  }
+  return m[1];
+})();
+
+// A module name is publisher/package, so it always contains a `/`. Escaping it
+// for use inside a RegExp literal keeps the checks below spelled the same way
+// they were written when the name was a constant.
+const MODULE_RE = MODULE_NAME.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
 let passed = 0;
 const failures = [];
 
@@ -107,7 +128,7 @@ expect("it has a close method", /fn\s+wire_close\(/.test(transportSrc));
 
 // ------------------------------------------------ B. the arrow -------------
 section("B. the dependency arrow points one way");
-expect("src/transport imports src/tcp", /openssh\/openssh_moonbit\/src\/tcp/.test(readFileSync(join(transportDir, "moon.pkg"), "utf8")));
+expect("src/transport imports src/tcp", new RegExp(MODULE_RE + "/src/tcp").test(readFileSync(join(transportDir, "moon.pkg"), "utf8")));
 expect("src/tcp does not import src/transport", !/src\/transport/.test(tcpPkg));
 expect("src/sshclient does import src/transport", /src\/transport/.test(sshPkg));
 // Loop #64 mutation M6 found this hole: an unused `ws_socket` import added to
@@ -126,7 +147,7 @@ expect("src/sshclient does import src/transport", /src\/transport/.test(sshPkg))
   );
   expect(
     "src/transport imports only src/tcp from this module",
-    ![...transportPkg.matchAll(/"openssh\/openssh_moonbit\/src\/[^"]+"/g)]
+    ![...transportPkg.matchAll(new RegExp('"' + MODULE_RE + '/src/[^"]+"', "g"))]
       .map((m) => m[0])
       .some((p) => !p.includes("src/tcp")),
     transportPkg.replace(/\s+/g, " "),

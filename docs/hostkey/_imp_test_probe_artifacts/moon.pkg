@@ -1,6 +1,6 @@
 // cross-package import probe
 import {
-  "openssh/openssh_moonbit/src/hostkey",
-  "openssh/openssh_moonbit/src/kexc25519",
-  "openssh/openssh_moonbit/src/bpacket",
+  "riantr/moonbit_openssh/src/hostkey",
+  "riantr/moonbit_openssh/src/kexc25519",
+  "riantr/moonbit_openssh/src/bpacket",
 }

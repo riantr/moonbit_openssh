@@ -83,8 +83,8 @@ MUTATIONS = [
     (
         "M6 let src/tcp learn the trait (cycle in disguise)",
         os.path.join("src", "transport", "moon.pkg"),
-        'import {\n  "openssh/openssh_moonbit/src/tcp",\n}',
-        'import {\n  "openssh/openssh_moonbit/src/tcp",\n  "openssh/openssh_moonbit/src/ws_socket",\n}',
+        'import {\n  "riantr/moonbit_openssh/src/tcp",\n}',
+        'import {\n  "riantr/moonbit_openssh/src/tcp",\n  "riantr/moonbit_openssh/src/ws_socket",\n}',
     ),
 ]
 

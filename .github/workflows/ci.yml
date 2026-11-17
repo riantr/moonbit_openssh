@@ -435,6 +435,18 @@ jobs:
     #     python ci/ci.py --tiers ... --tag
     # Pushing to gitee is allowed at any time. Pushing to GitHub is allowed
     # only after a green run and a tag -- see ci/release.py.
+    #
+    # Loop #95: publication to mooncakes.io is also NOT done here, and that is
+    # a decision rather than an omission. `moon publish` needs a login, and
+    # `moon login` is a browser interaction: on a runner it would need a stored
+    # credential, which this repository does not have and should not grow
+    # without the owner's explicit say-so. So the matrix row `packaging`
+    # (ci/publish.py --check) runs here and answers everything that can be
+    # answered without credentials, and the release itself is
+    #     python ci/ci.py --tiers env,build,gates,qa --tag --publish
+    # on the machine that holds the login. What this job CAN report is whether
+    # that command would be refused for a version/tag mismatch, which is the
+    # failure that would otherwise ship a version naming no commit.
     name: release gate (report only)
     runs-on: windows-latest
     timeout-minutes: 20

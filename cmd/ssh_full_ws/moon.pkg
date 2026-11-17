@@ -11,9 +11,9 @@
 /// 输出 5 行 hex dump (stdout / exit_code / remote_channel / sent / recv)
 
 import {
-  "openssh/openssh_moonbit/src/sshwire",
-  "openssh/openssh_moonbit/src/kexflow",
-  "openssh/openssh_moonbit/src/ws_socket",
+  "riantr/moonbit_openssh/src/sshwire",
+  "riantr/moonbit_openssh/src/kexflow",
+  "riantr/moonbit_openssh/src/ws_socket",
 }
 
 pkgtype(kind: "executable")

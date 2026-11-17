@@ -1,8 +1,8 @@
 // SSH hostkey parsing & signature verification (sshkey.c subset)
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/ecdsa",
-  "openssh/openssh_moonbit/src/rsa",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/rsa",
 }
 
 // Loop #53: base64 只被测试固定件用到（证书 blob 以 base64 常量落盘，由

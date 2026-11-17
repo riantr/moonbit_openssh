@@ -13,7 +13,7 @@ import"失效,推测为旧版 moon 限制)。实验证据:src/_imp_test 探针�
 
 ```
 import {
-  "openssh/openssh_moonbit/src/hostkey",
+  "riantr/moonbit_openssh/src/hostkey",
 }
 ```
 

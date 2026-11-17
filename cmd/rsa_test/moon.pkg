@@ -3,8 +3,8 @@
 /// 512-bit RSA test vector (small for fast verify)
 
 import {
-  "openssh/openssh_moonbit/src/bigint",
-  "openssh/openssh_moonbit/src/rsa",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/rsa",
 }
 
 pkgtype(kind: "executable")

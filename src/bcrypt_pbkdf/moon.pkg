@@ -5,6 +5,6 @@
 ///| salt on every round.  The dependency on `src/blowfish` is the
 ///| cipher itself.
 import {
-  "openssh/openssh_moonbit/src/blowfish",
-  "openssh/openssh_moonbit/src/sha512",
+  "riantr/moonbit_openssh/src/blowfish",
+  "riantr/moonbit_openssh/src/sha512",
 }

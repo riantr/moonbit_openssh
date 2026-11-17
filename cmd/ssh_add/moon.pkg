@@ -2,9 +2,9 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/core/env",
-  "openssh/openssh_moonbit/src/agent",
-  "openssh/openssh_moonbit/src/agentpipe",
-  "openssh/openssh_moonbit/src/keyfile",
+  "riantr/moonbit_openssh/src/agent",
+  "riantr/moonbit_openssh/src/agentpipe",
+  "riantr/moonbit_openssh/src/keyfile",
 }
 
 pkgtype(kind: "executable")

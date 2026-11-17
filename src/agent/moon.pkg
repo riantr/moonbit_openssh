@@ -1,6 +1,6 @@
 import {
   "moonbitlang/core/encoding/utf8",
-  "openssh/openssh_moonbit/src/sshwire",
+  "riantr/moonbit_openssh/src/sshwire",
 }
 
 pkgtype(kind: "library")

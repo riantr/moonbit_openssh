@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/chacha"
+package "riantr/moonbit_openssh/src/chacha"
 
 // Values
 pub let block_len : Int32

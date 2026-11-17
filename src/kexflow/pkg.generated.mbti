@@ -1,9 +1,9 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "openssh/openssh_moonbit/src/kexflow"
+package "riantr/moonbit_openssh/src/kexflow"
 
 import {
-  "openssh/openssh_moonbit/src/kexc25519",
-  "openssh/openssh_moonbit/src/knownhosts",
+  "riantr/moonbit_openssh/src/kexc25519",
+  "riantr/moonbit_openssh/src/knownhosts",
 }
 
 // Values

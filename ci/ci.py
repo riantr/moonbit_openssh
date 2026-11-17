@@ -26,6 +26,8 @@ disagree about what passed.
     python ci/ci.py --fail-fast
     python ci/ci.py --json ci/artifacts/ci.json
     python ci/ci.py --self-check           # verify this file's own bookkeeping
+    python ci/ci.py --tiers env,build,gates,qa --tag            # tag if green
+    python ci/ci.py --tiers env,build,gates,qa --tag --publish  # ...and release
 
 ## Tiers
 
@@ -81,6 +83,7 @@ ARTIFACT_DIR = os.path.join(ROOT, "ci", "artifacts")
 # ci/, but an explicit insert keeps `import ci.qa` working from elsewhere.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qa  # noqa: E402  -- must follow the sys.path insert above
+import publish as pub  # noqa: E402
 import release as rel  # noqa: E402
 import sandbox  # noqa: E402
 
@@ -449,7 +452,7 @@ def qa_results(steps, tier):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="openssh_moonbit local CI")
+    ap = argparse.ArgumentParser(description="moonbit_openssh local CI")
     ap.add_argument("--tiers", default="env,build,gates",
                     help="comma separated: " + ",".join(TIERS))
     ap.add_argument("--only", default="",
@@ -461,12 +464,26 @@ def main():
                     help="verify this engine's own pass/fail accounting")
     ap.add_argument("--tag", action="store_true",
                     help="create the next tag, but only if every step passed")
+    ap.add_argument("--publish", action="store_true",
+                    help="after a green run and a tag, publish to mooncakes.io; "
+                         "refuses loudly when no identity is logged in")
     ap.add_argument("--check-release", action="store_true",
                     help="report whether a tag would be allowed, and change nothing")
     args = ap.parse_args()
 
     if args.self_check:
         return self_check()
+
+    # Publishing is reachable only through the path that created the tag, so the
+    # two flags travel together. Allowing `--publish` alone would let a release
+    # be published against a tree whose tag was created in some earlier run --
+    # which is exactly the "published version names no commit" case the version
+    # check exists to prevent.
+    if args.publish and not args.tag:
+        sys.stderr.write(
+            "--publish requires --tag: a release is published from a green run "
+            "that also created its tag, never on its own.\n")
+        return 2
 
     tiers = [t.strip() for t in args.tiers.split(",") if t.strip()]
     unknown = [t for t in tiers if t not in TIERS]
@@ -658,6 +675,19 @@ def release_gate(failed, ran, tiers, args):
     print("  newest tag : %s" % (max(tags) if tags else "(none)"))
     print("  next  tag  : %s" % want)
 
+    # The tag and the published version are two records of the same claim, and
+    # neither toolchain checks that they agree. This is the check. It is cheap
+    # (one file read) and it is placed BEFORE the tag exists on purpose: after
+    # the tag, a disagreement can only be recorded as a mistake.
+    try:
+        mod = pub.read_mod()
+        rel.assert_version_matches_tag(mod.get("version"), want)
+        print("  moon.mod  : version %s matches %s" % (mod.get("version"), want))
+    except rel.TagError as exc:
+        print("")
+        print("  REFUSED: %s" % exc)
+        return 1
+
     try:
         rel.assert_tag_allowed(failed, ran, skipped)
     except rel.TagError as exc:
@@ -669,9 +699,24 @@ def release_gate(failed, ran, tiers, args):
         return 1
 
     print("  green : every step that ran passed")
+
+    # The identity is reported here because --publish acts on it, and because
+    # "logged in" is not the same question as "can publish": `moon whoami`
+    # answers with exit code 0 while saying the username is unavailable.
+    id_ok, id_detail = pub.whoami()
+    print("  publish identity : %s" % ("ok -- " + id_detail if id_ok
+                                       else "NOT USABLE -- " + id_detail))
+    if args.publish and not id_ok:
+        print("")
+        print("  --publish was asked for, and there is no usable identity, so the")
+        print("  publication will be refused after the tag. Run `moon login`")
+        print("  once by hand; the tag itself is not affected.")
+
     if args.check_release:
         print("")
         print("  READY. Re-run with --tag to create %s." % want)
+        if args.publish:
+            print("  ...and with --publish to release it on mooncakes.io.")
         return 0
 
     dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
@@ -701,7 +746,24 @@ def release_gate(failed, ran, tiers, args):
     # rule actually is now: a green run and this tag are the only gate.
     print("  push policy: gitee now; github after this green run and this tag."
           + ("" if have_github else "  (no GitHub remote configured yet.)"))
-    return 0
+
+    if not args.publish:
+        print("")
+        print("  publication: not requested. `--publish` releases %s %s on"
+              % (mod.get("name"), mod.get("version")))
+        print("  mooncakes.io; it is deliberately a separate flag so that a tag")
+        print("  can exist without a release having been attempted.")
+        return 0
+
+    # The tag is already created and it is correct either way: it records a
+    # verified tree. A publication failure is reported as a failure of THIS
+    # command, never silently absorbed, because a release that quietly did not
+    # happen is the outcome a reader is least able to notice.
+    print("")
+    print("=" * 72)
+    print("PUBLISH GATE")
+    print("=" * 72)
+    return pub.cmd_publish()
 
 
 def release_self_check():
@@ -760,10 +822,28 @@ def release_self_check():
     except rel.TagError as exc:
         bad.append("green run was refused: %s" % exc)
 
+    # The published version and the tag must be one claim. Four cases: the two
+    # shapes that must be accepted, and the two that must be refused. This is
+    # the check that stops `version = "0.1.2"` from being tagged v0.1.3 and
+    # published as a version naming no commit.
+    for name, version, tag in (("tag with v", "0.1.2", "v0.1.2"),
+                               ("tag without v", "0.1.2", "0.1.2")):
+        try:
+            rel.assert_version_matches_tag(version, tag)
+        except rel.TagError as exc:
+            bad.append("%s was refused: %s" % (name, exc))
+    for name, version, tag in (("drifting version", "0.1.3", "v0.1.2"),
+                               ("non X.Y.Z version", "0.1", "v0.1.2")):
+        try:
+            rel.assert_version_matches_tag(version, tag)
+            bad.append("%s was accepted" % name)
+        except rel.TagError:
+            pass
+
     return bad
 
 
-release_self_check_count = 12
+release_self_check_count = 16
 
 
 def qa_self_check():
@@ -867,6 +947,10 @@ def self_check():
     total += qa_self_check_count
     failures.extend(release_self_check())
     total += release_self_check_count
+    # The publication gate's own cases, accounted in the same total so that a
+    # broken version check cannot hide behind a separately-run command.
+    failures.extend(pub.self_check_cases())
+    total += pub.self_check_count
     try:
         sandbox_problems = sandbox.self_check(ROOT)
     except Exception as exc:  # noqa: BLE001

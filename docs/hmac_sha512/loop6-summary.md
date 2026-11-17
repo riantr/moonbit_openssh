@@ -69,7 +69,7 @@ Loop #6 几乎是 Loop #3 HMAC-SHA256 的"放大版":
 
 `moon 0.1.20260608` 不支持跨包 import:
 ```
-Error: [4042] Cannot find import 'openssh/openssh_moonbit/sha512'
+Error: [4042] Cannot find import 'riantr/moonbit_openssh/sha512'
 ```
 
 **对策:** 直接把 SHA-512 6 个 .mbt 复制进 `hmac_sha512` 包内。Loop #3 已经验证过这个 workaround 工作。

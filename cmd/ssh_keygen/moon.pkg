@@ -2,8 +2,8 @@ import {
   "moonbitlang/core/env",
   "moonbitlang/async",
   "moonbitlang/async/fs",
-  "openssh/openssh_moonbit/src/keyfile",
-  "openssh/openssh_moonbit/src/keyperm",
+  "riantr/moonbit_openssh/src/keyfile",
+  "riantr/moonbit_openssh/src/keyperm",
 }
 
 pkgtype(kind: "executable")
