@@ -161,7 +161,7 @@ DEFAULT_TIMEOUT = 3600
 
 class Step(object):
     def __init__(self, tier, name, argv, timeout=DEFAULT_TIMEOUT, cwd=None,
-                 argvs=None, zero_work_guard=False):
+                 argvs=None, zero_work_guard=False, detail_from=None):
         self.tier = tier
         self.name = name
         self.argv = argv
@@ -172,6 +172,13 @@ class Step(object):
         self.timeout = timeout
         self.cwd = cwd or ROOT
         self.zero_work_guard = zero_work_guard
+        # Loop #98: a step whose `detail` should carry a line of its own
+        # output rather than the word "ok".  The toolchain version is the
+        # reason this exists: a green run that does not say WHICH compiler
+        # produced it cannot be compared with the next green run, and the
+        # difference between them was exactly what a third-party dependency
+        # broke (see AGENTS.md, Loop #98).
+        self.detail_from = detail_from
         self.status = "skipped"
         self.detail = ""
         self.seconds = 0.0
@@ -307,7 +314,19 @@ def run_step(step):
             _keep_full_output(step, out)
             return False
     else:
-        step.detail = "ok"
+        if step.detail_from:
+            # The step's own words, first line that matches.  A step that was
+            # asked to report and cannot is a step that reported nothing, and
+            # that is worth saying out loud rather than storing "ok".
+            picked = ""
+            for line in lines:
+                if step.detail_from.search(line):
+                    picked = line.strip()
+                    break
+            step.detail = picked if picked else "ok (no line matched %r)" % (
+                step.detail_from.pattern,)
+        else:
+            step.detail = "ok"
     step.status = "passed"
     return True
 
@@ -352,9 +371,17 @@ def build_steps():
 
 def env_steps():
     return [
-        Step("env", "moon version", ["cmd", "/c", "moon", "version", "--all"], timeout=300),
-        Step("env", "node version", ["cmd", "/c", "node", "--version"], timeout=120),
-        Step("env", "python version", ["cmd", "/c", "python", "--version"], timeout=120),
+        # Loop #98: the toolchain version goes INTO the report.  The CI
+        # installs `latest`, so the compiler moves between runs; when it moved
+        # on 2026-11-17, a third-party dependency stopped compiling and three
+        # gates went red -- and the artifact could not show what had changed,
+        # because every env step said "ok".
+        Step("env", "moon version", ["cmd", "/c", "moon", "version", "--all"],
+             timeout=300, detail_from=re.compile(r"^moon\s+\d")),
+        Step("env", "node version", ["cmd", "/c", "node", "--version"], timeout=120,
+             detail_from=re.compile(r"^v\d")),
+        Step("env", "python version", ["cmd", "/c", "python", "--version"],
+             timeout=120, detail_from=re.compile(r"^Python\s+\d")),
     ]
 
 

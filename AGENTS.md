@@ -11667,5 +11667,113 @@ attempts.
     runner-minutes saved per tag push       ~45 (gates skipped)
     0.1.3                                   tagged, never published
 
+## Loop #98: the compiler moved, and a third-party dependency broke
+
+GitHub run 44065649338 (the branch push of Loop #97) went red in three gates --
+**loop41, loop66, loop68** -- with one cause.
+
+The evidence, in the order it was found:
+
+* **The same source failed on one machine and not the other.**  The runner's
+  kept build transcript names the file and the line:
+  `.mooncakes/tonyfettes/xlog/entry.mbt:35:25` -- `Type Level has no method
+  to_string` -- with the hint "impl cannot be invoked directly as method unless
+  explicitly promoted via `extend`".  The very same xlog version compiles here.
+* **The compiler was not the same.**  The runner printed
+  `moon 0.1.20261117 (eb64713 2026-11-17)`; this machine has
+  `moon 0.1.20261102 (ea07287 2026-11-02)`.  The CI installs `version: latest`,
+  so **the compiler moves between runs**.
+* **The failure was not ours.**  `xlog` is a TRANSITIVE dependency of `proton`
+  and is used only by `cmd/proton_gui`.  No package under `src/` imports it.
+* **The broken version is the one the dependency asks for.**  `proton 0.3.4`
+  requires `tonyfettes/xlog@0.4.2`, and 0.4.2 calls `impl`-defined methods
+  directly.
+
+### The compiler cannot be pinned, and the measurement says so
+
+The obvious remedy -- pin the compiler -- is not available:
+
+* `https://cli.moonbitlang.com/binaries/<version>/moonbit-windows-x86_64.zip`
+  answers **403** for every concrete version (probed 0.1.20261102, 0.1.20261117,
+  both with and without a `v` prefix, and both the binary and the core).  Only
+  the channels exist: `binaries/latest/...` answers 200/206.  The installer's
+  `$Version` is therefore a CHANNEL, not a version.
+* `github.com/moonbitlang/core` has **no releases and no tags**, so there is no
+  versioned archive to install from either.
+* The install script has no fallback: a missing version is `Install Failed`,
+  exit 1.  A pin would be loud -- but there is nothing to pin TO.
+
+So the compiler floats, and the dependencies are ours to pin.
+
+### The upstream fix, which is also the right one
+
+**proton 0.9.1, published the same day, depends on xlog 0.5.1** -- and xlog 0.5.1
+adds `extends.mbt`:
+
+    pub extend Level  with Show::{to_string, output}
+    pub extend Entry  with Show::{to_string, output}
+    pub extend Entry  with ToJson::{to_json}
+
+The call sites are unchanged (`self.level.to_string()` is still there); what
+changed is that the trait methods are now **promoted**, which is what the new
+compiler asks for and what the old one also accepts.  So xlog 0.5.1 compiles
+under BOTH compilers -- measured here on 0.1.20261102 (`moon check
+cmd/proton_gui --target native`: 0 errors) and on the runner by the next CI
+run.  `moon.mod` therefore gains one direct edge:
+
+    "tonyfettes/xlog@0.5.1",
+
+which is what raises it: MoonBit's resolver takes the **highest** version
+requested anywhere in the graph.  proton stays at 0.3.4, so the CEF archive and
+its sha256 in the CI are untouched.
+
+### The pin that was not a pin
+
+The same measurement found a second thing.  `moon.mod` declared
+`moonbitlang/async@0.22.2`, and every build used **0.22.4** -- proton's
+requirement, because the resolver takes the maximum.  The declaration was a
+claim the build did not honour, and it is the version the *published* module
+would state.  It now says 0.22.4, the version actually used.  The resolution
+does not change; the record does.
+
+### A green run that does not say what it ran on
+
+`ci.json` recorded every env step as `"ok"`, so two runs could not be compared:
+when the compiler moved on 2026-11-17 and three gates went red, the artifact
+could not show what had changed.  The env steps now carry the version they
+report -- the first line of `moon version --all` -- so the artifact names the
+compiler that produced the verdict.  Same argument as the committed loop94
+recording, one level up: a measurement that cannot be re-grounded is a claim
+about the machine.
+
+### The publish path checks, it does not build
+
+Measured from the first publication attempt (run 44059001768), whose dry run
+printed exactly this before failing:
+
+    publishing riantr/moonbit_openssh 0.1.3 as Logged in as riantr
+    Running moon check ...
+    Error: Failed to calculate build plan
+    moon check failed
+
+So `moon publish --dry-run` type-checks the module; it does not compile it.
+That matters because `cmd/proton_gui` needs the Proton CEF runtime to BUILD,
+and the publish job does not provision it -- and does not need to, because a
+package is a zip of sources (954 files, 374 of them `.mbt`), not of binaries.
+A check does not compile the C stubs, so the missing CEF cannot bite here.
+
+### Numbers
+
+    GitHub run 44065649338     3 red gates, 1 cause
+    runner compiler             moon 0.1.20261117 (2026-11-17)
+    this machine                moon 0.1.20261102 (2026-11-02)
+    xlog 0.4.2 errors           6, in 3 files (entry.mbt, log.mbt, writer.mbt)
+    xlog 0.5.1                  adds extends.mbt; compiles on both compilers
+    moon.mod                    + tonyfettes/xlog@0.5.1
+                                async 0.22.2 -> 0.22.4 (the version in use)
+    local check                 cmd/proton_gui: 0 errors
+    loop41 / loop66 / loop68    green locally with the new resolution
+
+
 
 

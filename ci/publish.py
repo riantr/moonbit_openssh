@@ -258,6 +258,31 @@ def parse_manifest(text):
     return entries, zip_line
 
 
+FROZEN_WANTS_MODULES = re.compile(
+    r"new modules need to be installed|`?frozen`? is set", re.I)
+
+
+def needs_module_sync(err):
+    """True when a `--frozen` run failed ONLY because modules are missing.
+
+    Measured on GitHub run 44059001768 (a fresh windows-latest runner):
+
+        Failed to sync dependencies: `frozen` is set, so the build system
+        cannot change the modules directory, but new modules need to be
+        installed
+
+    `--frozen` encodes "the `.mooncakes` of a machine whose every prior build
+    has already synced the tree".  On a runner there is no such history, so
+    the flag is not a safety measure there -- it is a refusal.  The remedy is
+    to run the command WITHOUT it, which is what a warm machine does anyway.
+
+    Kept as a pure function so it can be decided without a subprocess, and so
+    the self-check can prove it fires on the measured text and does NOT fire
+    on an unrelated failure.
+    """
+    return bool(FROZEN_WANTS_MODULES.search(err or ""))
+
+
 def package_list(timeout=3600):
     """(rc, entries, zip_line, err) for the file set `moon publish` would ship.
 
@@ -288,10 +313,19 @@ def package_list(timeout=3600):
     `--dry-run` is NOT implemented for `package` ("dry-run is not implemented
     for package", exit 1), so `--list` is the inspection command, and the zip
     it writes lands under the gitignored `_build/`.
-    `--frozen` keeps dependency syncing (and therefore the network) out of it.
+
+    `--frozen` keeps dependency syncing (and therefore the network) out of it,
+    and it is tried FIRST -- on a machine whose `.mooncakes` is already
+    complete it is the fast path and it stays.  When it fails for the frozen
+    reason (a fresh runner), the command is retried without it, because the
+    point of this function is the file set, and a file set cannot be measured on
+    a machine that refuses to resolve its dependencies.
     """
     rc, _out, err = run_split(
         ["cmd", "/c", "moon", "package", "--list", "--frozen"], timeout=timeout)
+    if rc != 0 and needs_module_sync(err):
+        rc, _out, err = run_split(
+            ["cmd", "/c", "moon", "package", "--list"], timeout=timeout)
     entries, zip_line = parse_manifest(err)
     return rc, entries, zip_line, err
 
@@ -574,10 +608,24 @@ def self_check_cases():
         if fragment in entries:
             bad.append("box fragment %r was parsed as a path" % fragment)
 
+    # The frozen refusal is recognised, and only that refusal is.
+    frozen_refusal = (
+        "Error: Failed to sync dependencies: `frozen` is set, so the build "
+        "system cannot change the modules directory, but new modules need to "
+        "be installed")
+    if not needs_module_sync(frozen_refusal):
+        bad.append("the measured frozen refusal was not recognised")
+    for other in ("Error: Failed to calculate build plan",
+                  "Type Level has no method to_string",
+                  ""):
+        if needs_module_sync(other):
+            bad.append("an unrelated failure was taken for a frozen refusal: %r"
+                       % other)
+
     return bad
 
 
-self_check_count = 7
+self_check_count = 9
 
 
 def self_check():
