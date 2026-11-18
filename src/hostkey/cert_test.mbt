@@ -16,7 +16,10 @@
 fn cert_b64(s : String) -> FixedArray[Byte] {
   let view : StringView = s
   let res = @base64.decode(view, ignore_whitespace=false) catch {
-    _ => Bytes::new(0)
+    // Loop #99: `Bytes::new` is deprecated in the compiler of 2026-11-17 --
+    // "Use `Bytes::make(len, b'\x00')` instead" -- and the old spelling was
+    // the only occurrence in the tree, so this is the whole of the damage.
+    _ => Bytes::make(0, b'\x00')
   }
   let arr : FixedArray[Byte] = FixedArray::make(res.length(), b'\x00')
   for i = 0; i < res.length(); i = i + 1 {

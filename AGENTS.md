@@ -11775,5 +11775,132 @@ A check does not compile the C stubs, so the missing CEF cannot bite here.
     loop41 / loop66 / loop68    green locally with the new resolution
 
 
+## Loop #99: the compiler moved again -- two diagnostics, and the toolchain that matches CI
 
+GitHub run 44255552480 (commit `d7678c8`) went red in ONE gate: **loop66**,
+the static-analysis gate.  72 of 73 steps passed, so the Loop #98 dependency
+fix did its job -- loop41 and loop68, the other two victims of the xlog 0.4.2
+breakage, are green under the runner's compiler.
 
+What loop66 said:
+
+    new warnings not in the accept table:
+      cmd/proton_gui/moon.pkg:24, src/hostkey/cert_test.mbt:19
+
+The gate reports `file:line`, and the artifact did not carry the warning
+TEXT.  An accept-table entry has to be evidence-backed, so the text had to be
+measured, which meant the compiler CI uses had to be obtained.
+
+### Getting the compiler CI uses, without destroying the one we had
+
+A version cannot be installed: `cli.moonbitlang.com/binaries/<version>/...`
+answers **403** for every version-shaped path, for the binary and for the
+core alike, and the channels that exist are `latest` and `nightly` (both
+206) while `beta`, `2026-11-17` and `20261117` are 403.  The version already
+on this machine can never be fetched again, so it was **not** overwritten:
+the `latest` toolchain was installed into a SECOND `MOON_HOME`
+(`E:\src\moon\_moon_latest`), side by side.
+
+It is the same build the runner had.  The archive's `Last-Modified` is
+`Tue, 17 Nov 2026 09:51:12 GMT` -- the same file the runner downloaded at
+07:00 UTC on the 18th -- and:
+
+    moon version --all -> moon 0.1.20261117 (eb64713 2026-11-17)
+                     -> moonc v0.10.21+06da1ed44 (2026-11-16)
+
+which is byte-for-byte the version the cloud run recorded in `ci.json`
+("moon 0.1.20261117 (eb64713 2026-11-17)").  **`Last-Modified` on the
+channel archive is the version's identity**, because the version string
+itself cannot be requested.
+
+### The two diagnostics
+
+1. `cmd/proton_gui/moon.pkg:24:3-24:26`
+   `Warning (unused_package): Unused package 'moonbitlang/core/json'`
+
+   The package imported `moonbitlang/core/json` for the
+   `#derive(ToJson, FromJson)` attributes in `contract.mbt`.  The new
+   compiler does not count the derive as a consumer, because the PRELUDE now
+   carries the json package (`moonbitlang/core/prelude` imports
+   `moonbitlang/core/json`), so the traits resolve without the explicit
+   edge.  The import is genuinely redundant; the fix is to remove it -- the
+   same shape as Loop #66's removal of `moonbitlang/core/bytes` from
+   `src/tcp`.  Measured after the removal: the derives still resolve, and
+   the package's only remaining diagnostics are the three `unused_async`
+   entries the accept table already carries.
+
+2. `src/hostkey/cert_test.mbt:19:10-19:20`
+   `Warning (deprecated): Use `Bytes::make(len, b'\x00')` instead`
+
+   `Bytes::new(0)` is deprecated in the new core.  It was the only occurrence
+   of `Bytes::new(` in the whole tree, so the repair is the whole of it.
+   `Bytes::make(len : Int32, init : Byte)` exists in BOTH cores
+   (`builtin/intrinsics.mbt:1568` in the old one), so the source is not tied
+   to the newer compiler.
+
+Both are fixed in the source rather than accepted: an accept-table entry is
+for a warning that CANNOT be removed (a compiler limitation, an `async fn`
+whose declared type demands it), and these two are ordinary dead weight.
+
+### `moon check` does not run a package's prebuild script
+
+Measured with an isolated probe package that declares the same option
+`moonbit-community/proton` declares in its module manifest
+(`options("--moonbit-unstable-prebuild": "build.mjs")`), whose `build.mjs`
+appends a marker line every time it is invoked:
+
+    moon check                  -> NO marker   (2 tasks ran)
+    moon check --target native  -> NO marker   (2 tasks ran)
+    moon build --target native  -> MARKER present
+
+The prebuild script belongs to the BUILD plan, not the CHECK plan.  That
+matters because `cmd/proton_gui`'s dependency `proton` resolves the Proton
+CEF SDK layout under `~/.proton/store` in that script, and the publish job
+does not provision the CEF layout (only the gates job does).  Since
+`moon publish` runs a CHECK over the module -- measured on run 44059001768,
+where the publish job's own output was "Running moon check ..." -- the
+publish job does not need the CEF, and the workflow needed no CEF step and
+the release needed no extra cloud round to prove it.
+
+A second thing the probe taught: the prebuild script receives the whole
+environment in its JSON payload (`{"env": {...}, "paths": {...}}`), so a
+build script must never print that payload into a CI log.
+
+### The rule this loop leaves behind
+
+**The local compiler must be the compiler CI runs.**  Everything in this loop
+was expensive only because it was measured on the wrong compiler: the cloud
+run is the first place where the new diagnostics appeared, and the fix could
+not be written until a compiler that produces them existed on this machine.
+Two changes make the next occurrence cheap:
+
+  * the local toolchain is now the same build as CI's, and it is installed
+    side by side with the previous one instead of overwriting it;
+  * `ci/ci.py` records the toolchain version in `ci.json` (Loop #98), so two
+    runs can be compared instead of merely counted.
+
+### The tag that was signed for a tree that failed in the cloud
+
+The tenth release round signed `v0.1.4` at `d7678c8` -- correctly, by the
+local gate: the local CI was green, and the release gate refuses to tag
+unless every step that ran passed.  The CLOUD then showed that tree to be
+broken under the runner's compiler, which is a fact the local round could not
+know.  `v0.1.4` had never left this machine (it is not on Gitee, not on
+GitHub, not on mooncakes.io), so it was deleted and re-signed on the fixed
+tree rather than being pushed as a broken release or left behind as a second
+"tagged but never published" tombstone like `v0.1.3`.
+
+A tag that has been pushed anywhere is not moved again.  A tag that exists
+only in one working copy, and names a tree the cloud rejected, is a
+work-in-progress number, not a published state.
+
+### Numbers
+
+    GitHub run 44255552480      1 red gate (loop66), 72/73 steps passed
+    runner compiler             moon 0.1.20261117 (eb64713 2026-11-17)
+    local compiler, new         moon 0.1.20261117 (eb64713 2026-11-17)  <- E:\src\moon\_moon_latest
+    local compiler, kept        moon 0.1.20261102 (2026-11-02)          <- C:\Users\hp\.moon (not overwritten)
+    new diagnostic 1            unused_package 'moonbitlang/core/json' (proton_gui/moon.pkg:24)
+    new diagnostic 2            deprecated Bytes::new -> Bytes::make (hostkey/cert_test.mbt:19)
+    local check                 cmd/proton_gui: 3 accepted warnings; src/hostkey: 0
+    loop66 under the new compiler   14/14, "4 reported sites, equal to the 4-entry accept table"

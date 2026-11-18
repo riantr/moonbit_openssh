@@ -21,7 +21,13 @@ import {
   "moonbit-community/proton",
   "moonbit-community/proton_contract",
   "moonbitlang/async",
-  "moonbitlang/core/json",
+  // Loop #99: `moonbitlang/core/json` used to be imported here for the
+  // `#derive(ToJson, FromJson)` attributes in contract.mbt.  The compiler of
+  // 2026-11-17 reports it as UNUSED ("Unused package 'moonbitlang/core/json'",
+  // moon.pkg:24:3-24:26) because the prelude now carries the json package
+  // (`moonbitlang/core/prelude` imports `moonbitlang/core/json`), so the
+  // derives resolve without the explicit edge -- exactly like Loop #66 did
+  // for `moonbitlang/core/bytes` in src/tcp.
   "riantr/moonbit_openssh/src/sftp",
 }
 
