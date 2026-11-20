@@ -438,14 +438,7 @@ pub fn[T : @transport.Transport] serve(
   let mut sftp_requests = 0
   let mut peer_closed = false
   if authenticated {
-    let ch = serve_channels(
-      conn,
-      counters,
-      send_ctx,
-      recv_ctx,
-      runner,
-      sftp,
-    )
+    let ch = serve_channels(conn, counters, send_ctx, recv_ctx, runner, sftp)
     command = ch.command
     exit_status = ch.exit_status
     stdout_bytes = ch.stdout_bytes

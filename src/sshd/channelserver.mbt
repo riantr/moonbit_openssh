@@ -984,13 +984,7 @@ pub fn[T : @transport.Transport] serve_channels(
           // The subsystem owns the channel from here on: it reads the
           // peer's requests and answers them until the peer is done.
           let outcome = sd_sftp_loop(
-            conn,
-            counters,
-            send_ctx,
-            recv_ctx,
-            peer_channel,
-            peer_window,
-            peer_max_packet,
+            conn, counters, send_ctx, recv_ctx, peer_channel, peer_window, peer_max_packet,
             provider,
           )
           peer_window = outcome.window_left

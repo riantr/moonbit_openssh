@@ -31,8 +31,8 @@ Two things in the client's output are not properties of the server but
 properties of the machine the run happened on:
 
   * **the bed's absolute path.**  It appears in the client's own echo of
-    every command (`sftp> cd E:/.../bed/work`) and in the paths the server
-    answers with (`/E:/.../bed/work`).  The recording replaces it with the
+    every command (`sftp> cd <bed>/work`) and in the paths the server
+    answers with (`/<bed>/work`).  The recording replaces it with the
     token `BED`, and the gate substitutes the live path back in -- the same
     trick Loop #94's oracle uses with `EMIT_PS1`.
 
@@ -352,6 +352,21 @@ def measure():
                 "stdoutHex": tokenize(out).hex(),
                 "stderrHex": tokenize(err).hex(),
             })
+        # A real sshd that STARTS but refuses this machine's test key has
+        # measured nothing, so it must not be reported as a recording that
+        # disagrees.  Measured on GitHub run 44039917227 (a windows-latest
+        # runner, whose Windows OpenSSH is an older build with different
+        # default key algorithms): every case exited 255 with "Permission
+        # denied (publickey,password)".  Calling that "the committed
+        # recording and the live measurement differ" is a claim about our
+        # bytes when no byte was measured.
+        if results and all(r["code"] == 255 for r in results):
+            stderrs = [bytes.fromhex(r["stderrHex"]).decode("utf-8", "replace")
+                       for r in results]
+            if all("permission denied" in s.lower() for s in stderrs):
+                raise SystemExit(
+                    "the real sshd here refuses the test key, so nothing was "
+                    "measured: %s" % stderrs[0].strip())
     finally:
         subprocess.run(
             ["node", os.path.join(ROOT, "host", "sshd_setup.mjs"), "--stop",
