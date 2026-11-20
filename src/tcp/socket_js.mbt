@@ -32,6 +32,21 @@ extern "js" fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int32) -> Int64 = "((_h, 
 extern "js" fn mb_tcp_close(h : Int64) -> Int32 = "((_h) => -1)"
 
 ///|
+/// Loop #101: the js stand-in for waiting on two sockets.
+///
+/// Node sockets are callback-driven and there is no synchronous socket to
+/// wait on, so this reports "nothing is ready" rather than pretending.
+extern "js" fn mb_tcp_wait_readable2(
+  h1 : Int64,
+  h2 : Int64,
+  timeout_ms : Int32,
+) -> Int64 = "((_h1, _h2, _t) => 0n)"
+
+///|
+/// Loop #101: the js stand-in for half-closing a connection.
+extern "js" fn mb_tcp_shutdown_write(h : Int64) -> Int64 = "((_h) => -1n)"
+
+///|
 /// Loop #79: the js stand-in for the listening socket.
 ///
 /// A browser cannot listen on a TCP port -- there is no such thing as a

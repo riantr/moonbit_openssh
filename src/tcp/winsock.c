@@ -650,3 +650,93 @@ long long mb_tcp_accept(long long h, unsigned char *peer, int timeout_ms) {
     setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
     return mb_tcp_track(c);
 }
+
+/* --------------------------------------------------------------------------
+ * Loop #101: wait for EITHER of two sockets.
+ *
+ * A port forward has to watch two things at once: the SSH connection (where
+ * the peer's bytes arrive) and the target connection (where the answer
+ * arrives).  Waiting for one and then the other is not a slower version of
+ * waiting for both -- it is a deadlock:
+ *
+ *   - wait for the SSH side only: the peer sends a request and waits for the
+ *     answer; the answer arrives at the target and nobody is looking at it;
+ *   - wait for the target side only: the peer waits for the answer and the
+ *     target waits for the request.
+ *
+ * So both sockets go into ONE select() call, and the return value says which
+ * of them is ready.
+ *
+ * The return value is a bitmask: 1 for the first socket, 2 for the second,
+ * 3 for both, 0 for "the deadline passed with nothing to read", and a
+ * negative number for an error.  A bitmask and not an enum because both
+ * sockets can be ready at the same time, and answering "the first" when the
+ * second is ready too would make the relay lose a wakeup.
+ * -------------------------------------------------------------------------- */
+long long mb_tcp_wait_readable2(long long h1, long long h2, int timeout_ms) {
+    SOCKET s1 = (SOCKET)(intptr_t)h1;
+    SOCKET s2 = (SOCKET)(intptr_t)h2;
+    fd_set readable;
+    struct timeval tv;
+    int ready;
+    long long mask = 0;
+
+    if (h1 < 0 && h2 < 0) {
+        return MB_TCP_ERR_SOCKET;
+    }
+    FD_ZERO(&readable);
+    if (h1 >= 0) {
+        FD_SET(s1, &readable);
+    }
+    if (h2 >= 0) {
+        FD_SET(s2, &readable);
+    }
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    /* On Windows the first argument is ignored and must be zero. */
+    ready = select(0, &readable, NULL, NULL, &tv);
+    if (ready == 0) {
+        return 0;
+    }
+    if (ready < 0) {
+        return MB_TCP_ERR_SOCKET;
+    }
+    if (h1 >= 0 && FD_ISSET(s1, &readable)) {
+        mask |= 1;
+    }
+    if (h2 >= 0 && FD_ISSET(s2, &readable)) {
+        mask |= 2;
+    }
+    return mask;
+}
+
+/* --------------------------------------------------------------------------
+ * Loop #101: half-close a connection.
+ *
+ * The peer can close its half of a forwarded channel without closing the
+ * whole thing -- and it means something specific: "I will send no more
+ * bytes".  The target has to be told that, or a service that reads until EOF
+ * never finishes.
+ *
+ * Measured against the real OpenSSH server: when the client half-closes the
+ * channel, the target sees EOF.  The server's own log says
+ *
+ *     debug2: channel 0: chan_shutdown_write (i0 o1 sock 9 wfd 9 efd -1)
+ *
+ * and the target reports that it read the bytes and then got EOF.
+ *
+ * shutdown(s, SD_SEND) is the whole of it: the local side stops sending, the
+ * peer gets EOF, and the socket stays open for reading.  Closing it outright
+ * would throw away whatever the target still had to say.
+ * -------------------------------------------------------------------------- */
+long long mb_tcp_shutdown_write(long long h) {
+    SOCKET s = (SOCKET)(intptr_t)h;
+
+    if (h < 0) {
+        return MB_TCP_ERR_SOCKET;
+    }
+    if (shutdown(s, SD_SEND) != 0) {
+        return -1;
+    }
+    return 0;
+}

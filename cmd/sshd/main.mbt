@@ -202,7 +202,10 @@ async fn main {
         @sftpserver.real_server_fs(),
         @sftpserver.real_server_clock(),
       )
-      match @sshdsrv.serve(conn, cfg, runner, Some(provider)) {
+      // The port forward's provider, the same way: the rules are in
+      // `src/sshd/forward.mbt` and the sockets are here.
+      let forward = make_forward_provider(conn)
+      match @sshdsrv.serve(conn, cfg, runner, Some(provider), Some(forward)) {
         Err(e) => {
           eprintln("server_error: " + @sshdsrv.sd_server_error_label(e))
           conn.close()
@@ -230,6 +233,12 @@ async fn main {
           // against the client's own.
           println("sftp_bytes: " + report.sftp_bytes.to_string())
           println("sftp_requests: " + report.sftp_requests.to_string())
+          // What the port forward carried.  Zero for a command, and the
+          // number of bytes relayed plus the number of channels served when
+          // the peer asked for a forward -- the part of the report a gate
+          // can check against the client's own.
+          println("forward_bytes: " + report.forward_bytes.to_string())
+          println("forward_targets: " + report.forward_targets.to_string())
           // Only 1 when the server READ the peer's CHANNEL_CLOSE before it
           // closed the connection.  Closing while that answer is in flight
           // is what turns the close into a TCP RESET, which discards what
@@ -249,6 +258,52 @@ async fn main {
       }
     }
   }
+}
+
+///|
+/// How long the server may take to reach a port forward's target.
+///
+///   The real server makes the connection asynchronously and answers the
+///   channel when it is done, so a target that never answers holds the
+///   channel open rather than the whole server.  This driver connects
+///   synchronously, so the budget is what keeps one unreachable target from
+///   holding up the connection that asked for it.
+const FORWARD_CONNECT_TIMEOUT_MS : Int32 = 10000
+
+///|
+/// Build the port forward's provider.
+///
+///   The rules are `src/sshd/forward.mbt`; the sockets are here, because
+///   they are native-only work.  The same split `CommandRunner` and
+///   `SftpProvider` have.
+///
+///   The `wait_fn` is the interesting one: a forward has to watch the SSH
+///   connection AND the target connection at the same time, and the only
+///   honest way to do that is one wait over both sockets.  Waiting for the
+///   SSH connection alone loses the answer coming back from the target;
+///   waiting for the target alone never sees the request.  Both are
+///   deadlocks.
+fn make_forward_provider(
+  ssh_conn : @tcp.TcpConn,
+) -> @sshdsrv.ForwardProvider[@tcp.TcpConn] {
+  let ssh_handle = ssh_conn.raw_handle()
+  @sshdsrv.ForwardProvider::make(
+    fn(host : String, port : Int32) {
+      let report = @tcp.TcpConn::connect_with_timeout(
+        host,
+        port,
+        FORWARD_CONNECT_TIMEOUT_MS,
+      )
+      report.conn
+    },
+    fn(conn : @tcp.TcpConn, n : Int32) { conn.recv_some(n) },
+    fn(conn : @tcp.TcpConn, data : FixedArray[Byte]) { conn.send(data) },
+    fn(conn : @tcp.TcpConn) { ignore(conn.shutdown_write()) },
+    fn(conn : @tcp.TcpConn) { conn.close() },
+    fn(conn : @tcp.TcpConn, timeout_ms : Int32) {
+      @tcp.wait_readable_pair(ssh_handle, conn.raw_handle(), timeout_ms)
+    },
+  )
 }
 
 ///|

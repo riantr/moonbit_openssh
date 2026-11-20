@@ -179,6 +179,15 @@ pub struct ChannelReport {
   mut sftp_bytes : Int32
   /// How many SFTP requests were answered.
   mut sftp_requests : Int32
+  /// How many bytes were relayed to the peer on forwarded channels.
+  ///
+  /// Zero unless the peer asked for a port forward.  It is here because
+  /// "the forward worked" is a claim, and the number of bytes that went
+  /// through is the part of that claim a gate can check against the
+  /// client's own.
+  mut forward_bytes : Int32
+  /// How many forwarded channels this connection served.
+  mut forward_targets : Int32
   /// Whether the peer closed the channel.
   mut peer_closed : Bool
 }
@@ -217,6 +226,16 @@ pub const EXTENDED_DATA_STDERR : UInt32 = 1U
 ///
 /// RFC 4254 §5.1 calls it `SSH_OPEN_UNKNOWN_CHANNEL_TYPE`.
 pub const OPEN_UNKNOWN_CHANNEL_TYPE : UInt32 = 3U
+
+///|
+/// Reason code 1: this server does not allow what the peer asked for.
+///
+/// RFC 4254 §5.1 calls it `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED`.  It is the
+/// answer for a forward on a server that was started without forwarding:
+/// saying "no" is something the client can act on, and a server that
+/// accepted the channel and then did nothing would leave the client's local
+/// connection hanging with nothing to say.
+pub const OPEN_ADMINISTRATIVELY_PROHIBITED : UInt32 = 1U
 
 ///|
 /// A CHANNEL_OPEN, read off the wire.
@@ -802,81 +821,221 @@ fn[T : @transport.Transport] sd_sftp_loop(
 /// The peer opens a channel as soon as it is authenticated, so this is where
 /// the connection ends: the real server sends its data, its exit status and
 /// its close, and then the session is over.
-pub fn[T : @transport.Transport] serve_channels(
+pub fn[T : @transport.Transport, U] serve_channels(
   conn : T,
   counters : WireCounters,
   send_ctx : @bpacket.SendCtx,
   recv_ctx : @bpacket.RecvCtx,
   runner : CommandRunner,
   sftp : SftpProvider?,
+  forward : ForwardProvider[U]?,
 ) -> ChannelReport {
-  let mut peer_channel = 0U
-  let mut peer_window = 0U
-  let mut peer_max_packet = 0U
-  let mut opened = false
-  let mut tries = 0
-  while !opened && tries < 16 {
-    tries = tries + 1
-    match sd_recv_packet(conn, counters, recv_ctx) {
-      Closed => break
-      BadPacket(_) => break
-      Packet(t, payload) => {
-        if t != @sshwire.SSH_MSG_CHANNEL_OPEN {
-          continue
-        }
-        match sd_parse_channel_open(payload) {
-          None => break
-          Some(o) => {
-            peer_channel = o.peer_channel
-            peer_window = o.peer_window
-            peer_max_packet = o.peer_max_packet
-            if o.channel_type != CHANNEL_TYPE_SESSION {
-              // A channel type we do not have.  The peer is told which one
-              // it was, so the refusal is about the channel and not about
-              // the connection.
-              let _ = sd_send_packet(
-                conn,
-                counters,
-                send_ctx,
-                @sshwire.SSH_MSG_CHANNEL_OPEN_FAILURE,
-                sd_open_failure_payload(
-                  peer_channel,
-                  OPEN_UNKNOWN_CHANNEL_TYPE,
-                  "only the session channel is implemented by this server",
-                ),
-              )
-              break
-            }
-            let confirm = sd_open_confirmation_payload(
-              peer_channel,
-              SERVER_CHANNEL,
-              SERVER_WINDOW,
-              SERVER_MAX_PACKET,
-            )
-            if !sd_send_packet(
-                conn,
-                counters,
-                send_ctx,
-                @sshwire.SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
-                confirm,
-              ) {
-              break
-            }
-            opened = true
-          }
-        }
-      }
-    }
-  }
   let report = {
-    peer_channel,
+    peer_channel: 0U,
     command: "",
     exit_status: -1,
     stdout_bytes: 0,
     stderr_bytes: 0,
     sftp_bytes: 0,
     sftp_requests: 0,
+    forward_bytes: 0,
+    forward_targets: 0,
     peer_closed: false,
+  }
+  let mut peer_channel = 0U
+  let mut peer_window = 0U
+  let mut peer_max_packet = 0U
+  let mut opened = false
+  let mut tries = 0
+  // The server's own channel number.  It goes up with every channel this
+  // server confirms and is never reused: a peer that has two channels open
+  // finds them by this number, so a server that answered every channel with
+  // "0" would have two channels wearing the same name.
+  let mut our_channel = 0U
+  // The CHANNEL_OPENs that arrived while another channel was being served.
+  let queue = OpenQueue::new()
+  while !opened && tries < 64 {
+    tries = tries + 1
+    // An open that arrived while the previous channel was running comes
+    // first; only then does this server read for a new one.
+    let open_payload = match queue.pop() {
+      Some(p) => p
+      None => {
+        let mut found = FixedArray::make(0, b'\x00')
+        let mut have = false
+        let mut inner = 0
+        while !have && inner < 64 {
+          inner = inner + 1
+          match sd_recv_packet(conn, counters, recv_ctx) {
+            Closed => break
+            BadPacket(_) => break
+            Packet(t, payload) =>
+              if t == @sshwire.SSH_MSG_CHANNEL_OPEN {
+                found = payload
+                have = true
+              }
+          }
+        }
+        if !have {
+          break
+        }
+        found
+      }
+    }
+    match sd_parse_channel_open(open_payload) {
+      None => break
+      Some(o) => {
+        if o.channel_type == CHANNEL_TYPE_DIRECT_TCPIP {
+          // ---- a forwarded channel ----
+          let provider = match forward {
+            None => {
+              // This server was started without forwarding.  Saying so is
+              // better than answering SUCCESS and then not answering a
+              // single byte: a refusal is something the client can act on.
+              let _ = sd_send_packet(
+                conn,
+                counters,
+                send_ctx,
+                @sshwire.SSH_MSG_CHANNEL_OPEN_FAILURE,
+                sd_open_failure_payload(
+                  o.peer_channel,
+                  OPEN_ADMINISTRATIVELY_PROHIBITED,
+                  "port forwarding is not enabled on this server",
+                ),
+              )
+              break
+            }
+            Some(p) => p
+          }
+          let d = match sd_parse_direct_tcpip(open_payload) {
+            None => break
+            Some(v) => v
+          }
+          // The connect comes BEFORE the confirmation, and the confirmation
+          // is sent even when the connect failed.  Measured: the real
+          // server's log shows the connect attempt, then `send packet: type
+          // 91`, and for a target that is not listening the connect error
+          // sits between them.
+          let target = (provider.dial_fn)(d.host, d.port)
+          let mine = our_channel
+          let confirm = sd_open_confirmation_payload(
+            o.peer_channel,
+            mine,
+            SERVER_WINDOW,
+            SERVER_MAX_PACKET,
+          )
+          if !sd_send_packet(
+              conn,
+              counters,
+              send_ctx,
+              @sshwire.SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+              confirm,
+            ) {
+            break
+          }
+          our_channel = our_channel + 1U
+          match target {
+            None => {
+              // The target could not be reached.  The channel closes with no
+              // data and no error message -- which is what the real server
+              // does, and what the client cannot tell apart from a target
+              // that accepted the connection and closed it at once.
+              report.forward_targets = report.forward_targets + 1
+              let _ = sd_send_packet(
+                conn,
+                counters,
+                send_ctx,
+                @sshwire.SSH_MSG_CHANNEL_EOF,
+                sd_bare_payload(o.peer_channel),
+              )
+              let _ = sd_send_packet(
+                conn,
+                counters,
+                send_ctx,
+                @sshwire.SSH_MSG_CHANNEL_CLOSE,
+                sd_bare_payload(o.peer_channel),
+              )
+              // Wait for the peer's answer to our close, so that the close
+              // is a FIN and not a RESET.
+              let mut drain = 0
+              while drain < 64 {
+                drain = drain + 1
+                match sd_recv_packet(conn, counters, recv_ctx) {
+                  Closed => break
+                  BadPacket(_) => break
+                  Packet(t, payload) =>
+                    if t == @sshwire.SSH_MSG_CHANNEL_OPEN {
+                      queue.push(payload)
+                    } else if t == @sshwire.SSH_MSG_CHANNEL_CLOSE {
+                      report.peer_closed = true
+                      break
+                    }
+                }
+              }
+            }
+            Some(t) => {
+              let outcome = sd_forward_loop(
+                conn,
+                counters,
+                send_ctx,
+                recv_ctx,
+                o.peer_channel,
+                mine,
+                o.peer_window,
+                o.peer_max_packet,
+                t,
+                provider,
+                queue,
+              )
+              report.forward_targets = report.forward_targets + 1
+              report.forward_bytes = report.forward_bytes +
+                outcome.bytes_to_peer
+              if outcome.peer_closed {
+                report.peer_closed = true
+              }
+            }
+          }
+          continue
+        }
+        peer_channel = o.peer_channel
+        peer_window = o.peer_window
+        peer_max_packet = o.peer_max_packet
+        if o.channel_type != CHANNEL_TYPE_SESSION {
+          // A channel type we do not have.  The peer is told which one
+          // it was, so the refusal is about the channel and not about
+          // the connection.
+          let _ = sd_send_packet(
+            conn,
+            counters,
+            send_ctx,
+            @sshwire.SSH_MSG_CHANNEL_OPEN_FAILURE,
+            sd_open_failure_payload(
+              peer_channel,
+              OPEN_UNKNOWN_CHANNEL_TYPE,
+              "only the session channel and direct-tcpip are implemented by this server",
+            ),
+          )
+          break
+        }
+        let confirm = sd_open_confirmation_payload(
+          peer_channel,
+          our_channel,
+          SERVER_WINDOW,
+          SERVER_MAX_PACKET,
+        )
+        if !sd_send_packet(
+            conn,
+            counters,
+            send_ctx,
+            @sshwire.SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+            confirm,
+          ) {
+          break
+        }
+        our_channel = our_channel + 1U
+        opened = true
+      }
+    }
   }
   if !opened {
     return report

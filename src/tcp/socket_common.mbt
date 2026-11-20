@@ -354,6 +354,64 @@ pub fn TcpConn::close(self : TcpConn) -> Unit {
 }
 
 ///|
+/// Loop #101: the connection's own handle.
+///
+///   The handle is opaque to everything but the backend, but a port forward
+///   needs it: the relay has to wait for the SSH connection and the target
+///   connection **at the same time**, and the only way to do that is to put
+///   both of them into one wait.  The value travels as an `Int64` because a
+///   SOCKET is 64 bits wide on win64.
+///
+///   The alternative -- a "wait" method on the transport trait -- would have
+///   put the wait inside every transport, including the browser ones that
+///   have no socket to wait on.  Here the wait is a property of two concrete
+///   sockets, which is what it actually is.
+pub fn TcpConn::raw_handle(self : TcpConn) -> Int64 {
+  self.handle
+}
+
+///|
+/// Loop #101: half-close this connection.
+///
+///   Stop sending, keep reading.  A forwarded channel's peer can close its
+///   half while still waiting for the answer, and the target has to be told
+///   that it will get no more bytes -- measured against the real OpenSSH
+///   server, which does exactly this (`chan_shutdown_write` in its log).
+///
+///   Returns false when the backend could not do it.  A half-close that fails
+///   is not fatal: the connection is closed anyway when the forward ends.
+pub fn TcpConn::shutdown_write(self : TcpConn) -> Bool {
+  if self.closed {
+    return false
+  }
+  mb_tcp_shutdown_write(self.handle) == 0L
+}
+
+///|
+/// Loop #101: wait until one of two connections has something to read.
+///
+///   The return value is a bitmask: 1 for the first connection, 2 for the
+///   second, 3 for both, 0 for "the deadline passed with nothing to read",
+///   and a negative number for an error.
+///
+///   Two connections and not one, because a port forward has two ends that
+///   must be watched together: waiting for the SSH connection alone loses
+///   the answer coming back from the target, and waiting for the target
+///   alone never sees the request.  Both are deadlocks, not slow paths.
+pub fn wait_readable_pair(
+  first : Int64,
+  second : Int64,
+  timeout_ms : Int32,
+) -> Int32 {
+  let mask = mb_tcp_wait_readable2(first, second, timeout_ms)
+  if mask < 0L {
+    -1
+  } else {
+    mask.to_int()
+  }
+}
+
+///|
 /// Loop #79: a listening socket.
 ///
 /// `ssh -L 9000:db:5432 host` is two halves. The channel half -- "open a

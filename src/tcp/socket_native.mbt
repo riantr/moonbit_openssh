@@ -48,6 +48,26 @@ extern "c" fn mb_tcp_recv(h : Int64, buf : Bytes, n : Int32) -> Int64 = "mb_tcp_
 extern "c" fn mb_tcp_close(h : Int64) -> Int32 = "mb_tcp_close"
 
 ///|
+/// Loop #101: wait until one of two sockets has something to read.
+///
+/// The return value is a bitmask -- 1 for the first socket, 2 for the second,
+/// 3 for both, 0 for "the deadline passed" -- and a negative number for an
+/// error.  A port forward needs both sockets watched at once, and two
+/// separate waits are a deadlock rather than a slower answer.
+extern "c" fn mb_tcp_wait_readable2(
+  h1 : Int64,
+  h2 : Int64,
+  timeout_ms : Int32,
+) -> Int64 = "mb_tcp_wait_readable2"
+
+///|
+/// Loop #101: half-close a connection -- stop sending, keep reading.
+///
+/// The peer of a forwarded channel can say "I will send no more bytes" while
+/// still wanting to read the answer, and the target has to be told.
+extern "c" fn mb_tcp_shutdown_write(h : Int64) -> Int64 = "mb_tcp_shutdown_write"
+
+///|
 /// Loop #79: bind and listen.
 ///
 /// The host is passed as bytes plus a length, like `mb_tcp_connect`: a

@@ -12100,3 +12100,185 @@ an oversight.
     unit tests (src/sshd)                28/28 on native, js, wasm and wasm-gc
     sftp requests answered in one case   13
     the path form                        /E:/... -- and now one we can open
+
+## Loop #101: the server's half of a port forward (`ssh -L`)
+
+The server half of SSH could run a command and serve an `sftp` subsystem,
+and it refused every other kind of channel with
+`SSH_OPEN_UNKNOWN_CHANNEL_TYPE`.  The client half of a port forward was
+already in the tree (`src/channel`, `src/sshclient/forward.mbt`, measured
+against the real server in Loop #76); the server half was not, so `ssh -L`
+did not work against this server at all.
+
+### The rules, and where they live
+
+`src/sshd/forward.mbt` holds the rules; the sockets are native work and
+the driver supplies them, the same way `CommandRunner` and `SftpProvider`
+supply theirs:
+
+    ctos DATA  ->  the target's socket
+    target DATA -> stoc DATA, cut to the peer's window and maximum packet
+
+The injection point is `ForwardProvider`, and it is generic over the
+driver's own target type -- the driver hands over its own connection object
+and this package never has to know what a socket is:
+
+    dial_fn          (String, Int32) -> T?      open the connection
+    read_fn          (T, Int32) -> Bytes        read what the target said
+    write_fn         (T, Bytes) -> Bool          write to the target
+    shutdown_write_fn (T) -> Unit                half-close
+    close_fn         (T) -> Unit                 close
+    wait_fn          (T, Int32) -> Int32         wait for EITHER end
+
+### The first brick: a forward has to watch TWO sockets
+
+`src/tcp`'s read is a blocking `recv()`, and `@transport.Transport` has no
+"is there anything to read" hook.  A relay that waits for one end and then
+the other is not slow -- it is deadlocked:
+
+* wait for the SSH side only: the peer sends a request and waits for the
+  answer, and the answer sits in the target's socket where nobody is
+  looking;
+* wait for the target side only: the peer waits for the answer and the
+  target waits for the request.
+
+So `src/tcp` gained one thing: `mb_tcp_wait_readable2`, a `select()` over
+TWO sockets that answers with a bitmask (1, 2, or 3 for both).  Both ends
+have to be in ONE wait, because a wait that watches them one after the
+other loses a wakeup when they are ready at the same time.
+
+`shutdown(s, SD_SEND)` came with it, because the peer's EOF has to reach
+the target as an EOF and not as a closed connection.
+
+### What was measured, and against what
+
+The oracle is the real `sshd.exe`; the witness is its own DEBUG3 log plus
+paramiko, which is an independent implementation reading the real server's
+bytes.  Four things came out of it, and none of them is what a reading of
+the RFC would have said:
+
+* **The confirmation is sent even when the connect FAILED.**  The real
+  server's log for a target that is not listening:
+
+      debug3: finish_connect - ERROR: async io completed with error: 10061
+      debug1: server_input_channel_open: confirm direct-tcpip
+      debug3: send packet: type 91
+      debug2: send eof
+      debug3: send packet: type 96
+      debug2: send close
+      debug3: send packet: type 97
+
+  So the client gets a CONFIRMATION and then a channel that closes with no
+  data and no error message.  A server that answered CHANNEL_OPEN_FAILURE
+  instead would be telling the client something the real server does not
+  tell it -- and the client behaves differently: a refused channel means
+  the client never opens its local connection, while a closed channel means
+  its local connection is closed with nothing in it.
+
+* **The window is 2097152 and the maximum packet 32768** -- the same
+  numbers the session channel uses (paramiko: `in_window_size`,
+  `in_max_packet_size`).
+
+* **The originator is TEXT.**  The real server prints `originator 127.0.0.1
+  port 0`; reading it as four bytes of address is the mistake this loop's
+  unit test exists to catch.
+
+* **The peer's EOF half-closes the target.**  The real server's log says
+  `chan_shutdown_write` at exactly that point, and the target reports that
+  it read the bytes and then got EOF.
+
+### The defect the big payload found: one end starving the other
+
+A 149-byte payload and a 100 000-byte payload both went through on the
+first try.  A 3 MB one -- bigger than the 2 MiB window, so the window is
+actually SPENT -- stopped dead at 1 631 224 bytes.
+
+The relay read the target and then `continue`d, which meant the SSH side
+was only ever looked at when the target happened to be idle.  A target
+that is always ready therefore starved the peer: **the peer's WINDOW_ADJUST
+was never read**, the peer's window ran out, and the transfer stopped at
+exactly the window's worth of bytes.  Both ends now have to be served in
+the SAME iteration, and the rule is in the code where it can be read.
+
+That is also why the gate's big case is 3 MB and not 100 KB: below the
+window, no adjustment is ever needed and the whole rule is untested.
+
+### What the gate compares
+
+`host/verify_loop101.mjs` runs the REAL `ssh.exe -N -L` against our server
+and against the real one, and compares what the client sees:
+
+    B  the bytes come back, and the target's digest is the payload's
+    C  the real server returns the same bytes -- byte for byte
+    D  a target that is not listening: the local connection is closed with
+       no data, and the client says NOTHING
+    E  the peer half-closes: the target sees EOF
+    F  3 MB, bigger than the window, in both directions
+    G  the server's own report: forward_bytes, forward_targets, peer_closed
+    H  a peer that asks for SMALL packets (see below)
+
+### The rule the real client cannot see (and the peer that can)
+
+The mutation suite found a rule the gate could not see.  The mutation "the
+data is not cut to the peer's limits" -- replace `sd_chunk_size(peer_window,
+peer_max_packet)` with "whatever is left" -- left the gate GREEN, and a green
+gate means the rule was not being protected.
+
+The reason is arithmetic, and it is worth writing down because it is easy to
+get wrong:
+
+* the real `ssh.exe` asks for a window of 2097152 and a maximum packet of
+  32768;
+* this server's own ceiling (`sd_chunk_size` clamps at 32768) is 32768 too.
+
+So a server that IGNORED the peer's maximum packet would still send packets
+of at most 32768 bytes, and 32768 is exactly what the real client allows.  The
+two behaviours are indistinguishable from the real client's side of the wire.
+**A gate that cannot see a rule cannot protect it.**
+
+So there is now a second witness: `host/loop101_tight_peer.py`, a paramiko
+client (paramiko is a different implementation of the same protocol -- its own
+encoder, its own channel state machine) that opens a `direct-tcpip` channel
+asking for a maximum packet of 4096 -- paramiko's own lower bound -- and
+reports the size of every CHANNEL_DATA packet the server sends.  The size is
+taken from the packets themselves (paramiko hands each one to
+`Channel._feed`; what is left of the message is the string that carries the
+data), not from anything the server says about itself.
+
+Two things had to be right for that measurement to mean anything:
+
+* **The handler table, not the method.**  paramiko's transport keeps a table
+  of handlers that was built when the class body ran, so patching
+  `Channel._feed` afterwards measures nothing at all -- the count comes out
+  zero and a gate that checks "not bigger than allowed" passes VACUOUSLY.
+  The table is what the transport calls, so the table is what has to be
+  replaced.  The gate now also insists that the witness measured a non-zero
+  number of packets, so a broken witness is red rather than green.
+* **The four bytes of length prefix.**  What is left of the message after
+  the channel number is the STRING: four bytes of length and then the data.
+  The peer's maximum packet is about the DATA, so the four bytes come off
+  before the comparison.
+
+What came out of it, measured on both servers with the same peer and the same
+payload:
+
+    our server:  the largest CHANNEL_DATA carries 4096 bytes
+    real server: the largest CHANNEL_DATA carries 4096 bytes
+
+The real server fills the peer's maximum packet exactly, and so does this one.
+That is now a check in the gate ("the server never sends a packet bigger than
+the peer allowed", and "the real server cuts its packets the same way"), and
+the mutation that used to slip through is caught by it.
+
+### What is still not done
+
+* **One channel at a time.**  A second channel that arrives while the
+  first one is running is KEPT and served afterwards (`OpenQueue`), not
+  refused and not dropped -- but it waits its turn instead of running
+  beside the first.
+* **`ssh -R` is still missing.**  That is the other direction: the server
+  opens a "forwarded-tcpip" channel to the client, and it needs the
+  `tcpip-forward` global request as well.
+* **`cmd/sshd` serves ONE connection** and then exits.  That is the
+  driver's shape, not the protocol's, and the gate starts a server per
+  case because of it.

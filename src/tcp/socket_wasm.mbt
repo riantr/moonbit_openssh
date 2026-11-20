@@ -55,6 +55,26 @@ fn mb_tcp_close(h : Int64) -> Int32 {
 }
 
 ///|
+/// Loop #101: the wasm stand-in for waiting on two sockets.
+///
+/// A browser has no raw sockets, so there is nothing to wait on. The
+/// functions are plain MoonBit rather than FFI stubs because the wasm
+/// backends reject `extern "js"` outright.
+fn mb_tcp_wait_readable2(h1 : Int64, h2 : Int64, timeout_ms : Int32) -> Int64 {
+  ignore(h1)
+  ignore(h2)
+  ignore(timeout_ms)
+  0L
+}
+
+///|
+/// Loop #101: the wasm stand-in for half-closing a connection.
+fn mb_tcp_shutdown_write(h : Int64) -> Int64 {
+  ignore(h)
+  -1L
+}
+
+///|
 /// Loop #79: the wasm stand-in for the listening socket.
 ///
 /// A browser has no raw sockets, so there is nothing to listen with. The

@@ -1043,3 +1043,110 @@ test "t28_the_peers_window_is_topped_up_below_the_half" {
     abort("t28: an empty window needs topping up")
   }
 }
+
+///|
+test "t29_a_direct_tcpip_open_parses_into_a_target_and_an_originator" {
+  // The payload the REAL client sends, in the shape the real server's log
+  // prints it:
+  //
+  //   server_input_channel_open: ctype direct-tcpip rchan 0 win 2097152 max 32768
+  //   server_request_direct_tcpip: originator 127.0.0.1 port 0, target 127.0.0.1 port 65323
+  //
+  // so: the channel type, the peer's channel number, its window, its maximum
+  // packet, then the target's host and port, then the originator's address
+  // and port.  The originator is TEXT -- the server prints `127.0.0.1`, not
+  // four bytes of address -- and reading it as four bytes of address is the
+  // mistake this test is here to catch.
+  let payload = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("direct-tcpip")),
+    @sshwire.write_u32(0U),
+    @sshwire.write_u32(2097152U),
+    @sshwire.write_u32(32768U),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("127.0.0.1")),
+    @sshwire.write_u32(65323U),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("127.0.0.1")),
+    @sshwire.write_u32(0U),
+  ])
+  match @sshd.sd_parse_direct_tcpip(payload) {
+    None => abort("t29: the direct-tcpip open did not parse")
+    Some(d) => {
+      sdt_eq_str(d.host, "127.0.0.1", "the target's host")
+      sdt_eq_int(d.port, 65323, "the target's port")
+      sdt_eq_str(d.originator_ip, "127.0.0.1", "the originator's address")
+      sdt_eq_int(d.originator_port, 0, "the originator's port")
+    }
+  }
+  // An open of another type is not a direct-tcpip open.  The function is
+  // about one type, and a "session" open that parsed as a forward would
+  // connect the server to a host the peer never named.
+  let session = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("session")),
+    @sshwire.write_u32(0U),
+    @sshwire.write_u32(2097152U),
+    @sshwire.write_u32(32768U),
+  ])
+  match @sshd.sd_parse_direct_tcpip(session) {
+    Some(_) => abort("t29: a session open parsed as a forward")
+    None => ()
+  }
+  // A truncated open is not an open.  Reading past the end would take the
+  // window for a port.
+  let cut = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("direct-tcpip")),
+    @sshwire.write_u32(0U),
+    @sshwire.write_u32(2097152U),
+    @sshwire.write_u32(32768U),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("127.0.0.1")),
+  ])
+  match @sshd.sd_parse_direct_tcpip(cut) {
+    Some(_) => abort("t29: a truncated open parsed")
+    None => ()
+  }
+}
+
+///|
+test "t30_the_forward_ends_differently_depending_on_who_ended_it" {
+  // The peer closed: the answer is a CLOSE and nothing else.  The target
+  // ended: our EOF first and our CLOSE after it -- the order the real
+  // server uses (its log: `send eof`, then `send close`).
+  match @sshd.sd_forward_close_plan(true) {
+    @sshd.ForwardClose::AnswerClose => ()
+    _ => abort("t30: a peer that closed should get a close and nothing else")
+  }
+  match @sshd.sd_forward_close_plan(false) {
+    @sshd.ForwardClose::EofThenClose => ()
+    _ => abort("t30: a target that ended should get an EOF and then a close")
+  }
+}
+
+///|
+test "t31_an_open_that_arrived_during_another_channel_is_kept" {
+  // A peer with two local forwards opens a second channel while the first
+  // one is running.  The open has to be KEPT: dropping it loses the
+  // forward, and refusing it tells the client something that is not true.
+  let queue = @sshd.OpenQueue::new()
+  sdt_eq_int(queue.pending(), 0, "an empty queue")
+  let first = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("direct-tcpip")),
+    @sshwire.write_u32(0U),
+  ])
+  let second = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("direct-tcpip")),
+    @sshwire.write_u32(1U),
+  ])
+  queue.push(first)
+  queue.push(second)
+  sdt_eq_int(queue.pending(), 2, "two opens are waiting")
+  match queue.pop() {
+    None => abort("t31: the first open was lost")
+    Some(p) => sdt_bytes_eq(p, first, "the first open")
+  }
+  match queue.pop() {
+    None => abort("t31: the second open was lost")
+    Some(p) => sdt_bytes_eq(p, second, "the second open")
+  }
+  match queue.pop() {
+    Some(_) => abort("t31: and there is no third")
+    None => ()
+  }
+}
