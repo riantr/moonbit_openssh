@@ -98,9 +98,14 @@ function ok(name, cond, detail = "") {
 }
 
 // The `ls -l` line carries the file's mtime, in the spelling the client's
-// own `strftime` produces: `Nov 20 10:35`, or `Nov 20  2024` for a file
-// older than six months.  The clock is not a property of the server.
-const TIME_RE = /[A-Z][a-z]{2} [ 0-9]\d ([0-9]{2}:[0-9]{2}|[0-9]{4})/g;
+// own formatter produces.  It is NOT the C library's strftime: every field
+// is padded to WIDTH TWO WITH A SPACE, so the minute of 11:07 is " 7" and
+// not "07", and the hour of 09:30 is " 9" and not "09".  Measured, in
+// bytes: "Nov 20 11: 7 hello.txt".
+//
+// The clock is not a property of the server, and a gate that only matches
+// two-digit minutes is a gate that goes red for a quarter of every hour.
+const TIME_RE = /[A-Z][a-z]{2} [ 0-9]\d (?:[ 0-9]\d:[ 0-9]\d|  [0-9]{4})/g;
 
 function normalizeTime(text) {
   return text.replace(TIME_RE, "<TIME>");
@@ -196,6 +201,23 @@ function startServer() {
   });
 }
 
+// The account THIS machine runs as.
+//
+// The same rule as `host/ssh_user.py`: a tool that connects to a real
+// OpenSSH server has to name an account that EXISTS on the machine running
+// that server.  Loop #76 measured what a hardcoded name costs -- the gate
+// authenticated as `hp`, one developer's account, and on GitHub Actions,
+// where the account is `runneradmin`, every section that needed a live
+// server failed with `AuthRejected`.  The failure was about the account
+// name, and nothing in the output said so.
+function sshUser() {
+  for (const key of ["USERNAME", "USER", "LOGNAME", "LNAME"]) {
+    const value = process.env[key];
+    if (value && value.trim()) return value.trim();
+  }
+  return "";
+}
+
 // The client, run ASYNCHRONOUSLY.
 //
 // `spawnSync` blocks the event loop, and this gate has a `spawn`ed server
@@ -215,7 +237,7 @@ function runSftp(port, batchFile, extra = []) {
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=yes",
         "-o", `UserKnownHostsFile=${path.join(BED, "known_hosts")}`,
-        "hp@127.0.0.1",
+        `${sshUser()}@127.0.0.1`,
       ],
       { timeout: 90000 },
     );
@@ -307,8 +329,20 @@ async function main() {
        `looked in: ${OPENSSH_DIRS.join(", ")}`);
     return summary();
   }
+  // The account has to be NAMED, and it has to exist on the machine that
+  // runs the server.  Loop #76 measured what a hardcoded name costs.
+  const user = sshUser();
+  ok(
+    "the account this machine runs as could be named",
+    user !== "",
+    "no USERNAME, USER, LOGNAME or LNAME in the environment",
+  );
+  if (user === "") {
+    return summary();
+  }
   console.log(`real client: ${REAL_SFTP}`);
   console.log(`our server:  ${OUR_SSHD}`);
+  console.log(`account:     ${user}`);
 
   // ---- C. it builds, and the unit tests pass ----
   console.log("");

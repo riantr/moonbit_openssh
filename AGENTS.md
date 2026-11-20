@@ -12094,7 +12094,7 @@ an oversight.
 
 ### Numbers
 
-    gate host/verify_loop100.mjs        31/31
+    gate host/verify_loop100.mjs        32/32
     oracle cases                         6, all byte-identical to the real sshd
     mutations                            6 caught, 0 missed, 0 invalid, 0 skipped
     unit tests (src/sshd)                28/28 on native, js, wasm and wasm-gc

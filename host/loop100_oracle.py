@@ -294,11 +294,15 @@ def tokenize(data):
 
 
 # The `ls -l` line carries the file's mtime, in the spelling the client's
-# own `strftime` produces: `Nov 20 10:35`, or `Nov 20  2024` for a file
-# older than six months.  The clock is not a property of the server, so it
-# is normalised away -- on BOTH sides, which is what lets a recording made
-# at 10:35 be compared with a live measurement made at 10:36.
-TIME_RE = re.compile(rb"[A-Z][a-z]{2} [ 0-9]\d ([0-9]{2}:[0-9]{2}|[0-9]{4})")
+# own formatter produces.  It is NOT the C library's strftime: every field
+# is padded to WIDTH TWO WITH A SPACE, so the minute of 11:07 is " 7" and
+# not "07".  Measured, in bytes: "Nov 20 11: 7 hello.txt".
+#
+# The clock is not a property of the server, so it is normalised away -- on
+# BOTH sides, which is what lets a recording made at 10:44 be compared with
+# a live measurement made at 11:07.
+TIME_RE = re.compile(
+    rb"[A-Z][a-z]{2} [ 0-9]\d (?:[ 0-9]\d:[ 0-9]\d|  [0-9]{4})")
 
 
 def normalize_time(data):
@@ -377,6 +381,16 @@ def main():
             return 3
         print(str(e))
         return 2
+    except Exception as e:  # noqa: BLE001 -- the contract is "could not measure"
+        # In --check mode, an exception is not a disagreement: it is "this
+        # machine could not measure it".  Reporting that as a disagreement
+        # would be a claim about the recording when nothing was measured --
+        # the same defect Loop #94's oracle records for the case where the
+        # real sshd starts but refuses the test key.
+        if check:
+            print("could not measure here: %s: %s" % (type(e).__name__, e))
+            return 3
+        raise
     if not check:
         with open(OUT, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(live, fh, indent=2, sort_keys=True)
