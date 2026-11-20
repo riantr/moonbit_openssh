@@ -87,14 +87,29 @@ struct mb_handle {
 static struct mb_handle mb_handles[MB_MAX_HANDLES];
 
 /* Widen a UTF-8 path of `len` bytes into a fresh NUL-terminated wide
- * string.  Returns NULL on failure (the caller frees with free()). */
+ * string.  Returns NULL on failure (the caller frees with free()).
+ *
+ * A leading slash in front of a drive letter is taken off first.  That is
+ * the server's OWN spelling of an absolute path: REALPATH answers
+ * `/C:/Users/...` (measured, and see `mb_sftp_realpath` below), and the
+ * client sends that answer back verbatim -- the `ls` that follows a `pwd`
+ * asks for the directory by exactly the name the server just handed out.
+ * So the path has to be taken back to `C:/Users/...` before it reaches
+ * Win32, which does not accept the slash in front of the drive letter.
+ *
+ * Measured against the real server: it accepts the path it produced, and
+ * ours answered "No such file or directory" for it until this was here. */
 static wchar_t *mb_wide(const char *path, int len) {
 	wchar_t *out;
 	int n;
+	int skip = 0;
 	if (path == NULL || len < 0) {
 		return NULL;
 	}
-	n = MultiByteToWideChar(CP_UTF8, 0, path, len, NULL, 0);
+	if (len >= 3 && path[0] == '/' && path[2] == ':') {
+		skip = 1;
+	}
+	n = MultiByteToWideChar(CP_UTF8, 0, path + skip, len - skip, NULL, 0);
 	if (n <= 0) {
 		return NULL;
 	}
@@ -102,7 +117,7 @@ static wchar_t *mb_wide(const char *path, int len) {
 	if (out == NULL) {
 		return NULL;
 	}
-	if (MultiByteToWideChar(CP_UTF8, 0, path, len, out, n) <= 0) {
+	if (MultiByteToWideChar(CP_UTF8, 0, path + skip, len - skip, out, n) <= 0) {
 		free(out);
 		return NULL;
 	}

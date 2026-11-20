@@ -906,3 +906,140 @@ test "t23_a_command_runner_is_a_function_the_server_calls" {
   sdt_eq_int(r.stderr.length(), 1, "stderr")
   sdt_eq_int(r.code, 42, "the exit status")
 }
+
+///|
+test "t24_chunk_size_never_exceeds_the_ceiling_the_server_promised" {
+  // The window is compared against what is left AFTER the 32 KiB clamp, not
+  // against the peer's maximum packet.  Comparing it against the maximum
+  // let a window of 40000 and a maximum of 65536 through as 40000 -- a
+  // packet bigger than the 32 KiB this server promised, and bigger than
+  // the peer ever asked for.  The SFTP replies are exactly the case where
+  // this shows up: a READDIR can be bigger than one packet.
+  sdt_eq_int(@sshd.sd_chunk_size(40000U, 65536U), 32768, "the ceiling holds")
+  sdt_eq_int(@sshd.sd_chunk_size(100000U, 32768U), 32768, "a wide window")
+  sdt_eq_int(@sshd.sd_chunk_size(40000U, 32768U), 32768, "the default maximum")
+  sdt_eq_int(@sshd.sd_chunk_size(20000U, 65536U), 20000, "a narrow window")
+}
+
+///|
+test "t25_channel_request_parses_subsystem" {
+  // RFC 4254 §6.5: `subsystem` carries a NAME, and the name is what
+  // selects what runs.  A request whose name is missing is a request this
+  // server cannot act on, and it says so rather than guessing.
+  let payload = sdt_cat_all([
+    @sshwire.write_u32(0U),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("subsystem")),
+    FixedArray::from_array([b'\x01']),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("sftp")),
+  ])
+  match @sshd.sd_parse_channel_request(payload) {
+    None => abort("t25: the subsystem request did not parse")
+    Some(r) => {
+      sdt_eq_int(r.recipient.reinterpret_as_int(), 0, "the channel")
+      sdt_eq_str(r.request_type, "subsystem", "the request type")
+      sdt_true(r.want_reply, "subsystem asks for a reply")
+      match @sshd.sd_read_string(r.extra, 0) {
+        None => abort("t25: the subsystem name did not parse")
+        Some((name, _)) =>
+          sdt_eq_str(
+            @sshd.sd_bytes_to_string(name),
+            "sftp",
+            "the subsystem name",
+          )
+      }
+    }
+  }
+  // The one subsystem this server has.  A peer that asks for another name
+  // is refused by name, so the name has to be exactly this.
+  sdt_eq_str(@sshd.SUBSYSTEM_SFTP, "sftp", "the subsystem name")
+}
+
+///|
+test "t26_window_adjust_carries_an_addition_and_not_a_total" {
+  // RFC 4254 §5.2: the receiver ADDS the number to what it has already
+  // granted.  Sending the new total instead would grant the peer the
+  // window twice over, and the peer would send twice as much as it may.
+  let p = @sshd.sd_window_adjust_payload(7U, 1000U)
+  sdt_eq_int(p.length(), 8, "two u32s")
+  match @sshd.sd_read_u32(p, 0) {
+    None => abort("t26: the channel number did not parse")
+    Some(v) => sdt_eq_int(v.reinterpret_as_int(), 7, "the channel")
+  }
+  match @sshd.sd_read_u32(p, 4) {
+    None => abort("t26: the addition did not parse")
+    Some(v) => sdt_eq_int(v.reinterpret_as_int(), 1000, "the addition")
+  }
+}
+
+///|
+test "t27_sftp_frames_survive_a_split_and_a_batch" {
+  // The two facts the channel loop is built on, measured here rather than
+  // assumed: one CHANNEL_DATA can carry several SFTP packets, and one SFTP
+  // packet can be split across several CHANNEL_DATAs.  `SftpInbuf` is what
+  // knows both, and the loop relies on it.
+  let version = @sftpserver.reply_version()
+  let framed = @sftp.sftp_frame(version)
+  // The length prefix counts the body and NOT itself.
+  sdt_eq_int(
+    @sshwire.read_u32(framed, 0).reinterpret_as_int(),
+    version.length(),
+    "the length counts the body only",
+  )
+  // Split in the middle of the body.
+  let inbuf = @sftp.SftpInbuf::new()
+  let cut = framed.length() / 2
+  let head : FixedArray[Byte] = FixedArray::make(cut, b'\x00')
+  for i = 0; i < cut; i = i + 1 {
+    head[i] = framed[i]
+  }
+  let tail : FixedArray[Byte] = FixedArray::make(framed.length() - cut, b'\x00')
+  for i = 0; i < tail.length(); i = i + 1 {
+    tail[i] = framed[cut + i]
+  }
+  inbuf.feed(head)
+  match inbuf.take() {
+    Some(_) => abort("t27: half a packet is not a packet")
+    None => ()
+  }
+  inbuf.feed(tail)
+  match inbuf.take() {
+    None => abort("t27: the packet did not come back out")
+    Some(body) => sdt_bytes_eq(body, version, "the body")
+  }
+  // Two packets in one feed: two packets come out.
+  let inbuf2 = @sftp.SftpInbuf::new()
+  let both = sdt_cat_all([framed, framed])
+  inbuf2.feed(both)
+  match inbuf2.take() {
+    None => abort("t27: the first packet")
+    Some(body) => sdt_bytes_eq(body, version, "the first body")
+  }
+  match inbuf2.take() {
+    None => abort("t27: the second packet")
+    Some(body) => sdt_bytes_eq(body, version, "the second body")
+  }
+  match inbuf2.take() {
+    Some(_) => abort("t27: and no third")
+    None => ()
+  }
+}
+
+///|
+test "t28_the_peers_window_is_topped_up_below_the_half" {
+  // The peer may send `window_max` bytes before it has to wait for a
+  // WINDOW_ADJUST.  The window is topped back up once it has fallen BELOW
+  // half: waiting until it is empty stops the peer in the middle of a
+  // file, and topping it up on every packet is a packet per window.
+  if @sshd.sd_window_needs_top_up(2097152, 2097152) {
+    abort("t28: a whole window is not below half")
+  }
+  if @sshd.sd_window_needs_top_up(1048576, 2097152) {
+    abort("t28: exactly half is not below half")
+  }
+  if !@sshd.sd_window_needs_top_up(1048575, 2097152) {
+    abort("t28: just below half needs topping up")
+  }
+  if !@sshd.sd_window_needs_top_up(0, 2097152) {
+    abort("t28: an empty window needs topping up")
+  }
+}

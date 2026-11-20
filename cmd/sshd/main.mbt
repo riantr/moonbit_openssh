@@ -195,7 +195,14 @@ async fn main {
       eprintln("peer: " + ip + ":" + peer_port.to_string())
       let cfg = @sshdsrv.ServerConfig::make(ident, seed, authorized_text)
       let runner = @sshdsrv.CommandRunner::make(run_command)
-      match @sshdsrv.serve(conn, cfg, runner) {
+      // The SFTP subsystem's rules live in `src/sftpserver`; the filesystem
+      // and the clock they need are native-only work, so they are supplied
+      // here.  This driver is the only place that knows they exist.
+      let provider = @sshdsrv.SftpProvider::make(
+        @sftpserver.real_server_fs(),
+        @sftpserver.real_server_clock(),
+      )
+      match @sshdsrv.serve(conn, cfg, runner, Some(provider)) {
         Err(e) => {
           eprintln("server_error: " + @sshdsrv.sd_server_error_label(e))
           conn.close()
@@ -217,6 +224,12 @@ async fn main {
           println("exit_status: " + report.exit_status.to_string())
           println("stdout_bytes: " + report.stdout_bytes.to_string())
           println("stderr_bytes: " + report.stderr_bytes.to_string())
+          // What the SFTP subsystem produced.  Zero for a command, and the
+          // number of reply bytes and answered requests for the `sftp`
+          // subsystem -- which is the part of the report a gate can check
+          // against the client's own.
+          println("sftp_bytes: " + report.sftp_bytes.to_string())
+          println("sftp_requests: " + report.sftp_requests.to_string())
           // Only 1 when the server READ the peer's CHANNEL_CLOSE before it
           // closed the connection.  Closing while that answer is in flight
           // is what turns the close into a TCP RESET, which discards what

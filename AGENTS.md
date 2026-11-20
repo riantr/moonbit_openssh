@@ -11973,3 +11973,130 @@ Two consequences, both measured:
   two are the same bytes and the same build hash (`eb64713`) -- the run
   that proves it is the `ci.json` env step, which now records the version
   instead of saying "ok".
+
+## Loop #100: the `sftp` subsystem, measured against the real OpenSSH server
+
+The server half of SSH had a channel that could run a command and nothing
+else: a `subsystem` request was answered with CHANNEL_FAILURE, which is
+honest but leaves the most-used feature of every SSH server unimplemented.
+
+This loop implements it, and measures it the way this repository measures
+everything: the real `sftp.exe` as the client, the real `sshd` as the
+oracle, and the two compared as BYTES.
+
+### The rules were already written; only the glue was missing
+
+`src/sftpserver` (Loop #92) already knows which request produces which
+reply, and `src/sftp` (Loop #39) already knows the framing.  None of that
+was copied into the channel layer.  What the channel layer does is four
+things:
+
+    ctos DATA  ->  @sftp.SftpInbuf  ->  @sftpserver.parse_request
+                ->  state.reply(fs, req)  ->  @sftp.sftp_frame
+                ->  stoc DATA, cut to the peer's window and maximum packet
+
+The filesystem and the clock are injected -- `SftpProvider { fs, clock }` --
+the same way `CommandRunner` injects the process runner.  `src/sshd` builds
+on all four backends, and touching a filesystem is native-only work; the
+driver (`cmd/sshd`) supplies `@sftpserver.real_server_fs()` and
+`real_server_clock()`.
+
+### The defect the real client found: a path the server cannot take back
+
+The server answered REALPATH with `/E:/src/...` -- a slash in front of the
+drive letter, which is EXACTLY what the real server answers (measured, and
+already recorded in `src/sftpserver/localfs.c`) -- and then could not open
+the path it had just produced.
+
+The client asks for a directory by the name the server handed out, so every
+listing came back "No such file or directory" while `pwd` worked.  The
+symptom reads like a filesystem bug and is a framing bug: **the server's
+own spelling of a path has to be a spelling it can take back.**
+
+The fix is in the C layer, where the platform is: `mb_wide` takes the
+leading slash off a path that has a drive letter behind it.
+
+    before:  ls -> "remote readdir(\"/E:/.../work\"): No such file or directory"
+    after:   ls -> the real server's bytes, to the byte
+
+### What was compared, and how
+
+Six `sftp -b` batches, each run against the real `sshd` and against ours,
+with the exit status, the client's stdout and the client's stderr compared
+as bytes:
+
+    walk      pwd, ls, ls -l
+    transfer  get, put
+    mutate    mkdir, rename, rmdir
+    refuse    rm on a directory  -> "Permission denied"
+    missing   get of a file that is not there
+    big       a 100 000-byte file, down and up
+
+All six are byte-for-byte identical, including the `ls -l` line the server
+builds (`-rw-******    1 -        -               8 Nov 20 10:35 hello.txt`)
+and the two refusal sentences.
+
+Two things are taken out of the comparison, and both are facts about the
+MACHINE rather than about the server:
+
+* the bed's absolute path -- replaced with the token `BED` at RECORD time,
+  the way Loop #94's oracle replaces `EMIT_PS1`;
+* the timestamp -- normalised on BOTH sides at COMPARISON time, so a
+  recording made at 10:35 still matches a measurement made at 10:36.
+
+The recording is committed (`host/loop100_oracle.json`) and RE-MEASURED
+whenever a real sshd can be started, so a stale recording cannot survive.
+
+### The batch has to be written, not just run
+
+Three things in the first batch were wrong and would have made the gate
+measure the harness instead of the server:
+
+* **`get` into the directory the file comes from truncates it.**  The
+  client's local directory is a different one (`lcd` at the top of every
+  batch), because a download onto itself fails for a reason that says
+  nothing about the server.
+* **`rm` on a directory is `rmdir`.**  The real server answers `rm` on a
+  directory with "Permission denied", and that refusal is one of the cases
+  worth keeping.
+* **`stat` is not an sftp command.**  The OpenSSH client has no `stat`, and
+  the batch's "Invalid command." was about the CLIENT's command table, not
+  about the server.
+
+### Two other defects this loop found
+
+* **`sd_chunk_size` compared the peer's window against the peer's MAXIMUM
+  PACKET** instead of against the 32 KiB the server promises.  A window of
+  40000 with a maximum of 65536 came out as 40000 -- a packet bigger than
+  the server promised.  Fixed, and pinned by `t24`.
+
+* **The server never topped the peer's window back up.**  It does now: the
+  rule is a pure function (`sd_window_needs_top_up`, "below the half")
+  with a unit test (`t28`).
+
+### The gates
+
+    node host/verify_loop100.mjs        31/31
+    python host/loop100_mutations.py     6 mutations, all caught
+
+The mutations break one rule each -- the subsystem name, the cut to the
+peer's limits, the window cap, the path the server hands out, the
+deframing across packets, and the framing of the reply -- and each one has
+to turn a NAMED check red.
+
+The one rule that is NOT mutated is the WINDOW_ADJUST packet: the real
+client opens the channel with a 2 MiB window and the largest batch here
+sends 100 KiB, so the window is never spent and no adjustment is ever
+needed.  What decides WHEN one is sent is a pure function and it IS
+pinned by a unit test; what is not covered is the packet that carries it.
+Recording that is the point of the section: the absence is a decision, not
+an oversight.
+
+### Numbers
+
+    gate host/verify_loop100.mjs        31/31
+    oracle cases                         6, all byte-identical to the real sshd
+    mutations                            6 caught, 0 missed, 0 invalid, 0 skipped
+    unit tests (src/sshd)                28/28 on native, js, wasm and wasm-gc
+    sftp requests answered in one case   13
+    the path form                        /E:/... -- and now one we can open

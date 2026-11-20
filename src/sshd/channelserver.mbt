@@ -114,6 +114,43 @@ pub fn CommandRunner::make(run_fn : (String) -> CommandResult) -> CommandRunner 
 }
 
 ///|
+/// The filesystem and the clock the SFTP subsystem answers with.
+///
+/// The same problem `CommandRunner` solves, one layer down: the server does
+/// not know how to touch a filesystem, and `src/sshd` is a package that
+/// builds for all four backends.  So the driver hands the state machine the
+/// two things the rules need and the state machine calls them.
+///
+/// The RULES are not here.  Which request produces which reply is
+/// `src/sftpserver`'s, and the framing is `src/sftp`'s; this package only
+/// moves bytes between the channel and that state machine.  A second copy of
+/// those rules would be a second thing to keep in step with the first.
+pub struct SftpProvider {
+  /// The filesystem the SFTP requests are about.
+  fs : @sftpserver.ServerFs
+  /// The clock the SFTP replies report times from.
+  clock : @sftpserver.ServerClock
+}
+
+///|
+/// Build an `SftpProvider`.
+pub fn SftpProvider::make(
+  fs : @sftpserver.ServerFs,
+  clock : @sftpserver.ServerClock,
+) -> SftpProvider {
+  { fs, clock, }
+}
+
+///|
+/// The name of the one subsystem this server has.
+///
+/// The real `sshd` runs a program for a subsystem, and the program it runs
+/// for `sftp` is `sftp-server`.  This server has the RULES of that program
+/// (`src/sftpserver`) and not a program to run, so the subsystem is a name
+/// that selects the rules rather than a name that selects an executable.
+pub const SUBSYSTEM_SFTP : String = "sftp"
+
+///|
 /// What the channel phase did.
 ///
 /// The fields are `mut` because the phase is a sequence of events and the
@@ -133,6 +170,15 @@ pub struct ChannelReport {
   mut stdout_bytes : Int32
   /// How many bytes of stderr were sent.
   mut stderr_bytes : Int32
+  /// How many bytes of SFTP replies were sent on this channel.
+  ///
+  /// Zero unless the peer asked for the `sftp` subsystem.  It is here
+  /// because "the subsystem ran" is a claim, and the number of bytes it
+  /// produced is the part of that claim a gate can check against the
+  /// client's own.
+  mut sftp_bytes : Int32
+  /// How many SFTP requests were answered.
+  mut sftp_requests : Int32
   /// Whether the peer closed the channel.
   mut peer_closed : Bool
 }
@@ -324,6 +370,35 @@ pub fn sd_bare_payload(peer_channel : UInt32) -> FixedArray[Byte] {
 }
 
 ///|
+/// The CHANNEL_WINDOW_ADJUST payload.
+///
+/// ```
+///   uint32  recipient channel
+///   uint32  bytes to add to the window
+/// ```
+///
+/// The number is an ADDITION and not the new size: RFC 4254 §5.2 says the
+/// receiver adds it to what it has already granted.  Sending the new total
+/// instead would grant the peer the window twice over.
+pub fn sd_window_adjust_payload(
+  peer_channel : UInt32,
+  add : UInt32,
+) -> FixedArray[Byte] {
+  sd_cat2(@sshwire.write_u32(peer_channel), @sshwire.write_u32(add))
+}
+
+///|
+/// Whether the peer's window has fallen below the half and needs topping up.
+///
+/// The peer may send `window_max` bytes before it has to wait for a
+/// WINDOW_ADJUST, so the window is topped back up once it is BELOW half.
+/// Waiting until it is empty would stop the peer in the middle of a file,
+/// and topping it up on every packet would be a packet per window.
+pub fn sd_window_needs_top_up(recv_left : Int32, window_max : Int32) -> Bool {
+  recv_left * 2 < window_max
+}
+
+///|
 /// The CHANNEL_REQUEST payload for "exit-status".
 ///
 /// ```
@@ -409,8 +484,14 @@ pub fn sd_chunk_size(peer_window : UInt32, peer_max_packet : UInt32) -> Int32 {
   } else {
     peer_max_packet.reinterpret_as_int()
   }
-  if peer_window < peer_max_packet {
-    n = peer_window.reinterpret_as_int()
+  // The window is the other limit, and it is compared against what is left
+  // AFTER the 32 KiB clamp.  Comparing it against the peer's maximum packet
+  // instead would let a window of 40000 and a maximum of 65536 through as
+  // 40000 -- a packet bigger than the 32 KiB this server promised, and
+  // bigger than the peer ever asked for.
+  let w = peer_window.reinterpret_as_int()
+  if w < n {
+    n = w
   }
   n
 }
@@ -470,6 +551,251 @@ fn[T : @transport.Transport] sd_send_stream(
 }
 
 ///|
+/// What the SFTP subsystem did on the channel.
+pub(all) struct SftpOutcome {
+  /// How many bytes of SFTP replies were sent.
+  mut bytes_sent : Int32
+  /// How many SFTP requests were answered.
+  mut requests : Int32
+  /// Whether the peer's CHANNEL_CLOSE was read.
+  mut peer_closed : Bool
+  /// How much of the peer's window is left.
+  mut window_left : UInt32
+}
+
+///|
+/// Run the SFTP subsystem on this channel until the peer is done.
+///
+/// The RULES are `src/sftpserver`'s and the FRAMING is `src/sftp`'s.  What
+/// this loop owns is the part that is about the CHANNEL and not about SFTP:
+///
+///   * the peer's bytes go into `SftpInbuf`, which knows the two facts the
+///     protocol insists on: one CHANNEL_DATA can carry several requests,
+///     and one request can span several of them;
+///   * the replies go out in the order the requests came in, cut to what is
+///     left of the peer's window -- a READDIR or a READ can be bigger than
+///     one packet, and a packet bigger than the window is a lie;
+///   * the peer's own window is topped back up, because a peer that has sent
+///     `SERVER_WINDOW` bytes may not send another one until it is told there
+///     is room.
+fn[T : @transport.Transport] sd_sftp_loop(
+  conn : T,
+  counters : WireCounters,
+  send_ctx : @bpacket.SendCtx,
+  recv_ctx : @bpacket.RecvCtx,
+  peer_channel : UInt32,
+  peer_window_in : UInt32,
+  peer_max_packet : UInt32,
+  provider : SftpProvider,
+) -> SftpOutcome {
+  let state = @sftpserver.ServerState::new(provider.clock)
+  let inbuf = @sftp.SftpInbuf::new()
+  // The replies that have not gone out yet, and how far into them we are.
+  // A reply that does not fit in what is left of the peer's window waits
+  // here until the peer says it has room, and the order is the order the
+  // requests came in -- which is what the protocol requires of the replies.
+  let mut out : Array[Byte] = []
+  let mut out_off = 0
+  let mut peer_window = peer_window_in
+  // What the peer may still send us, counted against the window this server
+  // advertised in its CHANNEL_OPEN_CONFIRMATION.
+  let window_max = SERVER_WINDOW.reinterpret_as_int()
+  let mut recv_left = window_max
+  let outcome = {
+    bytes_sent: 0,
+    requests: 0,
+    peer_closed: false,
+    window_left: peer_window,
+  }
+  let mut peer_eof = false
+  let mut transport_gone = false
+  let mut done = false
+  while !done {
+    // ---- send what is waiting, as far as the window allows ----
+    while out_off < out.length() {
+      let room = sd_chunk_size(peer_window, peer_max_packet)
+      if room <= 0 {
+        // The window is empty.  The peer has to send a WINDOW_ADJUST
+        // before anything more can go out, and the read below is where
+        // that arrives.
+        break
+      }
+      let avail = out.length() - out_off
+      let take = if avail < room { avail } else { room }
+      let piece : FixedArray[Byte] = FixedArray::make(take, b'\x00')
+      for i = 0; i < take; i = i + 1 {
+        piece[i] = out[out_off + i]
+      }
+      if !sd_send_packet(
+          conn,
+          counters,
+          send_ctx,
+          @sshwire.SSH_MSG_CHANNEL_DATA,
+          sd_data_payload(peer_channel, piece),
+        ) {
+        transport_gone = true
+        done = true
+        break
+      }
+      peer_window = peer_window - take.reinterpret_as_uint()
+      outcome.bytes_sent = outcome.bytes_sent + take
+      out_off = out_off + take
+    }
+    if done {
+      break
+    }
+    if out_off >= out.length() {
+      // Everything has gone out; start the next reply from the beginning.
+      out = []
+      out_off = 0
+    }
+    if peer_eof && out.length() == 0 {
+      // The peer will send no more requests, and everything we had to say
+      // has been said.
+      break
+    }
+    // ---- read one packet ----
+    match sd_recv_packet(conn, counters, recv_ctx) {
+      Closed => {
+        transport_gone = true
+        done = true
+      }
+      BadPacket(_) => {
+        transport_gone = true
+        done = true
+      }
+      Packet(t, payload) => {
+        if t == @sshwire.SSH_MSG_CHANNEL_WINDOW_ADJUST {
+          match sd_read_u32(payload, 4) {
+            None => ()
+            Some(n) => peer_window = peer_window + n
+          }
+          continue
+        }
+        if t == @sshwire.SSH_MSG_CHANNEL_DATA {
+          // `uint32 recipient channel || string data`
+          let data = match sd_read_string(payload, 4) {
+            None => FixedArray::make(0, b'\x00')
+            Some((b, _)) => b
+          }
+          inbuf.feed(data)
+          recv_left = recv_left - data.length()
+          if recv_left < 0 {
+            recv_left = 0
+          }
+          // Top the peer's window back up once it is half spent, so that a
+          // peer that sends more than one window's worth is not left
+          // waiting for permission that never comes.
+          if sd_window_needs_top_up(recv_left, window_max) {
+            let give = window_max - recv_left
+            let _ = sd_send_packet(
+              conn,
+              counters,
+              send_ctx,
+              @sshwire.SSH_MSG_CHANNEL_WINDOW_ADJUST,
+              sd_window_adjust_payload(peer_channel, give.reinterpret_as_uint()),
+            )
+            recv_left = window_max
+          }
+          // Every complete request in what just arrived.  One CHANNEL_DATA
+          // can carry several, and one can be split across several.
+          let mut again = true
+          while again {
+            match inbuf.take() {
+              None => again = false
+              Some(body) => {
+                let req = @sftpserver.parse_request(body)
+                match state.reply(provider.fs, req) {
+                  // An unknown request type gets NO reply at all, and the
+                  // real server goes on to answer the next one.
+                  None => ()
+                  Some(reply) => {
+                    let framed = @sftp.sftp_frame(reply)
+                    for i = 0; i < framed.length(); i = i + 1 {
+                      out.push(framed[i])
+                    }
+                    outcome.requests = outcome.requests + 1
+                  }
+                }
+              }
+            }
+          }
+          continue
+        }
+        if t == @sshwire.SSH_MSG_CHANNEL_EOF {
+          // The peer will send no more requests.
+          peer_eof = true
+          continue
+        }
+        if t == @sshwire.SSH_MSG_CHANNEL_CLOSE {
+          outcome.peer_closed = true
+          done = true
+          continue
+        }
+        // Anything else on this channel is not ours to answer.
+      }
+    }
+  }
+  // ---- the closing sequence ----
+  //
+  // The order is the real server's: our EOF, then the exit status, then the
+  // close.  And the close is followed by a READ, because the peer answers a
+  // CLOSE with its own, and closing the socket while that answer is in
+  // flight turns the close into a TCP RESET -- which throws away whatever
+  // the peer has not read yet.  Measured in Loop #94.
+  if !transport_gone {
+    if outcome.peer_closed {
+      // The peer closed first.  The answer to a CLOSE is a CLOSE and
+      // nothing else: the channel is over.
+      let _ = sd_send_packet(
+        conn,
+        counters,
+        send_ctx,
+        @sshwire.SSH_MSG_CHANNEL_CLOSE,
+        sd_bare_payload(peer_channel),
+      )
+    } else {
+      let _ = sd_send_packet(
+        conn,
+        counters,
+        send_ctx,
+        @sshwire.SSH_MSG_CHANNEL_EOF,
+        sd_bare_payload(peer_channel),
+      )
+      let _ = sd_send_packet(
+        conn,
+        counters,
+        send_ctx,
+        @sshwire.SSH_MSG_CHANNEL_REQUEST,
+        sd_exit_status_payload(peer_channel, 0),
+      )
+      let _ = sd_send_packet(
+        conn,
+        counters,
+        send_ctx,
+        @sshwire.SSH_MSG_CHANNEL_CLOSE,
+        sd_bare_payload(peer_channel),
+      )
+      let mut drain = 0
+      while drain < 64 {
+        drain = drain + 1
+        match sd_recv_packet(conn, counters, recv_ctx) {
+          Closed => break
+          BadPacket(_) => break
+          Packet(t, _) =>
+            if t == @sshwire.SSH_MSG_CHANNEL_CLOSE {
+              outcome.peer_closed = true
+              break
+            }
+        }
+      }
+    }
+  }
+  outcome.window_left = peer_window
+  outcome
+}
+
+///|
 /// Run the connection protocol: accept one session channel, run the command
 /// the peer asks for, and report what happened.
 ///
@@ -482,6 +808,7 @@ pub fn[T : @transport.Transport] serve_channels(
   send_ctx : @bpacket.SendCtx,
   recv_ctx : @bpacket.RecvCtx,
   runner : CommandRunner,
+  sftp : SftpProvider?,
 ) -> ChannelReport {
   let mut peer_channel = 0U
   let mut peer_window = 0U
@@ -547,6 +874,8 @@ pub fn[T : @transport.Transport] serve_channels(
     exit_status: -1,
     stdout_bytes: 0,
     stderr_bytes: 0,
+    sftp_bytes: 0,
+    sftp_requests: 0,
     peer_closed: false,
   }
   if !opened {
@@ -602,10 +931,79 @@ pub fn[T : @transport.Transport] serve_channels(
           // is not expecting.
           continue
         }
+        if req.request_type == "subsystem" {
+          // `subsystem` is RFC 4254 §6.5: a NAME, and the name is what
+          // selects what runs.  This server has exactly one subsystem --
+          // `sftp` -- and it is refused by name rather than accepted and
+          // then ignored, because a peer that asked for something else and
+          // got a silent success would wait for bytes that never come.
+          let (name_b, _) = match sd_read_string(req.extra, 0) {
+            None => break
+            Some(v) => v
+          }
+          let name = sd_bytes_to_string(name_b)
+          if name != SUBSYSTEM_SFTP {
+            if req.want_reply {
+              let _ = sd_send_packet(
+                conn,
+                counters,
+                send_ctx,
+                @sshwire.SSH_MSG_CHANNEL_FAILURE,
+                sd_bare_payload(peer_channel),
+              )
+            }
+            continue
+          }
+          let provider = match sftp {
+            None => {
+              // The server was started without a filesystem for the
+              // subsystem.  Saying so is better than answering SUCCESS and
+              // then not answering a single request.
+              if req.want_reply {
+                let _ = sd_send_packet(
+                  conn,
+                  counters,
+                  send_ctx,
+                  @sshwire.SSH_MSG_CHANNEL_FAILURE,
+                  sd_bare_payload(peer_channel),
+                )
+              }
+              continue
+            }
+            Some(p) => p
+          }
+          if req.want_reply {
+            let _ = sd_send_packet(
+              conn,
+              counters,
+              send_ctx,
+              @sshwire.SSH_MSG_CHANNEL_SUCCESS,
+              sd_bare_payload(peer_channel),
+            )
+          }
+          // The subsystem owns the channel from here on: it reads the
+          // peer's requests and answers them until the peer is done.
+          let outcome = sd_sftp_loop(
+            conn,
+            counters,
+            send_ctx,
+            recv_ctx,
+            peer_channel,
+            peer_window,
+            peer_max_packet,
+            provider,
+          )
+          peer_window = outcome.window_left
+          report.command = "subsystem " + name
+          report.sftp_bytes = outcome.bytes_sent
+          report.sftp_requests = outcome.requests
+          report.peer_closed = outcome.peer_closed
+          break
+        }
         if req.request_type != "exec" {
-          // `shell`, `subsystem`, `pty-req` and anything else: this server
-          // does not do them yet, and saying so is better than accepting and
-          // then doing nothing.
+          // `shell`, `pty-req` and anything else: this server does not do
+          // them yet, and saying so is better than accepting and then doing
+          // nothing.
           if req.want_reply {
             let _ = sd_send_packet(
               conn,

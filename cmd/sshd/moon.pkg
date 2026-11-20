@@ -3,6 +3,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/fs",
   "riantr/moonbit_openssh/src/keyfile",
+  "riantr/moonbit_openssh/src/sftpserver",
   "riantr/moonbit_openssh/src/sshd" @sshdsrv,
   "riantr/moonbit_openssh/src/subproc",
   "riantr/moonbit_openssh/src/tcp",

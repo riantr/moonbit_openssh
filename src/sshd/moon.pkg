@@ -55,6 +55,8 @@ import {
   "riantr/moonbit_openssh/src/kexdh",
   "riantr/moonbit_openssh/src/kexflow",
   "riantr/moonbit_openssh/src/rng",
+  "riantr/moonbit_openssh/src/sftp",
+  "riantr/moonbit_openssh/src/sftpserver",
   "riantr/moonbit_openssh/src/sshwire",
   "riantr/moonbit_openssh/src/transport",
   "riantr/moonbit_openssh/src/userauth",

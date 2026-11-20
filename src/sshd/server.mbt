@@ -84,6 +84,12 @@ pub struct ServerReport {
   stdout_bytes : Int32
   /// How many bytes of the command's stderr were sent.
   stderr_bytes : Int32
+  /// How many bytes of SFTP replies were sent.
+  ///
+  /// Zero unless the peer asked for the `sftp` subsystem.
+  sftp_bytes : Int32
+  /// How many SFTP requests were answered.
+  sftp_requests : Int32
   /// Whether the peer's CHANNEL_CLOSE was read before the connection closed.
   ///
   /// This is the observable side of the drain at the end of the channel
@@ -133,10 +139,16 @@ pub(all) enum ServerError {
 /// `runner` is how commands are run.  The server does not know how to start
 /// a process -- that is native-only work -- so the driver supplies the
 /// function; see `CommandRunner`.
+///
+/// `sftp` is the same kind of thing for the `sftp` subsystem: the rules are
+/// in `src/sftpserver` and the driver supplies the filesystem and the clock
+/// they need.  `None` means this server has no subsystem to offer, and a
+/// peer that asks for one is refused.
 pub fn[T : @transport.Transport] serve(
   conn : T,
   cfg : ServerConfig,
   runner : CommandRunner,
+  sftp : SftpProvider?,
 ) -> Result[ServerReport, ServerError] {
   let counters = { sent: 0, recv: 0, }
   let send_ctx = @bpacket.SendCtx::new()
@@ -422,13 +434,24 @@ pub fn[T : @transport.Transport] serve(
   let mut exit_status = -1
   let mut stdout_bytes = 0
   let mut stderr_bytes = 0
+  let mut sftp_bytes = 0
+  let mut sftp_requests = 0
   let mut peer_closed = false
   if authenticated {
-    let ch = serve_channels(conn, counters, send_ctx, recv_ctx, runner)
+    let ch = serve_channels(
+      conn,
+      counters,
+      send_ctx,
+      recv_ctx,
+      runner,
+      sftp,
+    )
     command = ch.command
     exit_status = ch.exit_status
     stdout_bytes = ch.stdout_bytes
     stderr_bytes = ch.stderr_bytes
+    sftp_bytes = ch.sftp_bytes
+    sftp_requests = ch.sftp_requests
     peer_closed = ch.peer_closed
   }
   Ok({
@@ -444,6 +467,8 @@ pub fn[T : @transport.Transport] serve(
     exit_status,
     stdout_bytes,
     stderr_bytes,
+    sftp_bytes,
+    sftp_requests,
     peer_closed,
     packets: tries + tries2 + tries3 + tries4 + tries5,
   })
