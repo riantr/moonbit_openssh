@@ -11904,3 +11904,72 @@ work-in-progress number, not a published state.
     new diagnostic 2            deprecated Bytes::new -> Bytes::make (hostkey/cert_test.mbt:19)
     local check                 cmd/proton_gui: 3 accepted warnings; src/hostkey: 0
     loop66 under the new compiler   14/14, "4 reported sites, equal to the 4-entry accept table"
+
+### The release: v0.1.4 is published
+
+The order that was fixed in advance and followed exactly:
+
+    local release round (moon 0.1.20261117)   86/86 steps, QA 13/13, exit 0
+                                                 TAGGED v0.1.4 at 46a1cd4
+    cloud gates (run 44274933757)              PASS, 73/73 steps, 0 failed
+    gitee push                                 branch f9975a0..46a1cd4, tag v0.1.4
+    github mirror                              tag v0.1.4 -> 46a1cd4
+    tag push -> run 44658690384                event=push, ref=v0.1.4
+                                                 publish job: success
+                                                 "Check passed" / "PUBLISHED
+                                                  riantr/moonbit_openssh 0.1.4"
+    mooncakes.io                               riantr/moonbit_openssh@0.1.4
+                                                 published 2026-11-20T02:09:53Z
+                                                 latest 0.1.4, versions 1
+
+The tag push is what ran the publish: `on.push.tags: ["v*"]`, and the tag
+push produced a run whose `ref` is `refs/tags/v0.1.4` -- not a dispatch.
+That is the difference Loop #97 was about, and this time it was exercised by
+the trigger itself.
+
+The publish job ran alone: `gates`, `qa` and `release-gate` were skipped on a
+tag push, so the release cost one runner-minute-heavy job instead of five.
+
+### The published package was consumed, not just published
+
+A release that only says "the toolchain accepted it" proves the publisher
+could check its own tree.  So a separate project was created outside the
+module, added the RELEASE from the registry, and called one of its
+functions:
+
+    moon new consumer
+    moon add riantr/moonbit_openssh@0.1.4
+    moon run cmd/main --target native
+      is_cert_type_name(ssh-rsa-cert-v01@openssh.com) = true
+      is_cert_type_name(ssh-rsa) = false
+
+The dependency graph resolved to what the published manifest declares --
+`tonyfettes/xlog@0.5.1`, `moonbitlang/async@0.22.4` -- so the pin that
+started this loop is the pin the registry now serves.
+
+### The toolchain updates ITSELF
+
+Measured across the three release rounds:
+
+    round #10, 2026-11-18 15:00   moon 0.1.20261102 (ea07287)  ~\ .moon\bin\moon.exe
+    round #11, 2026-11-18 17:40   moon 0.1.20261117 (eb64713)  E:\src\moon\_moon_latest
+    round #14, 2026-11-20 09:15   moon 0.1.20261117 (eb64713)  E:\src\moon\_moon_latest
+    default toolchain, 11-20 10:20   moon 0.1.20261117 (eb64713)  ~\ .moon\bin\moon.exe
+
+The DEFAULT toolchain was still 0.1.20261102 when round #10 ran, and by
+2026-11-20 it was 0.1.20261117 on its own: the MoonBit toolchain updates
+itself, and "the compiler on this machine" is not a stable property unless
+something pins it.
+
+Two consequences, both measured:
+
+* **Keeping the old compiler needs a whole MOON_HOME, not just the
+  binary.**  That is why the side-by-side install was the right move at the
+  time: the version that was on the machine could not be re-downloaded (the
+  CDN answers 403 for every version-shaped path) and the default one was
+  going to be replaced anyway.
+* **The default toolchain now equals CI's**, so a plain `moon` on this
+  machine is the compiler the runner installs.  When they drift again, the
+  two are the same bytes and the same build hash (`eb64713`) -- the run
+  that proves it is the `ci.json` env step, which now records the version
+  instead of saying "ok".
