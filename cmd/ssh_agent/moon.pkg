@@ -1,6 +1,5 @@
 import {
   "moonbitlang/core/env",
-  "moonbitlang/async",
   "moonbitlang/async/fs",
   "riantr/moonbit_openssh/src/agent",
   "riantr/moonbit_openssh/src/agentpipe",

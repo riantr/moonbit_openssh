@@ -12,7 +12,6 @@
 /// native only: it reads the vector file, and that needs `moonbitlang/async/fs`.
 /// Gated per file rather than per package, for the reason `src/khfile` gives.
 import {
-  "moonbitlang/async",
   "moonbitlang/async/fs",
   "moonbitlang/core/env",
   "riantr/moonbit_openssh/src/knownhosts",

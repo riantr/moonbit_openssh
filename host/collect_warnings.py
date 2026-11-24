@@ -89,6 +89,71 @@ KNOWN_ACCEPTED = {
     ("cmd/proton_gui/main.mbt", "120"): (
         "unused_async: same CommandRegistrar::bind signature requirement."
     ),
+    # ---- Loop #101: the same expansion, on the js target ----
+    #
+    # The compiler moved (0.1.20261119) and twelve packages started reporting
+    # `unused_package` for `moonbitlang/async`.  Eight of them were DEAD and
+    # were deleted; these four are not, and the compiler contradicts itself
+    # about them: it calls the import unused AND the build fails without it.
+    #
+    # Measured, per package, on the js target -- the only one these packages
+    # support:
+    #
+    #   with the import:    Warning (unused_package): Unused package
+    #                       'moonbitlang/async'   at moon.pkg:2
+    #   without the import: Cannot use `async fn main`: package
+    #                       moonbitlang/async is not imported.
+    #
+    # So the import IS used -- by the compiler's expansion of `async fn main`
+    # into a call to `@moonbitlang/async.run_async_main` -- and the
+    # unused-import analysis cannot see generated code.  The warning is a
+    # false positive; the import has to stay.
+    #
+    # Why only these four: on the NATIVE target the same expansion does not
+    # need the package, so the import really is dead there, and eight native
+    # packages had it deleted (measured: the package checks clean and its
+    # executable still runs).  The asymmetry is the whole point -- the answer
+    # is per site and per target, not per package name.
+    ("cmd/probe_async_wall/moon.pkg", "2"): (
+        "unused_package: `moonbitlang/async` is consumed by the compiler's "
+        "expansion of `async fn main` (main.mbt:59) into a call to "
+        "`@moonbitlang/async.run_async_main`. Measured on the js target: "
+        "with the import the package reports `Warning (unused_package): "
+        "Unused package 'moonbitlang/async'`; without it, `moon check "
+        "cmd/probe_async_wall --target js` fails with `Cannot use `async fn "
+        "main`: package moonbitlang/async is not imported.` The warning is a "
+        "false positive -- the consumer is generated code."
+    ),
+    ("cmd/wt_net/moon.pkg", "2"): (
+        "unused_package: `moonbitlang/async` is consumed by the compiler's "
+        "expansion of `async fn main` (main.mbt:87) into a call to "
+        "`@moonbitlang/async.run_async_main`. Measured on the js target: "
+        "with the import the package reports `Warning (unused_package): "
+        "Unused package 'moonbitlang/async'`; without it, `moon check "
+        "cmd/wt_net --target js` fails with `Cannot use `async fn main`: "
+        "package moonbitlang/async is not imported.` The warning is a false "
+        "positive -- the consumer is generated code."
+    ),
+    ("cmd/wt_probe/moon.pkg", "2"): (
+        "unused_package: `moonbitlang/async` is consumed by the compiler's "
+        "expansion of `async fn main` (main.mbt:79) into a call to "
+        "`@moonbitlang/async.run_async_main`. Measured on the js target: "
+        "with the import the package reports `Warning (unused_package): "
+        "Unused package 'moonbitlang/async'`; without it, `moon check "
+        "cmd/wt_probe --target js` fails with `Cannot use `async fn main`: "
+        "package moonbitlang/async is not imported.` The warning is a false "
+        "positive -- the consumer is generated code."
+    ),
+    ("cmd/wt_ssh/moon.pkg", "2"): (
+        "unused_package: `moonbitlang/async` is consumed by the compiler's "
+        "expansion of `async fn main` (main.mbt:877) into a call to "
+        "`@moonbitlang/async.run_async_main`. Measured on the js target: "
+        "with the import the package reports `Warning (unused_package): "
+        "Unused package 'moonbitlang/async'`; without it, `moon check "
+        "cmd/wt_ssh --target js` fails with `Cannot use `async fn main`: "
+        "package moonbitlang/async is not imported.` The warning is a false "
+        "positive -- the consumer is generated code."
+    ),
 }
 
 

@@ -68,6 +68,14 @@ const skip = (name, why) => {
   console.log(`  SKIP  ${name}  -- ${why}`);
 };
 
+// machine-path-exempt: each entry below is a CANDIDATE, probed in order until
+// one exists. None is asserted to exist, and when none does the gate says so
+// and fails rather than pretending. verify_loop71.mjs flags any drive-letter
+// path it finds in code; this marker is how a file declares that its paths are
+// a probe rather than a claim, and it is an obligation to say why, not a mute
+// button. The reason it is a list at all: this repository is developed where
+// the server lives under `C:\Program Files\OpenSSH-Win64` and it is tested on
+// a runner where it lives under `C:\Windows\System32\OpenSSH`.
 const OPENSSH_DIRS = [
   "C:\\Windows\\System32\\OpenSSH",
   "C:\\Program Files\\OpenSSH",

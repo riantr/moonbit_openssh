@@ -6,7 +6,6 @@
 ///
 ///| native only: reading the vector file needs `moonbitlang/async/fs`.
 import {
-  "moonbitlang/async",
   "moonbitlang/async/fs",
   "riantr/moonbit_openssh/src/hostkey",
   "riantr/moonbit_openssh/src/kexc25519",

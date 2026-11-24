@@ -36,7 +36,6 @@
 ///
 /// native only: it reads files, which needs `moonbitlang/async/fs`.
 import {
-  "moonbitlang/async",
   "moonbitlang/async/fs",
   /// Loop #67: `main.mbt` reads `@env.args()`. Core packages are not
   /// implicitly available any more, and the toolchain says so with
