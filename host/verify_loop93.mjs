@@ -41,6 +41,10 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+// The file lock that Windows real-time protection puts on an executable
+// while it scans it, and the narrow retry that survives it.
+import { spawnLocked, buildLocked } from "./win_lock.mjs";
+
 const ROOT = path.resolve(
   new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
 );
@@ -145,7 +149,7 @@ function hostFingerprint() {
 function startServer(authorizedKeys) {
   const ak = authorizedKeys || path.join(BED, "authorized_keys");
   return new Promise((resolve, reject) => {
-    const p = spawn(
+    const p = spawnLocked(
       OUR_SSHD,
       [
         "--host-key", path.join(BED, "hostkey"),
@@ -220,6 +224,13 @@ function waitExit(p, ms = 30000) {
     });
   });
 }
+
+// Wait for a process to say it is listening.
+//
+// The rule is Loop #79's: a gate must not guess how long a peer takes to
+// start.  `host/ready_line.mjs` is the shared waiter; the recorder's own
+// contract is to print `READY <port>` once its socket is bound.
+import { waitForReadyLine } from "./ready_line.mjs";
 
 // --------------------------------------------------------------- the client
 
@@ -484,25 +495,63 @@ async function main() {
     "python",
     [
       path.join(ROOT, "host", "ssh_recorder.py"),
-      String(server3.port + 1),
+      // Listen port 0: the recorder picks a free one and says which in its
+      // READY line.  The gate used to DERIVE the port -- "the server took
+      // 50001, so the recorder takes 50002" -- and on Windows that walks
+      // straight into a reserved range: binding a port the system has
+      // excluded fails with WSAEACCES (WinError 10013), which is what this
+      // gate hit.  Nothing about the recorder's port is related to the
+      // server's port, so nothing should have derived one from the other.
+      "0",
       String(server3.port),
       "--out", CAPTURE,
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   let recErr = "";
+  let recOut = "";
   recorder.stderr.on("data", (d) => { recErr += d.toString(); });
-  recorder.stdout.on("data", () => {});
-  // give the recorder a moment to bind
-  await new Promise((r) => setTimeout(r, 1500));
-  const client3 = runClient(server3.port + 1, "userkey", "echo hello");
+  recorder.stdout.on("data", (d) => { recOut += d.toString(); });
+
+  // Wait for the recorder to say it is listening.
+  //
+  // The recorder's own contract is to print `READY <port>` once the socket
+  // is bound, precisely so that a caller can wait for THAT instead of
+  // sleeping and hoping.  The gate used to sleep 1500ms, and on a loaded
+  // machine that is not enough: the client then connects before the
+  // recorder has bound, the connection is refused, and the recorder sits in
+  // `accept()` for the rest of the run -- so the capture is empty and the
+  // gate reports "the handshake was recorded" with nothing to go on.  That
+  // is the failure this wait removes.
+  //
+  // Loop #79's follow-up wrote the rule down: a gate must not guess how long
+  // a peer takes to start.  The recorder was the one peer that still had a
+  // sleep in front of it.
+  const ready = await waitForReadyLine(
+    () => recOut,
+    /READY \d+/,
+    30000,
+  );
+  const recPort = ready ? Number(/READY (\d+)/.exec(recOut)?.[1]) : 0;
+  if (!ready) {
+    // The recorder will block in accept() forever if nothing connects, so
+    // it is killed here instead of leaving the gate to time out on it.
+    try { recorder.kill(); } catch { /* already gone */ }
+  }
+  const client3 = ready
+    ? runClient(recPort, "userkey", "echo hello")
+    : { stderr: "", stdout: "" };
   await waitExit(recorder);
   await waitExit(server3.proc);
 
   const s2cPath = path.join(CAPTURE, "s2c.bin");
   const c2sPath = path.join(CAPTURE, "c2s.bin");
   const haveCapture = fs.existsSync(s2cPath) && fs.existsSync(c2sPath);
-  ok("the handshake was recorded", haveCapture, recErr.slice(-1500));
+  ok(
+    "the handshake was recorded",
+    haveCapture,
+    (ready ? "" : "the recorder never said READY\n") + recErr.slice(-1500),
+  );
 
   if (haveCapture) {
     const s2c = plainPackets(fs.readFileSync(s2cPath));
@@ -558,10 +607,15 @@ async function main() {
 }
 
 function spawnSyncMoon(args) {
-  const r = spawnSync("cmd", ["/c", "moon", ...args], {
-    cwd: ROOT, encoding: "utf8", timeout: 900000,
+  // The build can lose a race with a real-time protection engine that has
+  // the output file open; `buildLocked` retries exactly that and nothing
+  // else.
+  return buildLocked("cmd/sshd", () => {
+    const r = spawnSync("cmd", ["/c", "moon", ...args], {
+      cwd: ROOT, encoding: "utf8", timeout: 900000,
+    });
+    return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
   });
-  return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
 }
 
 main().then((code) => process.exit(code || 0)).catch((e) => {

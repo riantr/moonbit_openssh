@@ -50,6 +50,10 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// The file lock that Windows real-time protection puts on an executable
+// while it scans it, and the narrow retry that survives it.
+import { spawnLocked, buildLocked } from "./win_lock.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BED = path.join(ROOT, ".loop101", "bed");
 const REAL_BED = path.join(ROOT, ".loop101", "realbed");
@@ -133,14 +137,19 @@ async function waitForPort(port, timeoutMs = 20000) {
 }
 
 function moon(args) {
-  const r = spawnSync("cmd", ["/c", "moon", ...args], {
-    cwd: ROOT,
-    encoding: "utf8",
-    errors: "replace",
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 900000,
+  // The build can lose a race with a real-time protection engine that has
+  // the output file open; `buildLocked` retries exactly that and nothing
+  // else.
+  return buildLocked("cmd/sshd", () => {
+    const r = spawnSync("cmd", ["/c", "moon", ...args], {
+      cwd: ROOT,
+      encoding: "utf8",
+      errors: "replace",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 900000,
+    });
+    return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
   });
-  return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
 }
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -208,7 +217,7 @@ function writeRealKnownHosts() {
 // ---------------------------------------------------------------- our server
 function startOurServer() {
   return new Promise((resolve, reject) => {
-    const p = spawn(
+    const p = spawnLocked(
       OUR_SSHD,
       [
         "--host-key", path.join(BED, "hostkey"),

@@ -34,9 +34,23 @@ the same bytes.  Nothing else.
 
     python host/ssh_recorder.py <listen-port> <target-port> [--out DIR]
 
+`<listen-port>` may be 0, which means "any free port"; the port that was
+bound is printed in the READY line.
+
 Prints `READY <listen-port>` on stdout once the socket is bound and
 listening, so a caller can start it in the background and wait for that
-line rather than sleeping.  The recording is written when the session ends:
+line rather than sleeping.  The port it prints is the port it ACTUALLY
+bound, so a listen port of 0 works: the operating system picks a free one
+and the caller reads it out of the line.
+
+That matters on Windows, where binding a port that the system has reserved
+fails with WSAEACCES (WinError 10013) -- and a caller that DERIVES the
+recorder's port from another port ("the server took 50001, so the recorder
+takes 50002") can walk straight into a reserved range without noticing.
+Letting the recorder pick the port removes the derivation, and the READY
+line tells the caller what it got.
+
+The recording is written when the session ends:
 
     <out>/c2s.bin   the bytes the client sent
     <out>/s2c.bin   the bytes the server sent
@@ -100,7 +114,11 @@ def main() -> int:
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.host, args.listen_port))
     srv.listen(1)
-    print("READY %d" % args.listen_port, flush=True)
+    # The port it ACTUALLY got, not the one that was asked for: with a
+    # listen port of 0 the system chose it, and the caller can only use
+    # what it is told.
+    bound_port = srv.getsockname()[1]
+    print("READY %d" % bound_port, flush=True)
 
     conn, peer = srv.accept()
     up = socket.create_connection((args.host, args.target_port))
@@ -123,7 +141,7 @@ def main() -> int:
         pass
 
     meta = {
-        "listen_port": args.listen_port,
+        "listen_port": bound_port,
         "target_port": args.target_port,
         "c2s_bytes": c2s_count[0],
         "s2c_bytes": s2c_count[0],

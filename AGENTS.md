@@ -12270,6 +12270,57 @@ That is now a check in the gate ("the server never sends a packet bigger than
 the peer allowed", and "the real server cuts its packets the same way"), and
 the mutation that used to slip through is caught by it.
 
+### The compiler moved, and the tree noticed
+
+The cloud run for this loop was red, and both of its failures were gates
+about the TREE rather than about the feature.  That is the shape of a
+compiler-version incident, so it is worth writing down what actually
+happened.
+
+The local toolchain updated itself to `moon 0.1.20261119 (738607b
+2026-11-19)` between the run of `verify_loop66` and the cloud run.  The
+new compiler reports `unused_package` for `moonbitlang/async` in twelve
+packages it said nothing about before -- and `verify_loop66` asserts the
+collector's report EQUALS the accept table, so twelve new sites is
+twelve failures.
+
+The twelve were **not** the same case, and measuring them is the whole
+point:
+
+* **Eight were dead imports, and they are deleted.**  Measured on the
+  native target: with the import removed the package checks clean, and
+  the executable still builds and runs (`cmd/flow_kat` still prints
+  `FLOW_PASS 7`, exit 0).  The reason is that on native the expansion
+  of `async fn main` does not need the package.
+
+* **Four are js-only packages, and the compiler contradicts itself about
+  them.**  For `cmd/wt_ssh`, `cmd/wt_net`, `cmd/wt_probe` and
+  `cmd/probe_async_wall`:
+
+      with the import:    Warning (unused_package): Unused package
+                          'moonbitlang/async'           at moon.pkg:2
+      without the import: Cannot use `async fn main`: package
+                          moonbitlang/async is not imported.
+
+  So the import IS used -- by the compiler's expansion of `async fn
+  main` into a call to `@moonbitlang/async.run_async_main` -- and the
+  unused-import analysis cannot see generated code.  These four stay,
+  and they are in the accept table now, each with its own measured
+  evidence and the line of its own `async fn main`.
+
+The lesson is that the answer is **per site and per target**, not per
+package name: the same import is dead in one target and required in
+another, and only a measurement says which.  A table entry that said
+"`moonbitlang/async` is always fine" would have been wrong in both
+directions.
+
+The second failure was simpler and was mine: `host/verify_loop101.mjs`
+probes for the real `ssh.exe` in a LIST of known locations, and
+`verify_loop71` flags every drive-letter path in code unless the file
+declares it a probe with a reason.  The file now carries the same
+`machine-path-exempt` marker `verify_loop94.mjs` carries, placed so the
+distance to the path stays inside the gate's window with room to spare.
+
 ### What is still not done
 
 * **One channel at a time.**  A second channel that arrives while the
@@ -12282,3 +12333,58 @@ the mutation that used to slip through is caught by it.
 * **`cmd/sshd` serves ONE connection** and then exits.  That is the
   driver's shape, not the protocol's, and the gate starts a server per
   case because of it.
+
+---
+
+## 涓や釜瀹炴椂闃叉姢寮曟搸锛屽拰瀹冧滑缁欐柊寤?exe 鐨勭嫭鍗犻攣锛?026-11-24锛?
+鏈湴鐨勯棬绂佷細**闂存瓏鎬?*鍙樼孩锛岃€岀孩鐨勫師鍥犱笉鏄唬鐮併€傝繖鍙版満鍣ㄤ笂鍚屾椂璺戠潃涓や釜瀹炴椂闃叉姢寮曟搸锛?
+| 鏈嶅姟 | 浜у搧 | 鐘舵€?|
+|---|---|---|
+| `360rp` | 360 瀹夊叏濂楄 | Running |
+| `HipsDaemon` | 鐏粧 Internet 瀹夊叏 | Running |
+
+锛圵indows Defender 鑷繁鍦ㄨ繖鍙版満鍣ㄤ笂鏄?*鍏?*鐨勶細`Get-MpComputerStatus` 鎶?`RealTimeProtectionEnabled : False`銆備袱涓紩鎿庣敱 `Get-Service` 鏌ュ埌锛宍360 瀹夊叏濂楄` 涔熷湪 `root\SecurityCenter2` 鐨?`AntiVirusProduct` 閲屻€傦級
+
+瀹冧滑鎵弿涓€涓?*鍒氬啓鍑烘潵**鐨勫彲鎵ц鏂囦欢鏃朵細**鐙崰**鎵撳紑瀹冿紙鎵撳紑 鈫?璇?鈫?鍏抽棴锛屽叏绋嬩笉鍏佽鍒汉鍏变韩锛夈€傚湪杩欎釜绐楀彛閲岋細
+
+- `moon build` 鎯宠鐩栨棫浜х墿 鈫?`The process cannot access the file because it is being used by another process`
+- Node 鐨?`spawn` 鈫?`EBUSY`锛坙ibuv 鎶?`ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION` 鏄犲皠鎴?EBUSY锛?
+### 鐜板満閲忓埌鐨勬牱瀛?
+loop92 鐨勯棬绂佺幇鍦烘姄鍒扮殑锛堣瘖鏂壇鏈級锛?
+```
+[spawn diag] attempt 1 failed EBUSY errno=-4082 exe=.../sftp_server.exe
+[spawn diag] file=readable
+[spawn diag] EXCLUSIVE-FAIL: ... 'sftp_server.exe' because it is being used by another process.
+[spawn diag] attempt 5 failed EBUSY ...
+[spawn diag] EXCLUSIVE-OK
+```
+
+涓や釜缁嗚妭锛?
+1. **`holders` 鏄┖鐨?*锛氭灇涓炬墍鏈夎繘绋嬬殑 Modules锛屾病鏈変竴涓妸杩欎釜鏂囦欢鏄犲皠鎴愰暅鍍忋€備篃灏辨槸璇存寔閿佽€?*涓嶆槸**涓€涓繕鍦ㄨ繍琛岀殑瀹炰緥锛堥偅浼氬嚭鐜板湪闀滃儚鍒楄〃閲岋級锛岃€屾槸澶栭儴鎵弿鍣ㄤ互鐙崰鏂瑰紡鎶婃枃浠舵墦寮€鍦ㄨ銆?2. **閿佹湁鏃堕檺**锛? 娆￠€€閬匡紙0.5 + 1 + 1.5 + 2 绉掞級涔嬪悗 `EXCLUSIVE-OK`锛岄攣鑷繁娑堝け浜嗐€?
+鍙﹀閲忚繃銆佺敤鏉ユ帓闄ゅ埆鐨勮В閲婏細
+
+- 鍒氬啓瀹岀殑閭ｄ竴鍒绘枃浠舵槸**鑷敱**鐨勶紙`t+0.01s` 鐙崰鎵撳紑鎴愬姛锛岃繛缁疆璇?30 绉掍篃娌″啀琚攣锛夆啋 瑙﹀彂涓嶆槸銆屽啓鍏ャ€嶆湰韬€?- 鏉€鎺変竴涓疄渚嬪悗绔嬪埢鍐嶈捣涓€涓?鈫?涓嶅鐜?鈫?瑙﹀彂涓嶆槸銆屼笂涓€涓疄渚嬭繕娌￠€€骞插噣銆嶃€?- 鍚屼竴浠戒唬鐮佸湪 CI 涓婂叏缁匡紙run 44709602033锛歭oop92 ok銆乴oop93 ok銆乴oop94 48/48銆乴oop100 32/32銆乴oop101 27/27锛夆啋 浠ｇ爜鏄鐨勶紝Linux 涓婃病鏈夎繖涓€灞傘€?
+### 澶勭疆
+
+鏂板 `host/win_lock.mjs`锛屼袱涓?*绐勫彛寰?*鐨勯噸璇曪細
+
+- `spawnLocked(exe, args, opts)`锛氬彧鍦?`err.code === "EBUSY"` 鏃堕噸璇曪紝6 娆★紝閫€閬?0.5 / 1 / 1.5 / 2 / 2.5 绉掋€?- `buildLocked(label, run)`锛氬彧鍦ㄨ緭鍑洪噷鍑虹幇 "being used by another process" / "cannot access the file" 鏃堕噸璇曘€?
+鏈€鍚庝竴娆′粛鐒跺け璐ワ紝闂ㄧ鐓у父绾紝鑰屼笖閿欒淇℃伅浼氬啓鏄庛€岃繖鏄埆鐨勮繘绋嬮攣浣忎簡鏂囦欢锛屽幓鐪?`360rp` / `HipsDaemon`銆嶃€?*缂栬瘧閿欒涓嶆槸閿?*锛岀涓€娆″氨鍘熸牱杩斿洖鈥斺€旈噸璇曞彧瀵逛粯鐜鍣０锛屼笉鎺╃洊鐪熷け璐ャ€?
+杩欐槸 `host/verify_loop92.mjs` 閲?`rmTreeSync` 鏃╁氨鐢ㄧ潃鐨勫悓涓€鏉¤鐭╋細*retrying is not hiding the error: the last attempt still throws, and the message says what to look for.*
+
+宸茬粡鎺ヨ繘锛歚verify_loop92.mjs`銆乣verify_loop93.mjs`銆乣verify_loop94.mjs`銆乣verify_loop100.mjs`銆乣verify_loop101.mjs`銆?
+---
+
+## Loop #93 鐨勪袱澶勯棬绂佺己闄凤細涓€涓?sleep锛屽拰涓€涓畻鍑烘潵鐨勭鍙?
+涓婇潰閭ｆ绾紝鎶?loop93 浠庛€岀孩寰楁病绾跨储銆嶅彉鎴愪簡銆岀孩寰楁湁绾跨储銆嶏紝鐒跺悗闇插嚭涓や釜**鐪熺殑**闂ㄧ缂洪櫡銆?
+### 涓€涓?sleep锛堣繚鍙嶄簡 Loop #79 灏卞啓涓嬬殑瑙勭煩锛?
+`host/ssh_recorder.py` 鐨勫绾︽槸銆岀粦瀹氬畬灏辨墦鍗?`READY <port>`锛岃皟鐢ㄦ柟绛夎繖涓€琛岃€屼笉鏄?sleep銆嶁€斺€斿畠鑷繁鐨?docstring 灏辨槸杩欎箞鍐欑殑銆傝€?`verify_loop93.mjs` 褰撴椂鏄?`await sleep(1500)` 鐒跺悗绔嬪埢璁╁鎴风鍘昏繛銆?
+鏈哄櫒涓€蹇欙紝瀹㈡埛绔氨浼氬湪 recorder 缁戝畾涔嬪墠杩炶繃鍘?鈫?杩炴帴琚嫆 鈫?recorder 姘歌繙鍗″湪 `accept()` 閲岀瓑 鈫?capture 鏄┖鐨?鈫?闂ㄧ鎶?`the handshake was recorded` 澶辫触锛?*鑰屼笖娌℃湁浠讳綍绾跨储**锛坮ecorder 鐨?stderr 鏄┖鐨勶紝鍥犱负瀹冩病鍑洪敊锛屽畠鍙槸鍦ㄧ瓑锛夈€?
+Loop #79 鐨?follow-up 宸茬粡鎶婅鐭╁啓涓嬫潵浜嗭細**a gate must not guess how long a peer takes to start.** MITM 閭ｆ壒闂ㄧ鏃╁氨鏈?`host/mitm_ready.mjs` 鍦ㄧ瓑灏辩华琛岋紝recorder 鏄渶鍚庝竴涓繕鍦ㄧ敤 sleep 鐨勩€?
+鐜板湪绛夊緟閫昏緫鎶藉埌 `host/ready_line.mjs`锛坄waitForReadyLine(getText, pattern, timeoutMs)`锛夛紝`host/mitm_ready.mjs` 鏀规垚瀹冪殑钖勫皝瑁咃紝loop93 鐢ㄥ悓涓€涓欢绛?`READY <port>`锛涚瓑涓嶅埌灏辨妸 recorder 鏉€鎺夛紝骞跺湪澶辫触淇℃伅閲屽啓鏄庛€宺ecorder 娌℃湁鎶?READY銆嶃€?
+### 涓€涓畻鍑烘潵鐨勭鍙?
+闂ㄧ鍘熸潵鎶?recorder 鐨勭鍙?*鎺ㄧ畻**鍑烘潵锛歚server3.port + 1`鈥斺€斻€屾湇鍔″櫒鍗犱簡 50001锛岄偅 recorder 灏卞崰 50002銆嶃€?
+Windows 涓婃湁浜涚鍙ｆ鏄?*淇濈暀**鐨勶紙杩欏彴鏈哄櫒涓婃槸 5357 鍜?50000鈥?0059锛夛紝缁戝畾淇濈暀绔彛浼氬け璐ワ紝鑰屼笖鏄?`WSAEACCES`锛圵inError **10013**锛夛紝涓嶆槸 `EADDRINUSE`鈥斺€旈敊璇爜閮戒笉涓€鏍凤紝鐪嬮敊鏂瑰悜灏变細涓€鐩存煡銆岀鍙ｈ鍗犮€嶃€?
+recorder 鐨勭鍙ｈ窡鏈嶅姟鍣ㄧ殑绔彛**娌℃湁浠讳綍鍏崇郴**锛屾墍浠ユ湰鏉ュ氨涓嶈浠庡畠鎺ㄥ嚭鏉ャ€傜幇鍦?recorder 鑷繁缁戜竴涓复鏃剁鍙ｏ紙鐩戝惉绔彛浼?0锛夛紝骞舵妸**瀹為檯缁戝埌鐨?*绔彛鎵撳湪 `READY` 閭ｄ竴琛岄噷锛涢棬绂佺瓑閭ｄ竴琛岋紝鎷垮埌澶氬皯灏辩敤澶氬皯銆?
+椤哄甫鎶?`host/ssh_recorder.py` 鐨?`meta.json` 閲岀殑 `listen_port` 涔熸敼鎴愬疄闄呯粦鍒扮殑閭ｄ釜绔彛鈥斺€斾箣鍓嶅畠璁扮殑鏄€岄棶鐨勯偅涓鍙ｃ€嶏紝鍦?listen port = 0 鏃舵槸 0銆?
+鏁欒杩樻槸閭ｅ彞锛?*鍒敤 sleep 璧屼竴涓湁鎻℃墜鍗忚鐨勫瓙杩涚▼宸茬粡灏辩华锛屼篃鍒敤鍙︿竴涓鍙ｆ帹绠椾竴涓鍙?*銆備袱涓兘鏄嚜宸辩紪鍑烘潵鐨勫亣璁俱€?

@@ -26,12 +26,17 @@
 //
 // A timeout is not a failure here.  The caller decides what a peer that
 // never came up means; this only says "it is up" or "it is not up yet".
+//
+// The waiting itself lives in `host/ready_line.mjs`, because the rule is
+// about gates in general and not about this one MITM: `host/verify_loop93.mjs`
+// waits the same way for the SSH recorder's `READY <port>`.
+
+import { waitForReadyLine } from "./ready_line.mjs";
 
 export async function waitForMitmReady(getStderr, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (/listening on 127\.0\.0\.1:\d+/.test(getStderr())) return true;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return false;
+  return waitForReadyLine(
+    getStderr,
+    /listening on 127\.0\.0\.1:\d+/,
+    timeoutMs,
+  );
 }

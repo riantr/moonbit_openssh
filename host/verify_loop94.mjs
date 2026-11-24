@@ -46,6 +46,10 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+// The file lock that Windows real-time protection puts on an executable
+// while it scans it, and the narrow retry that survives it.
+import { spawnLocked, buildLocked } from "./win_lock.mjs";
+
 const ROOT = path.resolve(
   new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
 );
@@ -137,7 +141,7 @@ function freshBed() {
 
 function startServer() {
   return new Promise((resolve, reject) => {
-    const p = spawn(
+    const p = spawnLocked(
       OUR_SSHD,
       [
         "--host-key", path.join(BED, "hostkey"),
@@ -235,10 +239,15 @@ function runClient(port, command) {
 }
 
 function spawnSyncMoon(args) {
-  const r = spawnSync("cmd", ["/c", "moon", ...args], {
-    cwd: ROOT, encoding: "utf8", timeout: 900000,
+  // The build can lose a race with a real-time protection engine that has
+  // the output file open; `buildLocked` retries exactly that and nothing
+  // else.
+  return buildLocked("cmd/sshd", () => {
+    const r = spawnSync("cmd", ["/c", "moon", ...args], {
+      cwd: ROOT, encoding: "utf8", timeout: 900000,
+    });
+    return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
   });
-  return { code: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
 }
 
 // ------------------------------------------------------------------- the gate
