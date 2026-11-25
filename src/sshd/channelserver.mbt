@@ -188,6 +188,23 @@ pub struct ChannelReport {
   mut forward_bytes : Int32
   /// How many forwarded channels this connection served.
   mut forward_targets : Int32
+  /// How many bytes were relayed to the peer on a REMOTE forward -- the
+  /// `ssh -R` direction, where the server listens and the peer carries the
+  /// bytes.
+  ///
+  /// Zero unless the peer asked for a remote forward.  It is here for the
+  /// same reason `forward_bytes` is: "the forward worked" is a claim, and the
+  /// number of bytes that went through is the part of that claim a gate can
+  /// check against the client's own.
+  mut remote_forward_bytes : Int32
+  /// How many connections a remote forward carried to the peer.
+  mut remote_forward_connections : Int32
+  /// The port a remote forward is listening on, or 0 when there is none.
+  ///
+  /// The peer may have asked for port 0 and let the server choose, so this is
+  /// the port the listener is REALLY on: it is what the peer has to be told,
+  /// and it is the number the client prints as "Allocated port N".
+  mut remote_forward_port : Int32
   /// Whether the peer closed the channel.
   mut peer_closed : Bool
 }
@@ -829,6 +846,7 @@ pub fn[T : @transport.Transport, U] serve_channels(
   runner : CommandRunner,
   sftp : SftpProvider?,
   forward : ForwardProvider[U]?,
+  remote : RemoteForwardProvider[U]?,
 ) -> ChannelReport {
   let report = {
     peer_channel: 0U,
@@ -840,6 +858,9 @@ pub fn[T : @transport.Transport, U] serve_channels(
     sftp_requests: 0,
     forward_bytes: 0,
     forward_targets: 0,
+    remote_forward_bytes: 0,
+    remote_forward_connections: 0,
+    remote_forward_port: 0,
     peer_closed: false,
   }
   let mut peer_channel = 0U
@@ -854,33 +875,111 @@ pub fn[T : @transport.Transport, U] serve_channels(
   let mut our_channel = 0U
   // The CHANNEL_OPENs that arrived while another channel was being served.
   let queue = OpenQueue::new()
-  while !opened && tries < 64 {
+  // The remote forward, if the peer asked for one.  The state is here and
+  // not inside the request loop because the peer asks for the forward
+  // BEFORE it opens any session channel -- measured: the real client's
+  // `tcpip-forward` arrives right after the authentication, and `ssh -N`
+  // never opens a session channel at all.  A server that only answered
+  // global requests inside its session loop would never answer them.
+  let remote_state = RemoteForwardState::new()
+  while !opened && tries < 4096 {
+    // ---- wait for the SSH connection or the listening port ----
+    //
+    // The same wait the request loop does, and for the same reason: with a
+    // listening socket, the peer may go quiet -- which is exactly what
+    // `ssh -N` does -- and the connection that arrives on the listening
+    // port has to be noticed even when nothing comes over the SSH side.
+    let mut wait_for_ssh = true
+    match remote {
+      Some(provider) =>
+        match remote_state.listener {
+          Some(l) => {
+            let mask = (provider.wait_listener_fn)(l, FORWARD_WAIT_MS)
+            if mask < 0 {
+              break
+            }
+            if (mask & WAIT_LISTENER_READABLE) != 0 {
+              let step = sd_remote_forward_accept(
+                conn, counters, send_ctx, recv_ctx, provider, remote_state, our_channel,
+                queue,
+              )
+              our_channel = step.our_channel
+              report.remote_forward_connections = report.remote_forward_connections +
+                step.outcome.accepted
+              report.remote_forward_bytes = report.remote_forward_bytes +
+                step.outcome.bytes_to_peer
+              if step.outcome.peer_closed {
+                report.peer_closed = true
+              }
+              if step.listener_broken {
+                (provider.close_listener_fn)(l)
+                remote_state.listening = false
+                remote_state.listener = None
+                remote_state.listen_port = 0
+                report.remote_forward_port = 0
+              }
+              continue
+            }
+            wait_for_ssh = (mask & WAIT_SSH_READABLE) != 0
+          }
+          None => ()
+        }
+      None => ()
+    }
+    if !wait_for_ssh {
+      // Nothing happened.  No packet was read, so the counter -- which
+      // counts packets -- must not go up.
+      continue
+    }
     tries = tries + 1
     // An open that arrived while the previous channel was running comes
     // first; only then does this server read for a new one.
-    let open_payload = match queue.pop() {
-      Some(p) => p
-      None => {
-        let mut found = FixedArray::make(0, b'\x00')
-        let mut have = false
-        let mut inner = 0
-        while !have && inner < 64 {
-          inner = inner + 1
-          match sd_recv_packet(conn, counters, recv_ctx) {
-            Closed => break
-            BadPacket(_) => break
-            Packet(t, payload) =>
-              if t == @sshwire.SSH_MSG_CHANNEL_OPEN {
-                found = payload
-                have = true
-              }
-          }
-        }
-        if !have {
-          break
-        }
-        found
+    let mut open_payload = FixedArray::make(0, b'\x00')
+    let mut have = false
+    match queue.pop() {
+      Some(p) => {
+        open_payload = p
+        have = true
       }
+      None =>
+        match sd_recv_packet(conn, counters, recv_ctx) {
+          Closed => break
+          BadPacket(_) => break
+          Packet(t, payload) =>
+            if t == @sshwire.SSH_MSG_CHANNEL_OPEN {
+              open_payload = payload
+              have = true
+            } else if t == @sshwire.SSH_MSG_GLOBAL_REQUEST {
+              // The peer asked for a remote forward.  This is answered HERE
+              // and not in the request loop, because the request loop only
+              // runs once there IS a session channel.
+              let gr = match sd_parse_global_request(payload) {
+                None => continue
+                Some(v) => v
+              }
+              let outcome = sd_handle_global_request(
+                conn,
+                counters,
+                send_ctx,
+                remote,
+                remote_state,
+                gr.name,
+                gr.want_reply,
+                gr.data,
+              )
+              match outcome {
+                Bound(port) => report.remote_forward_port = port
+                Cancelled => report.remote_forward_port = 0
+                _ => ()
+              }
+            }
+        }
+    }
+    if !have {
+      // A packet that was not a channel open.  The old loop read up to 64
+      // packets looking for one; this one reads one per turn, and the
+      // counter above bounds the whole thing at 4096 -- the same total.
+      continue
     }
     match sd_parse_channel_open(open_payload) {
       None => break
@@ -1046,14 +1145,97 @@ pub fn[T : @transport.Transport, U] serve_channels(
   // acts on: every iteration reads one packet, so the bound is "how many
   // packets will this server read before it gives up on getting an exec".
   // The name is not `guard` because that is a MoonBit keyword.
+  //
+  // Loop #102: the loop also watches a LISTENING socket, because a remote
+  // forward is a socket of its own.  A peer that asked for a remote forward
+  // and then goes quiet -- which is exactly what `ssh -N -R` does -- leaves
+  // this server with nothing to read on the SSH connection and a connection
+  // waiting on the listening port.  Waiting for the SSH connection alone
+  // would never notice it; waiting for the listener alone would never see
+  // the peer's answer.  So the wait is over both.
+  //
+  // The listening socket, when there is one, and the address and port it is
+  // really on (the peer may have asked for port 0 and let the server pick).
   let mut rounds = 0
   while rounds < 4096 {
+    // ---- wait for the SSH connection or the listener ----
+    //
+    // The wait only happens when there IS a listener.  With no listener
+    // there is nothing to wait for but the SSH connection, and the read
+    // below blocks by itself -- which is how this loop has always worked.
+    let mut wait_for_ssh = true
+    match remote {
+      Some(provider) =>
+        match remote_state.listener {
+          Some(l) => {
+            let mask = (provider.wait_listener_fn)(l, FORWARD_WAIT_MS)
+            if mask < 0 {
+              break
+            }
+            if (mask & WAIT_LISTENER_READABLE) != 0 {
+              // ---- a connection arrived on the listening port ----
+              let step = sd_remote_forward_accept(
+                conn, counters, send_ctx, recv_ctx, provider, remote_state, our_channel,
+                queue,
+              )
+              our_channel = step.our_channel
+              report.remote_forward_connections = report.remote_forward_connections +
+                step.outcome.accepted
+              report.remote_forward_bytes = report.remote_forward_bytes +
+                step.outcome.bytes_to_peer
+              if step.outcome.peer_closed {
+                report.peer_closed = true
+              }
+              if step.listener_broken {
+                // The listener is broken.  Stop watching it rather than
+                // spinning on a socket that will never work again.
+                (provider.close_listener_fn)(l)
+                remote_state.listening = false
+                remote_state.listener = None
+                remote_state.listen_port = 0
+                report.remote_forward_port = 0
+              }
+              continue
+            }
+            wait_for_ssh = (mask & WAIT_SSH_READABLE) != 0
+          }
+          None => ()
+        }
+      None => ()
+    }
+    if !wait_for_ssh {
+      // Nothing happened.  This is not a round: no packet was read, so
+      // the round counter -- which counts packets -- must not go up.
+      continue
+    }
     rounds = rounds + 1
     match sd_recv_packet(conn, counters, recv_ctx) {
       Closed => break
       BadPacket(_) => break
       Packet(t, payload) => {
         if t == @sshwire.SSH_MSG_GLOBAL_REQUEST {
+          // The peer asked for a remote forward, or asked for one to stop.
+          // The rules are in `src/sshd/remotefwd.mbt`; the sockets are in
+          // the driver.
+          let gr = match sd_parse_global_request(payload) {
+            None => continue
+            Some(v) => v
+          }
+          let outcome = sd_handle_global_request(
+            conn,
+            counters,
+            send_ctx,
+            remote,
+            remote_state,
+            gr.name,
+            gr.want_reply,
+            gr.data,
+          )
+          match outcome {
+            Bound(port) => report.remote_forward_port = port
+            Cancelled => report.remote_forward_port = 0
+            _ => ()
+          }
           // `no-more-sessions@openssh.com` and `hostkeys-00@openssh.com`,
           // both with want_reply=FALSE.  The real server answers neither,
           // and a server that answered would put a packet in the peer's

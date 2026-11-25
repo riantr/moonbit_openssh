@@ -205,7 +205,19 @@ async fn main {
       // The port forward's provider, the same way: the rules are in
       // `src/sshd/forward.mbt` and the sockets are here.
       let forward = make_forward_provider(conn)
-      match @sshdsrv.serve(conn, cfg, runner, Some(provider), Some(forward)) {
+      // The OTHER direction of a port forward -- `ssh -R`, where the server
+      // listens and the peer carries the bytes.  The rules are in
+      // `src/sshd/remotefwd.mbt` and the sockets are here too.
+      let remote = make_remote_forward_provider(conn)
+      match
+        @sshdsrv.serve(
+          conn,
+          cfg,
+          runner,
+          Some(provider),
+          Some(forward),
+          Some(remote),
+        ) {
         Err(e) => {
           eprintln("server_error: " + @sshdsrv.sd_server_error_label(e))
           conn.close()
@@ -239,6 +251,21 @@ async fn main {
           // can check against the client's own.
           println("forward_bytes: " + report.forward_bytes.to_string())
           println("forward_targets: " + report.forward_targets.to_string())
+          // What the REMOTE forward carried -- the `ssh -R` direction, where
+          // this server listens and the peer carries the bytes.  The port is
+          // the one the listener is really on: the peer may have asked for
+          // port 0 and let the server choose, and the number the peer was
+          // told is the number the client prints as "Allocated port N".
+          println(
+            "remote_forward_bytes: " + report.remote_forward_bytes.to_string(),
+          )
+          println(
+            "remote_forward_connections: " +
+            report.remote_forward_connections.to_string(),
+          )
+          println(
+            "remote_forward_port: " + report.remote_forward_port.to_string(),
+          )
           // Only 1 when the server READ the peer's CHANNEL_CLOSE before it
           // closed the connection.  Closing while that answer is in flight
           // is what turns the close into a TCP RESET, which discards what
@@ -295,6 +322,88 @@ fn make_forward_provider(
         FORWARD_CONNECT_TIMEOUT_MS,
       )
       report.conn
+    },
+    fn(conn : @tcp.TcpConn, n : Int32) { conn.recv_some(n) },
+    fn(conn : @tcp.TcpConn, data : FixedArray[Byte]) { conn.send(data) },
+    fn(conn : @tcp.TcpConn) { ignore(conn.shutdown_write()) },
+    fn(conn : @tcp.TcpConn) { conn.close() },
+    fn(conn : @tcp.TcpConn, timeout_ms : Int32) {
+      @tcp.wait_readable_pair(ssh_handle, conn.raw_handle(), timeout_ms)
+    },
+  )
+}
+
+///|
+/// Build the remote port forward's provider.
+///
+///   The rules are `src/sshd/remotefwd.mbt`; the sockets are here, because
+///   they are native-only work.  The same split `CommandRunner` and
+///   `SftpProvider` have.
+///
+///   The listening socket is kept in an array, and the handle the rules use
+///   is its index in that array.  The rules never look inside the handle --
+///   they hand it back -- so the driver is free to decide what it means.
+///   An index is what it means here, because the socket itself is not
+///   something the rules can hold: `src/sshd` must not depend on `src/tcp`.
+///
+///   The address is the one place where this server does NOT do what the
+///   real one does.  The real client asks for the literal string
+///   `localhost` when the user gave no bind address, and the real server
+///   answers that with TWO listeners -- `::1` and `127.0.0.1` -- which its
+///   own log shows.  This server binds ONE address, and `127.0.0.1` is the
+///   one it picks: it is the one the gate connects to, and binding both
+///   would mean two listeners and two accept loops for one forward.
+fn make_remote_forward_provider(
+  ssh_conn : @tcp.TcpConn,
+) -> @sshdsrv.RemoteForwardProvider[@tcp.TcpConn] {
+  let ssh_handle = ssh_conn.raw_handle()
+  // The listening sockets this provider has opened.  The index of a socket
+  // in here is the handle the rules hold.  The array itself is mutable --
+  // it is a reference -- so the binding does not have to be.
+  let listeners : Array[@tcp.TcpListener] = []
+  @sshdsrv.RemoteForwardProvider::make(
+    fn(address : String, port : Int32) -> @sshdsrv.RemoteListener? {
+      let host = if address == "" || address == "localhost" || address == "*" {
+        "127.0.0.1"
+      } else {
+        address
+      }
+      let l = match @tcp.TcpListener::listen(host, port) {
+        None => return None
+        Some(v) => v
+      }
+      let index = listeners.length()
+      listeners.push(l)
+      Some({ handle: index.to_int64(), port: l.port(), })
+    },
+    fn(l : @sshdsrv.RemoteListener, timeout_ms : Int32) {
+      let index = l.handle.to_int()
+      if index < 0 || index >= listeners.length() {
+        return @sshdsrv.RemoteAccept::Failed(-1)
+      }
+      match listeners[index].accept(timeout_ms) {
+        @tcp.Timeout => @sshdsrv.RemoteAccept::Timeout
+        @tcp.Failed(code) => @sshdsrv.RemoteAccept::Failed(code)
+        @tcp.Accepted(conn, ip, port) =>
+          @sshdsrv.RemoteAccept::Accepted(conn, ip, port)
+      }
+    },
+    fn(l : @sshdsrv.RemoteListener) {
+      let index = l.handle.to_int()
+      if index >= 0 && index < listeners.length() {
+        listeners[index].close()
+      }
+    },
+    fn(l : @sshdsrv.RemoteListener, timeout_ms : Int32) {
+      let index = l.handle.to_int()
+      if index < 0 || index >= listeners.length() {
+        return -1
+      }
+      @tcp.wait_readable_pair(
+        ssh_handle,
+        listeners[index].raw_handle(),
+        timeout_ms,
+      )
     },
     fn(conn : @tcp.TcpConn, n : Int32) { conn.recv_some(n) },
     fn(conn : @tcp.TcpConn, data : FixedArray[Byte]) { conn.send(data) },

@@ -96,6 +96,23 @@ pub struct ServerReport {
   forward_bytes : Int32
   /// How many forwarded channels this connection served.
   forward_targets : Int32
+  /// How many bytes were relayed to the peer on a REMOTE forward -- the
+  /// `ssh -R` direction, where the server listens and the peer carries the
+  /// bytes.
+  ///
+  /// Zero unless the peer asked for a remote forward.  It is here because
+  /// "the forward worked" is a claim, and the number of bytes that went
+  /// through is the part of that claim a gate can check against the
+  /// client's own.
+  remote_forward_bytes : Int32
+  /// How many connections a remote forward carried to the peer.
+  remote_forward_connections : Int32
+  /// The port a remote forward is listening on, or 0 when there is none.
+  ///
+  /// The peer may have asked for port 0 and let the server choose, so this
+  /// is the port the listener is REALLY on: it is what the peer has to be
+  /// told, and it is the number the client prints as "Allocated port N".
+  remote_forward_port : Int32
   /// Whether the peer's CHANNEL_CLOSE was read before the connection closed.
   ///
   /// This is the observable side of the drain at the end of the channel
@@ -155,12 +172,17 @@ pub(all) enum ServerError {
 /// `src/sshd/forward.mbt` and the driver supplies the sockets and the wait.
 /// `None` means this server has no forwarding, and a peer that asks for one
 /// is refused by name.
+///
+/// `remote` is the same kind of thing for the OTHER direction of a port
+/// forward -- `ssh -R`, where the server listens and the peer carries the
+/// bytes.  The rules are in `src/sshd/remotefwd.mbt`.
 pub fn[T : @transport.Transport, U] serve(
   conn : T,
   cfg : ServerConfig,
   runner : CommandRunner,
   sftp : SftpProvider?,
   forward : ForwardProvider[U]?,
+  remote : RemoteForwardProvider[U]?,
 ) -> Result[ServerReport, ServerError] {
   let counters = { sent: 0, recv: 0, }
   let send_ctx = @bpacket.SendCtx::new()
@@ -450,10 +472,13 @@ pub fn[T : @transport.Transport, U] serve(
   let mut sftp_requests = 0
   let mut forward_bytes = 0
   let mut forward_targets = 0
+  let mut remote_forward_bytes = 0
+  let mut remote_forward_connections = 0
+  let mut remote_forward_port = 0
   let mut peer_closed = false
   if authenticated {
     let ch = serve_channels(
-      conn, counters, send_ctx, recv_ctx, runner, sftp, forward,
+      conn, counters, send_ctx, recv_ctx, runner, sftp, forward, remote,
     )
     command = ch.command
     exit_status = ch.exit_status
@@ -463,6 +488,9 @@ pub fn[T : @transport.Transport, U] serve(
     sftp_requests = ch.sftp_requests
     forward_bytes = ch.forward_bytes
     forward_targets = ch.forward_targets
+    remote_forward_bytes = ch.remote_forward_bytes
+    remote_forward_connections = ch.remote_forward_connections
+    remote_forward_port = ch.remote_forward_port
     peer_closed = ch.peer_closed
   }
   Ok({
@@ -482,6 +510,9 @@ pub fn[T : @transport.Transport, U] serve(
     sftp_requests,
     forward_bytes,
     forward_targets,
+    remote_forward_bytes,
+    remote_forward_connections,
+    remote_forward_port,
     peer_closed,
     packets: tries + tries2 + tries3 + tries4 + tries5,
   })

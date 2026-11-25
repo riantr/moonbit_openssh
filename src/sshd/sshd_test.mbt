@@ -1150,3 +1150,119 @@ test "t31_an_open_that_arrived_during_another_channel_is_kept" {
     None => ()
   }
 }
+
+///|
+/// Loop #102: the server's half of a REMOTE port forward (`ssh -R`).
+///
+///   The bytes below are not what this implementation decided they should
+///   be.  They are the bytes a real Win32-OpenSSH 8.0p1 server sent,
+///   captured by `host/remote_fwd_capture.py` and pinned in
+///   `host/gen_remote_fwd_vectors.py` -- so a change to the layout that the
+///   end-to-end gate would not notice (the server is TOLERANT about the
+///   fields it does not use) still breaks a unit test.
+///
+///   Two facts in those bytes are the ones the RFC leaves open:
+///
+///     * the u32 after the listen address is the port the server was
+///       LISTENING on -- 65113 -- and not the ephemeral port of the
+///       accepted connection (65114, which is the originator port);
+///     * the listen address is the EMPTY string, because that is what the
+///       client asked for.  The server echoes the address it was given and
+///       does not substitute one of its own.
+
+///|
+test "t32_the_forwarded_tcpip_open_is_the_bytes_the_real_server_sent" {
+  let want = "0000000f666f727761726465642d7463706970" +
+    "00000002" +
+    "00200000" +
+    "00008000" +
+    "00000000" +
+    "0000fe59" +
+    "000000093132372e302e302e31" +
+    "0000fe5a"
+  let got = @sshd.sd_forwarded_tcpip_open_payload(
+    2U, 2097152U, 32768U, "", 65113, "127.0.0.1", 65114,
+  )
+  sdt_eq_str(@sshd.sd_hex(got), want, "the forwarded-tcpip open")
+}
+
+///|
+test "t33_the_reply_to_a_forward_is_empty_unless_the_port_was_chosen" {
+  // A client that named the port already knows it, and the real server
+  // answers with an EMPTY payload -- measured, and pinned by Loop #78's
+  // capture: the reply carries the port only when the client asked for
+  // port 0.
+  sdt_eq_int(
+    @sshd.sd_request_success_payload(55123, 55123).length(),
+    0,
+    "a fixed port answers with nothing",
+  )
+  let chosen = @sshd.sd_request_success_payload(0, 65113)
+  sdt_eq_int(chosen.length(), 4, "port 0 answers with four bytes")
+  sdt_eq_str(@sshd.sd_hex(chosen), "0000fe59", "the port the server chose")
+}
+
+///|
+test "t34_a_tcpip_forward_request_is_read" {
+  let payload = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("tcpip-forward")),
+    FixedArray::make(1, b'\x01'),
+    @sshwire.write_ssh_string(@sshd.sd_ascii("localhost")),
+    @sshwire.write_u32(55123U),
+  ])
+  match @sshd.sd_parse_global_request(payload) {
+    None => abort("t34: the request did not parse")
+    Some(gr) => {
+      sdt_eq_str(gr.name, "tcpip-forward", "the request name")
+      if !gr.want_reply {
+        abort("t34: want_reply was lost")
+      }
+      match @sshd.sd_parse_forward_binding(gr.data) {
+        None => abort("t34: the binding did not parse")
+        Some(b) => {
+          sdt_eq_str(b.address, "localhost", "the bind address")
+          sdt_eq_int(b.port, 55123, "the bind port")
+        }
+      }
+    }
+  }
+}
+
+///|
+test "t35_a_request_that_wants_no_reply_says_so" {
+  // `no-more-sessions@openssh.com` and `hostkeys-00@openssh.com` arrive
+  // with want_reply=FALSE, and the real server answers neither.  A parser
+  // that lost the flag would have the server answer a request the peer did
+  // not ask about.
+  let payload = sdt_cat_all([
+    @sshwire.write_ssh_string(@sshd.sd_ascii("no-more-sessions@openssh.com")),
+    FixedArray::make(1, b'\x00'),
+  ])
+  match @sshd.sd_parse_global_request(payload) {
+    None => abort("t35: the request did not parse")
+    Some(gr) => {
+      sdt_eq_str(gr.name, "no-more-sessions@openssh.com", "the request name")
+      if gr.want_reply {
+        abort("t35: want_reply was not read as false")
+      }
+    }
+  }
+}
+
+///|
+test "t36_the_server_starts_with_no_forward" {
+  // A fresh server has no forward, and saying so is what makes the refusal
+  // of a SECOND forward possible: a peer that was told SUCCESS and then got
+  // nothing would wait for ever.
+  let state = @sshd.RemoteForwardState::new()
+  if state.listening {
+    abort("t36: a fresh server is not listening")
+  }
+  if state.listen_port != 0 {
+    abort("t36: a fresh server has no port")
+  }
+  match state.listener {
+    Some(_) => abort("t36: a fresh server has no listener")
+    None => ()
+  }
+}

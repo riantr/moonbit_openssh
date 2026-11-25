@@ -124,6 +124,18 @@ measured against the real `sftp-server.exe` -- but `cmd/sftp_server` drives it
 over standard input and it is not yet wired to the channel layer. That wiring
 is the next piece of work.
 
+The server also carries a **remote** port forward (`ssh -R`): the client asks
+the server to listen on a port, and every connection that arrives there is
+carried to the client over a `forwarded-tcpip` channel the *server* opens
+(RFC 4254 §7.1). The rules are in `src/sshd/remotefwd.mbt`. The reply to a
+forward for port 0 carries the port the server chose, and the reply to a
+forward for a fixed port carries nothing -- both measured against the real
+`OpenSSH-Win64` server, not recalled from the RFC. The four fields of the
+channel are the *listening* address and port first and the *originator*'s
+address and port second, and the window is 2097152 with a maximum packet of
+32768: the real client's own log says so, and the gate asserts the same bytes
+against the real server.
+
 `host/verify_loop94.mjs` is the gate (49 checks), `host/loop94_mutations.py`
 proves it would catch regressions (10/10 CAUGHT), and `host/loop94_oracle.py`
 re-measures the real `sshd` whenever the claim needs re-grounding.
@@ -203,6 +215,8 @@ through it, and asserts on transcripts rather than on the client's own report.
 
 ```powershell
 node host\verify_loop94.mjs    # 49 checks -- the server, against a real ssh.exe
+node host\verify_loop102.mjs   # 50 checks -- the server's half of `ssh -R`,
+                               #   against the real sshd AND a real ssh.exe
 node host\verify_loop93.mjs    # 28 checks -- the server: KEX + publickey auth
 node host\verify_loop54.mjs    # 16 checks -- the TOFU write-back lands
 node host\verify_loop53.mjs    # 26 checks -- host certificates, both transports
@@ -220,6 +234,7 @@ something:
 python host\loop54_mutations.py    # 3 CAUGHT, 0 MISSED
 python host\loop53_mutations.py
 python host\loop89_mutations.py    # 23 CAUGHT, 0 MISSED
+python host\loop102_mutations.py   # 12 CAUGHT, 0 MISSED
 ```
 
 **Never run two browser gates concurrently.** Each spawns Chromium, a static
@@ -302,3 +317,7 @@ defect every recent loop was written to close.
   prefix then reads one byte past the end of the string.
 - Concurrent writers of one `known_hosts` can lose an entry; there is no lock.
 - A certificate chain longer than one CA is not followed.
+- The server carries one remote port forward at a time, and one connection on
+  it at a time. A second `tcpip-forward` on the same connection is refused
+  (the real server allows several), and the address it listens on is chosen
+  by the driver rather than by `GatewayPorts`.

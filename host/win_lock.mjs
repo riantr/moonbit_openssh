@@ -55,7 +55,24 @@
 import { spawn } from "node:child_process";
 
 // The two shapes of the lock, and nothing else.
-const LOCK_TEXT = /being used by another process|cannot access the file|sharing violation/i;
+//
+// The Chinese shapes are here for a measured reason: this machine's
+// Windows is Chinese, and the linker says
+//
+//     LINK : fatal error LNK1104: 无法打开文件"...\sshd.exe"
+//
+// which is the SAME failure as the English "cannot open file" and just as
+// much a lock.  A regex that only knew the English text made the retry
+// below dead code on this machine -- measured on 2026-11-25, when a build
+// failed with LNK1104 and the retry did not fire.
+//
+// "拒绝访问" (access denied) is deliberately NOT here: that is the other
+// failure mode, the one where the protection engine strips the execute
+// permission off a fresh executable.  A retry does not fix that -- it needs
+// the ACL restored -- so pretending it is a lock would only burn the retry
+// budget and hide the real cause.
+const LOCK_TEXT =
+  /being used by another process|cannot access the file|sharing violation|另一个程序正在使用此文件|无法打开文件/i;
 
 // The backoff.  The measured lock lasted about five seconds, so the waits
 // are 0.5s, 1s, 1.5s, 2s, 2.5s: five attempts, roughly nine seconds of

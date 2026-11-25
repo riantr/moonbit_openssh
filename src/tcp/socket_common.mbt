@@ -541,6 +541,21 @@ pub fn TcpListener::close(self : TcpListener) -> Unit {
 }
 
 ///|
+/// Loop #102: the listening socket's own handle.
+///
+///   A remote port forward has to watch the SSH connection AND the listening
+///   socket at the same time -- waiting for the SSH connection alone never
+///   notices the connection that arrived on the listening port, and waiting
+///   for the listener alone never sees the peer's answer.  Both are
+///   deadlocks, and neither of them looks like a hang.
+///
+///   So the handle goes into the same wait as the SSH connection's, exactly
+///   as `TcpConn::raw_handle` does for the other half.
+pub fn TcpListener::raw_handle(self : TcpListener) -> Int64 {
+  self.handle
+}
+
+///|
 /// Big-endian u16 at `off`.
 ///
 /// Two bytes, so the result cannot overflow: the largest value is 65535,

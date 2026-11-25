@@ -12388,3 +12388,180 @@ Windows 涓婃湁浜涚鍙ｆ鏄?*淇濈暀**鐨勶紙杩欏彴鏈哄櫒�
 recorder 鐨勭鍙ｈ窡鏈嶅姟鍣ㄧ殑绔彛**娌℃湁浠讳綍鍏崇郴**锛屾墍浠ユ湰鏉ュ氨涓嶈浠庡畠鎺ㄥ嚭鏉ャ€傜幇鍦?recorder 鑷繁缁戜竴涓复鏃剁鍙ｏ紙鐩戝惉绔彛浼?0锛夛紝骞舵妸**瀹為檯缁戝埌鐨?*绔彛鎵撳湪 `READY` 閭ｄ竴琛岄噷锛涢棬绂佺瓑閭ｄ竴琛岋紝鎷垮埌澶氬皯灏辩敤澶氬皯銆?
 椤哄甫鎶?`host/ssh_recorder.py` 鐨?`meta.json` 閲岀殑 `listen_port` 涔熸敼鎴愬疄闄呯粦鍒扮殑閭ｄ釜绔彛鈥斺€斾箣鍓嶅畠璁扮殑鏄€岄棶鐨勯偅涓鍙ｃ€嶏紝鍦?listen port = 0 鏃舵槸 0銆?
 鏁欒杩樻槸閭ｅ彞锛?*鍒敤 sleep 璧屼竴涓湁鎻℃墜鍗忚鐨勫瓙杩涚▼宸茬粡灏辩华锛屼篃鍒敤鍙︿竴涓鍙ｆ帹绠椾竴涓鍙?*銆備袱涓兘鏄嚜宸辩紪鍑烘潵鐨勫亣璁俱€?
+---
+
+## Loop #102: the server's half of a REMOTE port forward (`ssh -R`)
+
+### What was missing
+
+`cmd/sshd` answered every global request with silence.  `ssh -R 55123:target:5432
+host` asks the SERVER to listen on a port and to carry every connection that
+arrives there to the CLIENT over a channel the SERVER opens (RFC 4254 section
+7.1).  Loop #78 wrote the client half of that; Loop #101 wrote the server's
+half of `ssh -L` (`direct-tcpip`); the server's half of `ssh -R` did not exist
+at all.
+
+### The request arrives BEFORE any session channel, and that is not a detail
+
+The real server's own log says, for one `ssh -N -R`:
+
+```
+debug3: receive packet: type 80        <- GLOBAL_REQUEST  tcpip-forward
+debug1: server_input_global_request: rtype tcpip-forward want_reply 1
+debug1: server_input_global_request: tcpip-forward listen localhost port 55123
+debug3: send packet: type 81           -> REQUEST_SUCCESS
+debug3: receive packet: type 80        <- GLOBAL_REQUEST  no-more-sessions@openssh.com
+debug1: channel 2: new [forwarded-tcpip]
+debug3: send packet: type 90           -> CHANNEL_OPEN  forwarded-tcpip
+debug3: receive packet: type 91        <- CHANNEL_OPEN_CONFIRMATION
+```
+
+Two things follow, and both of them are load-bearing:
+
+* **The request arrives before any session channel.**  `ssh -N` -- what a remote
+  forward is normally used with -- never opens a session channel at all.  A
+  server that answers global requests only inside its session loop therefore
+  never answers them at all, and the client waits for a reply that will not
+  come.
+* **The request can ALSO arrive after one.**  `ssh -R 55123:target:5432 host
+  cmd` opens a session channel and asks for the forward in the same breath.
+  That is the ordinary command-line form.
+
+So the answer lives in TWO places, and they are two different pieces of code:
+a phase before the session channel exists, and the request loop after it.  The
+state of the forward (`RemoteForwardState`) has to survive both, which is why
+it is a struct and not a handful of locals.
+
+### Four things only a real server can settle
+
+All four were measured, not recalled:
+
+* **The success reply carries the port, and ONLY when the peer asked for port
+  0.**  With a fixed port the reply has an EMPTY payload; with port 0 the port
+  the server chose is IN the reply, which is the only way the peer can learn
+  it.  The real client's log says `remote forward success for: listen 55123`
+  in the first case and `Allocated port 59308` in the second.
+* **The channel the server opens is `forwarded-tcpip`, and its four fields are
+  in this order: the LISTEN address and port first, then the ORIGINATOR
+  address and port.**  The real client's log prints them in that order too
+  (`client_request_forwarded_tcpip: listen localhost port 55123, originator
+  127.0.0.1 port 59284`), and both addresses are TEXT.
+* **The window is 2097152 and the maximum packet 32768.**
+* **The SERVER opens the channel and the client confirms it.**  So the channel
+  number this server picks is the SENDER number, and the peer's number only
+  exists once the confirmation has arrived -- which is why the relay cannot
+  start before it.
+
+The payload is pinned against the bytes a real Win32-OpenSSH 8.0p1 server
+sent, in `host/gen_remote_fwd_vectors.py`; the unit test t32 asserts them byte
+for byte.
+
+### The address is echoed back as it was asked for
+
+The real client asks for the literal string `localhost` when the user gave no
+bind address.  The server does not substitute an address of its own: the
+`forwarded-tcpip` payload carries the address the PEER ASKED FOR.
+
+### What the gate compares, and against what
+
+`host/verify_loop102.mjs` uses two witnesses that share no code with this
+repository:
+
+* **paramiko**, through `host/loop102_peer.py`, reads the reply payloads, the
+  channel the server opens and the bytes that go through it.  The client's
+  own log cannot show the reply payload -- OpenSSH prints "Allocated port N"
+  only when the client asked for port 0 -- so the payload has to be read off
+  the wire by something else.
+* **the real `ssh.exe`**, whose DEBUG log names the channel the server opened:
+  its type, its window, its maximum packet and the four fields it carries.
+
+Every case is run TWICE -- once against our server and once against the real
+`sshd.exe` -- and the two have to agree.  A comparison with only our server in
+it would be a comparison of our server with itself.
+
+### The `session` step exists because the other steps could not see half the code
+
+Every step but one asks for the forward and never opens a session channel, so
+every step but one exercised only the phase that answers global requests
+BEFORE a session channel exists.  A server that answered them only there would
+pass every one of them, and `ssh -R ... host cmd` would hang.  The `session`
+step opens a session channel first, and it is the step that found the fact
+that this server's two phases are two different pieces of code.
+
+### What is deliberately different from the real server
+
+* **The address the server binds.**  The real server ignores the address the
+  client asked for when `GatewayPorts` is off -- the default -- and binds the
+  loopback instead (`Local forwarding listening on ::1 port 55161`).  This
+  server binds ONE address, and the driver decides which.
+* **A bind failure is a REFUSAL.**  This server answers REQUEST_FAILURE
+  (RFC 4254 section 7.1); the real server, with `GatewayPorts` off, ignores
+  the address and can bind the port anyway.  On this machine the real server
+  binds a port the gate was holding; on Linux it refuses it.  The gate prints
+  the real server's answer as a NOTE and checks the RULE on our side.
+* **One forward at a time.**  A second `tcpip-forward` on the same connection
+  is REFUSED rather than ignored.  The real server allows several.
+
+### The defect the mutation suite found in the GATE, not in the code
+
+The mutation "the reply for port 0 carries the port the peer named" made the
+peer connect to port 0, so the step stopped before it had a cancel to report,
+and the gate died on `ours.channel.cancel.ok` -- a `TypeError`, not a FAIL.
+Every check after the crash never ran, and the evidence was gone: a gate that
+dies is not a gate that reports.  The fix is one helper (`field`) that says
+whether a field is there at all, and every check now asks.
+
+The same run showed a second thing about the harness: a mutation run that is
+KILLED leaves the tree mutated, and `git status` cannot tell -- `remotefwd.mbt`
+is a new file and `channelserver.mbt` was already modified.  So this harness
+copies the originals aside before it touches anything, and the next run
+restores them: the copy is marked DONE when the run ends cleanly, and a copy
+that is NOT marked DONE is the debris of an interrupted run.  That is the
+fourth time this repository has been bitten by that (Loop #83, Loop #84, Loop
+#89, and here).  The CI's mutation tier already runs against a throwaway
+`git worktree` (`ci/sandbox.py`), so the tree that matters is never written
+to there; the fix here is at the harness level as well, so that a run that is
+cancelled LOCALLY does not leave a protocol file mutated.
+
+### The unit tests, and what happens when the machine cannot run them
+
+On this machine the two real-time protection engines (360 `360rp` and
+Huorong `HipsDaemon`) sometimes take the freshly built test binary away: the
+file cannot even be stat'ed, and `moon test` answers
+
+```
+stat "...\sshd.blackbox_test.exe": 拒绝访问。 (os error 5)
+```
+
+That is not a failing test, and it is not a passing one either -- the tests
+did not run at all.  A gate that reports it as a FAIL teaches the reader to
+ignore red; a gate that reports it as a PASS is a lie.  So the gate SKIPS it,
+loudly, with the reason, and the CI -- where there is no such engine -- is
+what actually runs them.  The signature is narrow on purpose: the message has
+to be about a `stat` of an `.exe` and about access being denied, so a test
+that really FAILED (which prints its own assertion) is still a FAIL.
+
+### The mutation suite
+
+`host/loop102_mutations.py` -- 12 mutations, each breaking ONE rule and
+requiring a NAMED check to go red.  **12 caught, 0 missed, 0 invalid, 0
+skipped.**
+
+Two of them are the pair that says the two phases really are two phases:
+
+  * "the global request is not answered before a session channel exists" --
+    every check that belongs to the phase BEFORE a session channel goes red,
+    and every check that belongs to the phase AFTER one stays green;
+  * "the global request is not answered after a session channel exists" --
+    exactly the other way round.
+
+That symmetry is the evidence that the `session` step measures something the
+other four steps cannot see.
+
+### The gaps this loop does not close
+
+* One remote forward at a time, and one connection on it at a time.
+* A forward that is cancelled while a connection is being carried is not
+  interrupted; the cancel is answered after the connection ends.
+* The binding address the server listens on is chosen by the driver, not by
+  `GatewayPorts`.
