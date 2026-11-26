@@ -1174,6 +1174,28 @@ pub fn[T : @transport.Transport] live_auth(
 }
 
 ///|
+/// `live_auth`, with the signing curve named.
+///
+/// Loop #103: the same reason `live_exec_io_curve` exists -- a client that
+/// signs with the key **file** it was given has to sign with that file's
+/// curve, and a P-384 key signed as P-256 is refused by the server for
+/// being of the wrong key type.
+///
+/// `live_auth` stays, and stays P-256, so every existing caller keeps the
+/// exact behaviour it had.
+pub fn[T : @transport.Transport] live_auth_curve(
+  conn : T,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  curve : @ecdsa.Curve,
+  kh : @knownhosts.KnownHostsPolicy,
+) -> AuthResult {
+  let (res, _st) = live_auth_curve_with_state(conn, x, user, d, curve, kh)
+  res
+}
+
+///|
 /// `live_auth`,但把 `SessionState` 一并带出来。
 ///
 /// Loop #35 要在认证通过之后继续开通道跑远端命令,而通道层的每个包都得用
@@ -1452,7 +1474,42 @@ pub fn[T : @transport.Transport] live_exec_io(
   envs : Array[EnvVar],
   kh : @knownhosts.KnownHostsPolicy,
 ) -> ExecOutcome {
-  let (auth, state_opt) = live_auth_with_state(conn, x, user, d, kh)
+  live_exec_io_curve(
+    conn,
+    x,
+    user,
+    d,
+    @ecdsa.Curve::p256(),
+    command,
+    stdin_data,
+    envs,
+    kh,
+  )
+}
+
+///|
+/// `live_exec_io`, with the signing curve named.
+///
+/// Loop #103: a client that signs with the key **file** it was given needs
+/// the file's curve, not a fixed one.  `src/keyfile` reads `nistp256`,
+/// `nistp384` and `nistp521`, and a P-384 key signed as P-256 is refused
+/// by the server for being of the wrong key type -- which reads like an
+/// authorization failure and is not one.
+///
+/// The curve-free entry point stays, and stays P-256, so every existing
+/// caller keeps the exact behaviour it had.
+pub fn[T : @transport.Transport] live_exec_io_curve(
+  conn : T,
+  x : @bigint.BigNat,
+  user : String,
+  d : @bigint.BigNat,
+  curve : @ecdsa.Curve,
+  command : String,
+  stdin_data : FixedArray[Byte],
+  envs : Array[EnvVar],
+  kh : @knownhosts.KnownHostsPolicy,
+) -> ExecOutcome {
+  let (auth, state_opt) = live_auth_curve_with_state(conn, x, user, d, curve, kh)
   match auth {
     Authenticated(_) => ()
     Failed(e) => return ExecOutcome::AuthFailed(e)

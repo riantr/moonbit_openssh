@@ -1,0 +1,22 @@
+import {
+  "moonbitlang/core/env",
+  "moonbitlang/core/encoding/utf8",
+  "riantr/moonbit_openssh/src/bigint",
+  "riantr/moonbit_openssh/src/ecdsa",
+  "riantr/moonbit_openssh/src/keyfile",
+  "riantr/moonbit_openssh/src/knownhosts",
+  "riantr/moonbit_openssh/src/scp" @scplib,
+  "riantr/moonbit_openssh/src/sshclient",
+  "riantr/moonbit_openssh/src/sshcopyid",
+  "riantr/moonbit_openssh/src/tcp",
+}
+
+pkgtype(kind: "executable")
+
+///| Native only: this driver opens a TCP connection and reads the local
+/// disk through `src/scp`'s Win32 bindings.  The library it drives
+/// (`src/sshcopyid`) still builds on all four targets -- that is where the
+/// rules live and where the tests run.
+options(
+  supported_targets: "+native",
+)

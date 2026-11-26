@@ -1,0 +1,52 @@
+///| `src/sshcopyid` -- the rules of `ssh-copy-id`, without the transport.
+///
+/// Loop #103.  Upstream's `ssh-copy-id` is a POSIX shell script that installs
+/// public keys into a remote account's `authorized_keys`.  This package holds
+/// everything about that tool that is a **rule** rather than a transport:
+///
+///   * `args.mbt`  -- the option table (upstream's getopts string
+///     `"io:p:F:t:fnsxh?"`) and the refusals it prints,
+///   * `msg.mbt`   -- the sentences, read out of the real script's own bytes
+///     (captured by `host/copyid_probe.sh`, compared by
+///     `host/verify_loop103.mjs`),
+///   * `install.mbt` -- the remote command, in the two shapes a server can
+///     actually run,
+///   * `flow.mbt`  -- the order of the steps and the exit status they leave.
+///
+/// ## Why the sentences live here and not in the driver
+///
+/// The driver in `cmd/ssh_copy_id` may translate between our error types and
+/// the words OpenSSH prints.  It may not decide anything.  A sentence that
+/// lives in the driver is a sentence no unit test can pin and no mutation can
+/// aim at, and this tool's entire observable surface on a POSIX server is its
+/// sentences: the install itself happens on the far side of a connection.
+///
+/// ## What is measured and what is copied
+///
+/// The upstream script is 368 lines of `/bin/sh` and it cannot run on a
+/// Windows server at all -- measured, not guessed: it exits 0, prints
+/// "Number of key(s) added: 1", and the key is never written, because the
+/// Windows `sshd` runs remote commands through `cmd.exe /c "..."` and the
+/// script's `exec sh -c '...'` is not a command there.
+///
+/// So the sentences and the POSIX command are **copied from upstream's own
+/// captured bytes** (the oracle is `host/copyid_probe.sh`, which runs the
+/// real script with a stand-in `ssh` and keeps every byte it produces, and
+/// `host/verify_loop103.mjs`, which compares the two byte for byte),
+/// and the Windows command is **measured**: `more >> file` was tried and
+/// rejected because it appends two CRLFs the input did not have, and
+/// `powershell -NoProfile -EncodedCommand` was measured to append the
+/// input byte for byte.
+///
+/// ## The one deliberate difference
+///
+/// Upstream reports success it did not check for.  This tool authenticates
+/// with the key it just installed and says so when the server does not
+/// accept it.  The divergence is in `flow.mbt` and it is the reason this
+/// loop exists at all.
+import {
+  "moonbitlang/core/encoding/base64",
+  "moonbitlang/core/encoding/utf8",
+}
+
+pkgtype(kind: "library")

@@ -140,6 +140,27 @@ against the real server.
 proves it would catch regressions (10/10 CAUGHT), and `host/loop94_oracle.py`
 re-measures the real `sshd` whenever the claim needs re-grounding.
 
+## The tools
+
+The OpenSSH command-line tools are being rebuilt one at a time, and each one is
+measured against the **real** script before it is written:
+
+- `cmd/ssh_copy_id` is `ssh-copy-id`. Upstream's is a POSIX shell script, and on
+  a Windows server it exits 0, prints `Number of key(s) added: 1`, and installs
+  nothing -- the remote command it sends is `exec sh -c '...'`, which
+  `cmd.exe` cannot run. This build asks the far side what it is first
+  (`echo %OS%`), sends a POSIX one-liner to a POSIX server and
+  `powershell -NoProfile -EncodedCommand` to a Windows one, and then
+  **authenticates with the key it just installed**: if the server refuses it,
+  the tool says so and exits 1 instead of claiming success. The sentences are
+  upstream's own bytes, captured from the real script in the same run and
+  compared byte for byte; two of upstream's quirks (the `-f` sentence with an
+  empty path, the "too many arguments" sentence with an empty list) are kept on
+  purpose. `host/verify_loop103.mjs` is the gate (42 checks).
+  `docs/sshcopyid/loop103-summary.md` has the measurements.
+- `cmd/ssh_keygen`, `cmd/ssh_keyscan`, `cmd/scp` and `cmd/sftp_server` are
+  already here; `ssh-agent`/`ssh-add` are the agent pair.
+
 ## Build and test
 
 ```powershell
@@ -214,6 +235,8 @@ self-contained run that starts its own man in the middle, drives the client
 through it, and asserts on transcripts rather than on the client's own report.
 
 ```powershell
+node host\verify_loop103.mjs   # 42 checks -- ssh-copy-id, against the real
+                               #   upstream script and a real Windows sshd
 node host\verify_loop94.mjs    # 49 checks -- the server, against a real ssh.exe
 node host\verify_loop102.mjs   # 50 checks -- the server's half of `ssh -R`,
                                #   against the real sshd AND a real ssh.exe
@@ -235,6 +258,7 @@ python host\loop54_mutations.py    # 3 CAUGHT, 0 MISSED
 python host\loop53_mutations.py
 python host\loop89_mutations.py    # 23 CAUGHT, 0 MISSED
 python host\loop102_mutations.py   # 12 CAUGHT, 0 MISSED
+python host\loop103_mutations.py   # 8 CAUGHT, 0 MISSED
 ```
 
 **Never run two browser gates concurrently.** Each spawns Chromium, a static
@@ -255,6 +279,8 @@ src/
   khfile/ khstore/                      where a TOFU write-back goes
                                         (native file / browser IndexedDB)
   sftp/ sftpserver/ sftpdrive/ scp/     SFTP both ends, and scp
+  sshcopyid/                           ssh-copy-id: the sentences, the order,
+                                        the two remote commands
   bpacket/ channel/                     the packet and channel layer
   sshclient/ wtlive/                    the two transport adapters
   socket/ tcp/ ws_socket/ wt_socket/    byte-stream seams, one per target
@@ -270,6 +296,7 @@ cmd/
   wt_ssh/                               the browser client
   ssh_agent/ ssh_add/                   the agent daemon and its client
   ssh_keygen/ ssh_keyscan/              make, read, rewrite, scan keys
+  ssh_copy_id/                          ssh-copy-id
   scp/ sftp_server/ sftp_mitm/          the scp and SFTP drivers the gates use
   main/                                 the 4-target byte-exact demo
   *_test/ *_kat/ *_probe/ bench_*/      known-answer, property and bench drivers
@@ -316,6 +343,10 @@ defect every recent loop was written to close.
   `riantr/moonbit_openssh` is one byte shorter than the old one, and the stale
   prefix then reads one byte past the end of the string.
 - Concurrent writers of one `known_hosts` can lose an entry; there is no lock.
+- `ssh-copy-id` refuses `-s` (install over sftp) with a sentence of its own:
+  this build has no sftp install path. It also honours only three of the `-o`
+  options (`UserKnownHostsFile=`, `StrictHostKeyChecking=`, `Port=`); the rest
+  are echoed in the closing sentence, as upstream prints them, and ignored.
 - A certificate chain longer than one CA is not followed.
 - The server carries one remote port forward at a time, and one connection on
   it at a time. A second `tcpip-forward` on the same connection is refused
