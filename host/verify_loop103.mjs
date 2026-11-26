@@ -237,13 +237,19 @@ const unit = run("moon", ["test", "-p", "src/sshcopyid"], { cwd: ROOT });
 if (unit.code === 0) {
   ok("the src/sshcopyid unit tests pass", true, unit.stdout.trim().split("\n").pop() || "");
 } else {
+  // A failing unit test is a FAIL.  Only the one failure this machine
+  // produces on its own -- the real-time protection holding the test
+  // executable -- is a SKIP, because that is a machine that cannot run the
+  // check, not a tree that fails it.
   const av = /access is denied|拒绝访问/i.test(unit.stdout + unit.stderr);
-  skip(
-    "the src/sshcopyid unit tests",
-    av
-      ? "this machine's real-time protection is holding the test executable (a known trap; the cloud CI runs them)"
-      : unit.stdout.slice(0, 400),
-  );
+  if (av) {
+    skip(
+      "the src/sshcopyid unit tests",
+      "this machine's real-time protection is holding the test executable (a known trap; the cloud CI runs them)",
+    );
+  } else {
+    ok("the src/sshcopyid unit tests pass", false, unit.stdout.slice(-400));
+  }
 }
 
 // ---- 1. the bed --------------------------------------------------------
