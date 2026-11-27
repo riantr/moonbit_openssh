@@ -1,4 +1,5 @@
-///| Loop #103: the order of the steps.
+///|
+/// Loop #103: the order of the steps.
 ///
 /// This is upstream's order, and the order is load-bearing:
 ///
@@ -107,7 +108,8 @@ pub fn run_copy_id(
         return r
       }
       // ---- 5. install ----------------------------------------------------
-      let probe = match (io.exec_fn)(priv_path, os_probe_command(), empty_bytes()) {
+      let probe = match
+        (io.exec_fn)(priv_path, os_probe_command(), empty_bytes()) {
         CopyIdExec::Failed(why) => {
           push_text(r, prog, CopyIdText::Filter(why))
           r.status = 1
@@ -127,14 +129,13 @@ pub fn run_copy_id(
           r.status = 1
           return r
         }
-        CopyIdExec::Done(_, err, status) => {
+        CopyIdExec::Done(_, err, status) =>
           if status != 0 {
             let why = if err != "" { err } else { "the remote command failed" }
             push_text(r, prog, CopyIdText::Filter(why))
             r.status = 1
             return r
           }
-        }
       }
       // ---- 6. did the key take effect? -----------------------------------
       match (io.auth_fn)(priv_path) {
@@ -150,7 +151,7 @@ pub fn run_copy_id(
           r.status = 1
           return r
         }
-        CopyIdAuth::Failed(_) => {
+        CopyIdAuth::Failed(_) =>
           // The install itself worked; what failed is the check.  Saying so
           // is enough -- the status stays 0 because nothing here says the
           // install did not happen.
@@ -161,7 +162,6 @@ pub fn run_copy_id(
               "; the check could not be run, so the server's answer is unknown.",
             ),
           )
-        }
       }
       // ---- 7. the closing block ------------------------------------------
       // Upstream computes `PRIV_ID_FILE` only when `-f` was **not** given
@@ -221,9 +221,7 @@ fn resolve_source(
           Some(_) => true
         }
         if !pub_ok {
-          return Err(
-            CopyIdText::CannotOpen(pub_path, (io.reason_fn)(), None),
-          )
+          return Err(CopyIdText::CannotOpen(pub_path, (io.reason_fn)(), None))
         }
         let priv_ok = match (io.read_fn)(priv_path) {
           None => false
@@ -231,17 +229,13 @@ fn resolve_source(
         }
         if !priv_ok {
           return Err(
-            CopyIdText::CannotOpen(
-              priv_path,
-              (io.reason_fn)(),
-              Some(pub_path),
-            ),
+            CopyIdText::CannotOpen(priv_path, (io.reason_fn)(), Some(pub_path)),
           )
         }
       }
       Ok(Source::Found(pub_path, priv_path))
     }
-    None => {
+    None =>
       match default_pub_id_file(io) {
         None => Ok(Source::None)
         Some(pub_path) => {
@@ -249,7 +243,6 @@ fn resolve_source(
           Ok(Source::Found(pub_path, priv_path))
         }
       }
-    }
   }
 }
 
@@ -271,7 +264,8 @@ fn default_pub_id_file(io : CopyIdIo) -> String? {
   let mut i = 0
   while i < names.length() {
     let name = names[i]
-    if has_prefix(name, "id") && has_suffix(name, ".pub") &&
+    if has_prefix(name, "id") &&
+      has_suffix(name, ".pub") &&
       !has_suffix(name, "-cert.pub") {
       let path = dir + "/" + name
       let mtime = match (io.stat_fn)(path) {
@@ -314,11 +308,7 @@ fn string_less(a : String, b : String) -> Bool {
 
 ///|
 /// Push a sentence's lines into the result, on the stream it belongs to.
-fn push_text(
-  r : CopyIdResult,
-  prog : String,
-  t : CopyIdText,
-) -> Unit {
+fn push_text(r : CopyIdResult, prog : String, t : CopyIdText) -> Unit {
   let (lines, to_stderr) = copy_id_text(prog, t)
   for i in 0..<lines.length() {
     if to_stderr {

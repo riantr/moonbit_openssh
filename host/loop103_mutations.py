@@ -66,9 +66,14 @@ MUTATIONS = [
         # The POSIX command is upstream's own bytes, captured from the real
         # script's argv.  One space is the whole difference between "the
         # same command" and "a command that looks like it".
+        #
+        # The anchor is the template constant, not the old `+`-concatenation:
+        # the literal had to move into a constant of its own so that the JS
+        # backend would not fold it into a template literal (see AGENTS.md,
+        # Loop #103).
         "the posix command loses a space",
-        '"exec sh -c \' cd; umask 077; AUTH_KEY_FILE=\\"" +\n',
-        '"exec sh -c \' cd;umask 077; AUTH_KEY_FILE=\\"" +\n',
+        'exec sh -c \' cd; umask 077; AUTH_KEY_FILE=\\"@TARGET@\\";',
+        'exec sh -c \' cd;umask 077; AUTH_KEY_FILE=\\"@TARGET@\\";',
         "the command our source builds is upstream's own bytes, byte for byte",
     ),
     (

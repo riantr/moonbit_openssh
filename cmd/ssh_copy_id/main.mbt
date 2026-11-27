@@ -53,7 +53,11 @@ fn run(
 ) -> Unit {
   let io : @sshcopyid.CopyIdIo = {
     home: home_dir(),
-    exec_fn: fn(priv_path : String, command : String, stdin : FixedArray[Byte]) {
+    exec_fn: fn(
+      priv_path : String,
+      command : String,
+      stdin : FixedArray[Byte],
+    ) {
       run_remote(o, priv_path, command, stdin)
     },
     auth_fn: fn(priv_path : String) { probe_auth(o, priv_path) },
@@ -175,7 +179,9 @@ fn identity_of(
         )
       }
     Ed25519(_, _) =>
-      Err("the key " + path + " is ed25519, and this build signs ECDSA keys only")
+      Err(
+        "the key " + path + " is ed25519, and this build signs ECDSA keys only",
+      )
     Unsupported(why) => Err(path + ": " + why)
     Malformed(why) => Err(path + ": " + why)
     WrongPassphrase(why) => Err(path + ": " + why)
@@ -274,11 +280,7 @@ fn identity_candidates(
       @sshcopyid.has_suffix(name, ".pub") &&
       !@sshcopyid.has_suffix(name, "-cert.pub") {
       let pub_path = dir + "/" + name
-      let priv_key = @sshcopyid.substring_of(
-        pub_path,
-        0,
-        pub_path.length() - 4,
-      )
+      let priv_key = @sshcopyid.substring_of(pub_path, 0, pub_path.length() - 4)
       let readable = match (fs.read_fn)(priv_key) {
         None => false
         Some(_) => true
@@ -431,7 +433,8 @@ fn auth_error_text(e : @sshclient.AuthError) -> String {
     @sshclient.AuthError::Transport(se) => session_error_text(se)
     @sshclient.AuthError::SignFailed => "the key could not be used to sign"
     @sshclient.AuthError::NoAuthReply => "the server did not answer"
-    @sshclient.AuthError::BadPacket(_) => "the server sent a packet that made no sense"
+    @sshclient.AuthError::BadPacket(_) =>
+      "the server sent a packet that made no sense"
   }
 }
 

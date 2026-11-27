@@ -1,4 +1,5 @@
-///| Loop #103: what a run of `ssh-copy-id` is made of.
+///|
+/// Loop #103: what a run of `ssh-copy-id` is made of.
 ///
 /// The option table is upstream's: the getopts string in the real script is
 /// `"io:p:F:t:fnsxh?"`, so `-i` takes an **optional** argument (the script

@@ -1509,7 +1509,9 @@ pub fn[T : @transport.Transport] live_exec_io_curve(
   envs : Array[EnvVar],
   kh : @knownhosts.KnownHostsPolicy,
 ) -> ExecOutcome {
-  let (auth, state_opt) = live_auth_curve_with_state(conn, x, user, d, curve, kh)
+  let (auth, state_opt) = live_auth_curve_with_state(
+    conn, x, user, d, curve, kh,
+  )
   match auth {
     Authenticated(_) => ()
     Failed(e) => return ExecOutcome::AuthFailed(e)

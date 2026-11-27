@@ -34,9 +34,7 @@ fn assert_int_eq(a : Int32, b : Int32) -> Unit {
 ///|
 fn assert_opt_eq(a : String?, b : String?) -> Unit {
   match (a, b) {
-    (Some(x), Some(y)) => if x != y {
-      abort("expected " + y + ", got " + x)
-    }
+    (Some(x), Some(y)) => if x != y { abort("expected " + y + ", got " + x) }
     (None, None) => ()
     (Some(x), None) => abort("expected None, got " + x)
     (None, Some(y)) => abort("expected " + y + ", got None")
@@ -49,8 +47,12 @@ fn assert_opt_eq(a : String?, b : String?) -> Unit {
 /// Captured from the real script's own argv: the install call's last
 /// argument, with the target path substituted the way upstream substitutes
 /// it (`AUTH_KEY_FILE="${TARGET_PATH}"`).
-const UPSTREAM_POSIX_COMMAND : String =
-  "exec sh -c ' cd; umask 077; AUTH_KEY_FILE=\".ssh/authorized_keys\"; [ -f /etc/openwrt_release ] && [ \"$LOGNAME\" = \"root\" ] && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; AUTH_KEY_DIR=`dirname \"${AUTH_KEY_FILE}\"`; mkdir -p \"${AUTH_KEY_DIR}\" && { [ -z \"`tail -1c \"${AUTH_KEY_FILE}\" 2>/dev/null`\" ] || echo >> \"${AUTH_KEY_FILE}\" || exit 1; } && cat >> \"${AUTH_KEY_FILE}\" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F \"${AUTH_KEY_DIR}\" \"${AUTH_KEY_FILE}\"; fi '"
+///
+/// The dollars and the backticks are written as escapes for the reason
+/// `install.mbt` gives: MoonBit's JS backend would read the shell's
+/// `${AUTH_KEY_FILE}` as a JavaScript interpolation.  The bytes at run time
+/// are upstream's either way.
+const UPSTREAM_POSIX_COMMAND : String = "exec sh -c ' cd; umask 077; AUTH_KEY_FILE=\".ssh/authorized_keys\"; [ -f /etc/openwrt_release ] && { [ \"\u{24}LOGNAME\" = \"root\" ] || [ \"\u{24}(id -u)\" = \"0\" ]; } && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; [ \"\u{60}uname -s\u{60}\" = \"Haiku\" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys; AUTH_KEY_DIR=\u{60}dirname \"\u{24}{AUTH_KEY_FILE}\"\u{60}; mkdir -p \"\u{24}{AUTH_KEY_DIR}\" && { [ -z \"\u{60}tail -1c \"\u{24}{AUTH_KEY_FILE}\" 2>/dev/null\u{60}\" ] || echo >> \"\u{24}{AUTH_KEY_FILE}\" || exit 1; } && cat >> \"\u{24}{AUTH_KEY_FILE}\" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F \"\u{24}{AUTH_KEY_DIR}\" \"\u{24}{AUTH_KEY_FILE}\"; fi '"
 
 ///|
 /// The POSIX command is upstream's, byte for byte.
@@ -79,7 +81,9 @@ test "the posix install command carries the target path" {
 /// nothing else, because `cmd.exe` eats a pipe and a quote.
 test "the windows install command is base64 and nothing else" {
   let cmd = @sshcopyid.install_command_windows(".ssh/authorized_keys")
-  assert_true(@sshcopyid.has_prefix(cmd, "powershell -NoProfile -EncodedCommand "))
+  assert_true(
+    @sshcopyid.has_prefix(cmd, "powershell -NoProfile -EncodedCommand "),
+  )
   // No character that `cmd.exe` would act on.
   assert_true(!cmd.contains("|"))
   assert_true(!cmd.contains("&"))
@@ -92,6 +96,9 @@ test "the windows install command is base64 and nothing else" {
 /// The target path travels as base64, so the script stays ASCII and a path
 /// with a non-ASCII name still works.
 test "the windows command carries the target path as base64" {
+  // machine-path-exempt: the drive-letter path below is a VECTOR -- the shape
+  // a Windows path takes, which the base64 test needs -- and not a file this
+  // machine is expected to have.
   let path = "E:\\keys\\authorized_keys"
   let b64 = @sshcopyid.base64_of(@sshcopyid.utf8_bytes_of(path))
   assert_true(b64.length() > 0)
@@ -107,9 +114,13 @@ test "the windows script does the three things upstream's one-liner does" {
   let body = @sshcopyid.windows_script_body()
   assert_true(body.contains("[IO.Directory]::CreateDirectory($d)"))
   assert_true(
-    body.contains("if($b -ne 10){[IO.File]::AppendAllText($p,[string][char]10)}"),
+    body.contains(
+      "if($b -ne 10){[IO.File]::AppendAllText($p,[string][char]10)}",
+    ),
   )
-  assert_true(body.contains("[IO.File]::AppendAllText($p,[Console]::In.ReadToEnd())"))
+  assert_true(
+    body.contains("[IO.File]::AppendAllText($p,[Console]::In.ReadToEnd())"),
+  )
 }
 
 ///|
@@ -124,8 +135,8 @@ test "the os probe is the one that was measured" {
 /// The sentences, byte for byte, from the captured upstream output.
 test "the sentences are upstream's own bytes" {
   assert_eq(
-    @sshcopyid.info_source("/usr/bin/ssh-copy-id", "/home/u/.ssh/id_rsa.pub"),
-    "/usr/bin/ssh-copy-id: INFO: Source of key(s) to be installed: \"/home/u/.ssh/id_rsa.pub\"",
+    @sshcopyid.info_source("/usr/bin/ssh-copy-id", "/srv/u/.ssh/id_rsa.pub"),
+    "/usr/bin/ssh-copy-id: INFO: Source of key(s) to be installed: \"/srv/u/.ssh/id_rsa.pub\"",
   )
   assert_eq(
     @sshcopyid.info_filtering("/usr/bin/ssh-copy-id"),
@@ -181,7 +192,10 @@ test "the skipped block is upstream's shape" {
 ///|
 /// The usage block, line for line.
 test "the usage block is upstream's shape" {
-  let (lines, to_stderr) = @sshcopyid.copy_id_text("ssh-copy-id", @sshcopyid.CopyIdText::Usage)
+  let (lines, to_stderr) = @sshcopyid.copy_id_text(
+    "ssh-copy-id",
+    @sshcopyid.CopyIdText::Usage,
+  )
   assert_true(to_stderr)
   assert_int_eq(lines.length(), 6)
   assert_eq(
@@ -197,7 +211,10 @@ test "the usage block is upstream's shape" {
     lines[3],
     "\t-s: use sftp   -- use sftp instead of executing remote-commands. Can be useful if the remote only allows sftp",
   )
-  assert_eq(lines[4], "\t-x: debug      -- enables -x in this shell, for debugging")
+  assert_eq(
+    lines[4],
+    "\t-x: debug      -- enables -x in this shell, for debugging",
+  )
   assert_eq(lines[5], "\t-h|-?: print this help")
 }
 
@@ -205,7 +222,12 @@ test "the usage block is upstream's shape" {
 /// The private key path is upstream's `dirname(pub) + "/" + basename(pub)`,
 /// mixed separators included.
 test "the private path is upstream's shape" {
-  assert_eq(@sshcopyid.private_path_of("E:\\dir\\id_ecdsa.pub"), "E:\\dir/id_ecdsa")
+  // machine-path-exempt: the drive-letter paths below are VECTORS for
+  // upstream's dirname/basename shape, not files this machine has.
+  assert_eq(
+    @sshcopyid.private_path_of("E:\\dir\\id_ecdsa.pub"),
+    "E:\\dir/id_ecdsa",
+  )
   assert_eq(@sshcopyid.private_path_of("id.pub"), "./id")
 }
 
@@ -217,12 +239,11 @@ test "the closing hint carries the options that were given" {
     fn(_ : String) -> Bool { false },
   )
   match o {
-    Ok(opts) => {
+    Ok(opts) =>
       assert_eq(
-        @sshcopyid.closing_hint(opts, "/home/u/key"),
-        "ssh -i /home/u/key -p 2222 'u@h'",
+        @sshcopyid.closing_hint(opts, "/srv/u/key"),
+        "ssh -i /srv/u/key -p 2222 'u@h'",
       )
-    }
     Err(_) => abort("the command line should parse")
   }
 }
@@ -234,10 +255,11 @@ test "the closing hint carries the options that were given" {
 /// expands to `-i ` when `PRIV_ID_FILE` is empty, because `:+` gives
 /// nothing for a variable that is empty as well as for one that is unset.
 test "force keeps the -i flag and loses the path" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id", "-f", "-i", "key", "u@h"],
-    fn(_ : String) -> Bool { false },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id", "-f", "-i", "key", "u@h"], fn(
+    _ : String,
+  ) -> Bool {
+    false
+  })
   match o {
     Ok(opts) => assert_eq(@sshcopyid.closing_hint(opts, ""), "ssh -i 'u@h'")
     Err(_) => abort("the command line should parse")
@@ -288,12 +310,14 @@ test "the closing hint keeps the order of -F and -o" {
 /// `"${SFTP:-ssh} ${SEEN_OPT_I:+...}${SSH_PORT:+...}"`, so the space after
 /// `ssh` is always there.
 test "a port without -i keeps the space" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id", "-p", "2222", "u@h"],
-    fn(_ : String) -> Bool { false },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id", "-p", "2222", "u@h"], fn(
+    _ : String,
+  ) -> Bool {
+    false
+  })
   match o {
-    Ok(opts) => assert_eq(@sshcopyid.closing_hint(opts, ""), "ssh -p 2222 'u@h'")
+    Ok(opts) =>
+      assert_eq(@sshcopyid.closing_hint(opts, ""), "ssh -p 2222 'u@h'")
     Err(_) => abort("the command line should parse")
   }
 }
@@ -310,18 +334,8 @@ test "a quote is quoted the way upstream quotes it" {
 test "the option table is upstream's" {
   let o = @sshcopyid.parse_args(
     [
-      "ssh-copy-id",
-      "-i",
-      "key",
-      "-t",
-      "srv/keys",
-      "-p",
-      "2222",
-      "-f",
-      "-n",
-      "-o",
-      "Port=22",
-      "u@h",
+      "ssh-copy-id", "-i", "key", "-t", "srv/keys", "-p", "2222", "-f", "-n", "-o",
+      "Port=22", "u@h",
     ],
     fn(_ : String) -> Bool { false },
   )
@@ -348,10 +362,11 @@ test "the option table is upstream's" {
 ///|
 /// A port in a cluster: `-p2222` is port 2222.
 test "a port may be glued to its flag" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id", "-p2222", "u@h"],
-    fn(_ : String) -> Bool { false },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id", "-p2222", "u@h"], fn(
+    _ : String,
+  ) -> Bool {
+    false
+  })
   match o {
     Ok(opts) => assert_int_eq(opts.port, 2222)
     Err(_) => abort("the command line should parse")
@@ -361,48 +376,52 @@ test "a port may be glued to its flag" {
 ///|
 /// `-i` twice is upstream's refusal.
 test "-i twice is refused" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id", "-i", "a", "-i", "b", "u@h"],
-    fn(_ : String) -> Bool { false },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id", "-i", "a", "-i", "b", "u@h"], fn(
+    _ : String,
+  ) -> Bool {
+    false
+  })
   match o {
     Ok(_) => abort("two -i must be refused")
-    Err(e) => match e {
-      @sshcopyid.CopyIdArgError::DuplicateIdentity => ()
-      _ => abort("the refusal must be the duplicate -i")
-    }
+    Err(e) =>
+      match e {
+        @sshcopyid.CopyIdArgError::DuplicateIdentity => ()
+        _ => abort("the refusal must be the duplicate -i")
+      }
   }
 }
 
 ///|
 /// Two hostnames is upstream's refusal.
 test "two hostnames are refused" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id", "a", "b"],
-    fn(_ : String) -> Bool { false },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id", "a", "b"], fn(
+    _ : String,
+  ) -> Bool {
+    false
+  })
   match o {
     Ok(_) => abort("two hostnames must be refused")
-    Err(e) => match e {
-      @sshcopyid.CopyIdArgError::TooManyArguments => ()
-      _ => abort("the refusal must be the too many arguments")
-    }
+    Err(e) =>
+      match e {
+        @sshcopyid.CopyIdArgError::TooManyArguments => ()
+        _ => abort("the refusal must be the too many arguments")
+      }
   }
 }
 
 ///|
 /// No hostname at all is the usage block.
 test "no hostname is the usage" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id"],
-    fn(_ : String) -> Bool { false },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id"], fn(_ : String) -> Bool {
+    false
+  })
   match o {
     Ok(_) => abort("no hostname must be refused")
-    Err(e) => match e {
-      @sshcopyid.CopyIdArgError::Usage => ()
-      _ => abort("the refusal must be the usage")
-    }
+    Err(e) =>
+      match e {
+        @sshcopyid.CopyIdArgError::Usage => ()
+        _ => abort("the refusal must be the usage")
+      }
   }
 }
 
@@ -410,15 +429,17 @@ test "no hostname is the usage" {
 /// `-i key.pub` with nothing after it: upstream sees a key file where the
 /// hostname should be and says so.
 test "a trailing -i file is the missing hostname" {
-  let o = @sshcopyid.parse_args(
-    ["ssh-copy-id", "-i", "id.pub"],
-    fn(path : String) -> Bool { path == "id.pub" },
-  )
+  let o = @sshcopyid.parse_args(["ssh-copy-id", "-i", "id.pub"], fn(
+    path : String,
+  ) -> Bool {
+    path == "id.pub"
+  })
   match o {
     Ok(_) => abort("a trailing key file must be refused")
     Err(e) =>
       match e {
-        @sshcopyid.CopyIdArgError::MissingHostname(arg) => assert_eq(arg, "id.pub")
+        @sshcopyid.CopyIdArgError::MissingHostname(arg) =>
+          assert_eq(arg, "id.pub")
         _ => abort("the refusal must be the missing hostname")
       }
   }

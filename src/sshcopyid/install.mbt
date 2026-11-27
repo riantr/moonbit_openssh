@@ -1,15 +1,58 @@
-///| Loop #103: the remote command, in the two shapes a server can run.
+///|
+/// Loop #103: the remote command, in the two shapes a server can run.
 ///
 /// ## The POSIX shape is upstream's, byte for byte
 ///
-/// Upstream builds one command with `tr '\t\n' ' '` over a here-document
-/// and sends it as `exec sh -c '...'`.  The captured upstream bytes are:
+/// Upstream builds one command with `tr -s '\t\n' ' '` over a here-document
+/// and sends it as `exec sh -c '...'`.  The command is:
 ///
-///     exec sh -c ' cd; umask 077; AUTH_KEY_FILE=".ssh/authorized_keys"; [ -f /etc/openwrt_release ] && [ "$LOGNAME" = "root" ] && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; AUTH_KEY_DIR=`dirname "${AUTH_KEY_FILE}"`; mkdir -p "${AUTH_KEY_DIR}" && { [ -z "`tail -1c "${AUTH_KEY_FILE}" 2>/dev/null`" ] || echo >> "${AUTH_KEY_FILE}" || exit 1; } && cat >> "${AUTH_KEY_FILE}" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F "${AUTH_KEY_DIR}" "${AUTH_KEY_FILE}"; fi '
+///     exec sh -c ' cd; umask 077; AUTH_KEY_FILE=".ssh/authorized_keys"; [ -f /etc/openwrt_release ] && { [ "$LOGNAME" = "root" ] || [ "$(id -u)" = "0" ]; } && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; [ "`uname -s`" = "Haiku" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys; AUTH_KEY_DIR=`dirname "${AUTH_KEY_FILE}"`; mkdir -p "${AUTH_KEY_DIR}" && { [ -z "`tail -1c "${AUTH_KEY_FILE}" 2>/dev/null`" ] || echo >> "${AUTH_KEY_FILE}" || exit 1; } && cat >> "${AUTH_KEY_FILE}" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F "${AUTH_KEY_DIR}" "${AUTH_KEY_FILE}"; fi '
 ///
 /// Note the space after `sh -c '` (the here-document's first line was
 /// empty, and `tr` turned its newline into that space) and the trailing
 /// `; fi '`.  Both are upstream's and both are reproduced.
+///
+/// ## Which upstream this is
+///
+/// This is upstream's **current** command: the one in
+/// `openssh/openssh-portable` master (`contrib/ssh-copy-id`), where the
+/// OpenWrt clause accepts root by `LOGNAME` **or** by uid 0, and where a
+/// Haiku clause sets `config/settings/ssh/authorized_keys`.
+///
+/// Upstream's copy of that script is shipped by whoever packaged it -- Git
+/// for Windows here, the runner's image there -- and the two are not always
+/// the same age.  The copy on the machine that measured the sentences was
+/// older: its OpenWrt clause was `&& [ "$LOGNAME" = "root" ] &&` and it had
+/// no Haiku clause at all.  So a byte-for-byte comparison against whatever
+/// copy is on the machine cannot be the whole claim: `host/verify_loop103.mjs`
+/// compares the part upstream has **not** changed, byte for byte, and names
+/// the two clauses it leaves out (and checks those two separately, against
+/// the text above).
+///
+/// ## Why the dollars and the backticks are written as escapes
+///
+/// This command cannot be written as a plain string literal, and the reason
+/// is a compiler, not a shell.
+///
+/// MoonBit's **JS backend** emits a string literal that contains `${` or a
+/// backtick as a JavaScript **template literal**, and a template literal
+/// interpolates `${...}`.  Measured: with the command written plainly,
+/// `moon test -p src/sshcopyid --target js` died with
+/// `ReferenceError: AUTH_KEY_FILE is not defined` -- the shell's own
+/// `${AUTH_KEY_FILE}` was read as a JavaScript expression.  The same
+/// literal is fine on `native`, which is why the failure only shows up on
+/// the other targets.
+///
+/// So the dollars are written `\u{24}` and the backticks `\u{60}`: the
+/// source then contains no `${` and no backtick, the backend emits a
+/// double-quoted JavaScript string, and the bytes at run time are the same
+/// on every target.  The readable form of the command is the one in this
+/// comment, and `host/verify_loop103.mjs` checks that the two agree.
+///
+/// The target path is substituted at run time with `replace` rather than
+/// with `+`, for the same reason: a `+` with a variable is folded into a
+/// template literal by the same backend, and the command contains the
+/// `${AUTH_KEY_FILE}` that would then be interpolated.
 ///
 /// ## The Windows shape is ours, and it was measured
 ///
@@ -35,10 +78,23 @@
 ///
 /// `-EncodedCommand` also removes the quoting problem entirely: the script
 /// travels as base64, so `cmd.exe` never sees a `|`, a `>` or a quote.
+
+///|
+/// The POSIX command, with the target path left as a placeholder.
+///
+/// The placeholder is `@TARGET@`, and it stands where upstream puts
+/// `${TARGET_PATH}`.  Everything else is upstream's byte for byte; the
+/// comment above says why the dollars are escaped and why the target is
+/// substituted at run time instead of with `+`.
+const POSIX_COMMAND_TEMPLATE : String = "exec sh -c ' cd; umask 077; AUTH_KEY_FILE=\"@TARGET@\"; [ -f /etc/openwrt_release ] && { [ \"\u{24}LOGNAME\" = \"root\" ] || [ \"\u{24}(id -u)\" = \"0\" ]; } && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; [ \"\u{60}uname -s\u{60}\" = \"Haiku\" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys; AUTH_KEY_DIR=\u{60}dirname \"\u{24}{AUTH_KEY_FILE}\"\u{60}; mkdir -p \"\u{24}{AUTH_KEY_DIR}\" && { [ -z \"\u{60}tail -1c \"\u{24}{AUTH_KEY_FILE}\" 2>/dev/null\u{60}\" ] || echo >> \"\u{24}{AUTH_KEY_FILE}\" || exit 1; } && cat >> \"\u{24}{AUTH_KEY_FILE}\" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F \"\u{24}{AUTH_KEY_DIR}\" \"\u{24}{AUTH_KEY_FILE}\"; fi '"
+
+///|
+/// The command that installs the key on a POSIX server.
+///
+/// Upstream's own bytes, with the target path in the one place upstream
+/// puts it.
 pub fn install_command_posix(target : String) -> String {
-  "exec sh -c ' cd; umask 077; AUTH_KEY_FILE=\"" +
-  target +
-  "\"; [ -f /etc/openwrt_release ] && [ \"$LOGNAME\" = \"root\" ] && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; AUTH_KEY_DIR=`dirname \"${AUTH_KEY_FILE}\"`; mkdir -p \"${AUTH_KEY_DIR}\" && { [ -z \"`tail -1c \"${AUTH_KEY_FILE}\" 2>/dev/null`\" ] || echo >> \"${AUTH_KEY_FILE}\" || exit 1; } && cat >> \"${AUTH_KEY_FILE}\" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F \"${AUTH_KEY_DIR}\" \"${AUTH_KEY_FILE}\"; fi '"
+  POSIX_COMMAND_TEMPLATE.replace(old="@TARGET@", new=target)
 }
 
 ///|
@@ -79,8 +135,7 @@ pub fn probe_says_windows(answer : String) -> Bool {
 /// built by asking for UTF-8 bytes.
 pub fn install_command_windows(target : String) -> String {
   let path_b64 = base64_of(utf8_bytes_of(target))
-  let script =
-    "$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
+  let script = "$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
     path_b64 +
     "'))" +
     windows_script_body()

@@ -1,4 +1,5 @@
-///| Loop #103: the sentences `ssh-copy-id` prints.
+///|
+/// Loop #103: the sentences `ssh-copy-id` prints.
 ///
 /// Every line here was read out of the real script's own bytes, captured by
 /// `host/copyid_probe.sh` (which runs the real script with a stand-in `ssh`
@@ -54,10 +55,7 @@ pub(all) enum CopyIdText {
 /// Upstream's INFO and ERROR lines go to stderr and its closing block goes
 /// to stdout; keeping that split is what lets the gate compare the two
 /// streams separately against the real script's.
-pub fn copy_id_text(
-  prog : String,
-  t : CopyIdText,
-) -> (Array[String], Bool) {
+pub fn copy_id_text(prog : String, t : CopyIdText) -> (Array[String], Bool) {
   let out : Array[String] = []
   let mut to_stderr = true
   match t {
@@ -79,27 +77,22 @@ pub fn copy_id_text(
     }
     DuplicateIdentity => {
       out.push("")
-      out.push(
-        prog + ": ERROR: -i option must not be specified more than once",
-      )
+      out.push(prog + ": ERROR: -i option must not be specified more than once")
       out.push("")
     }
-    NoIdentityFile => {
-      out.push(prog + ": ERROR: no ID file found")
-    }
+    NoIdentityFile => out.push(prog + ": ERROR: no ID file found")
     CannotOpen(file, reason, hint) => {
       out.push("")
       out.push(
         prog + ": ERROR: failed to open ID file '" + file + "': " + reason,
       )
       match hint {
-        Some(pub_path) => {
+        Some(pub_path) =>
           out.push(
             "\t(to install the contents of '" +
             pub_path +
             "' anyway, look at the -f option)",
           )
-        }
         None => ()
       }
     }
@@ -121,9 +114,7 @@ pub fn copy_id_text(
       )
       out.push("")
     }
-    NoIdentities => {
-      out.push(prog + ": ERROR: No identities found")
-    }
+    NoIdentities => out.push(prog + ": ERROR: No identities found")
     Filter(why) => {
       out.push("")
       out.push(prog + ": ERROR: " + why)
@@ -145,9 +136,7 @@ pub fn copy_id_text(
       out.push("")
       out.push("Number of key(s) added: " + n.to_string())
       out.push("")
-      out.push(
-        "Now try logging into the machine, with: \"" + hint + "\"",
-      )
+      out.push("Now try logging into the machine, with: \"" + hint + "\"")
       out.push(
         "and check to make sure that only the key(s) you wanted were added.",
       )
@@ -161,19 +150,17 @@ pub fn copy_id_text(
       out.push(keys)
       out.push("=-=-=-=-=-=-=-=")
     }
-    NotAccepted(why) => {
+    NotAccepted(why) =>
       out.push(
         prog +
         ": WARNING: the key was written but the server did not accept it" +
         why,
       )
-    }
-    SftpNotSupported => {
+    SftpNotSupported =>
       out.push(
         prog +
         ": ERROR: this build does not install over sftp; the default remote command is the only path it has",
       )
-    }
   }
   (out, to_stderr)
 }
@@ -192,20 +179,15 @@ pub fn copy_id_arg_error(
   let out : Array[String] = []
   let mut with_usage = false
   match e {
-    CopyIdArgError::Usage => {
-      with_usage = true
-    }
+    CopyIdArgError::Usage => with_usage = true
     CopyIdArgError::DuplicateIdentity => {
       out.push("")
-      out.push(
-        prog + ": ERROR: -i option must not be specified more than once",
-      )
+      out.push(prog + ": ERROR: -i option must not be specified more than once")
       out.push("")
       with_usage = true
     }
-    CopyIdArgError::NoIdentityFile => {
+    CopyIdArgError::NoIdentityFile =>
       out.push(prog + ": ERROR: no ID file found")
-    }
     CopyIdArgError::MissingHostname(arg) => {
       out.push("")
       out.push(
@@ -280,10 +262,7 @@ pub fn info_remaining(prog : String, n : Int32) -> String {
 /// The options are upstream's `OPTS_oF`: one list holding both `-o` and
 /// `-F` in the order they were given, each written as `-<flag> '<value>'`
 /// with the value quoted by upstream's `quote()`.
-pub fn closing_hint(
-  o : CopyIdOptions,
-  priv_path : String,
-) -> String {
+pub fn closing_hint(o : CopyIdOptions, priv_path : String) -> String {
   let mut s = if o.use_sftp { "sftp " } else { "ssh " }
   if o.identity_given {
     s = s + "-i"

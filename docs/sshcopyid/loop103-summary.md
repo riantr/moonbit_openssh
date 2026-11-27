@@ -26,15 +26,38 @@ Its shape:
 | 4 | unless `-n`: send **one** remote command that appends them |
 | 5 | say how many were added |
 
-The remote command is a here-document folded with `tr '\t\n' ' '` and sent as
-`exec sh -c '...'`. Its bytes, captured from the real script's own argv:
+The remote command is a here-document folded with `tr -s '\t\n' ' '` and sent as
+`exec sh -c '...'`. Its bytes, from upstream's **current** source
+(`openssh/openssh-portable` master):
 
 ```
-exec sh -c ' cd; umask 077; AUTH_KEY_FILE=".ssh/authorized_keys"; [ -f /etc/openwrt_release ] && [ "$LOGNAME" = "root" ] && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; AUTH_KEY_DIR=`dirname "${AUTH_KEY_FILE}"`; mkdir -p "${AUTH_KEY_DIR}" && { [ -z "`tail -1c "${AUTH_KEY_FILE}" 2>/dev/null`" ] || echo >> "${AUTH_KEY_FILE}" || exit 1; } && cat >> "${AUTH_KEY_FILE}" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F "${AUTH_KEY_DIR}" "${AUTH_KEY_FILE}"; fi '
+exec sh -c ' cd; umask 077; AUTH_KEY_FILE=".ssh/authorized_keys"; [ -f /etc/openwrt_release ] && { [ "$LOGNAME" = "root" ] || [ "$(id -u)" = "0" ]; } && AUTH_KEY_FILE=/etc/dropbear/authorized_keys; [ "`uname -s`" = "Haiku" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys; AUTH_KEY_DIR=`dirname "${AUTH_KEY_FILE}"`; mkdir -p "${AUTH_KEY_DIR}" && { [ -z "`tail -1c "${AUTH_KEY_FILE}" 2>/dev/null`" ] || echo >> "${AUTH_KEY_FILE}" || exit 1; } && cat >> "${AUTH_KEY_FILE}" || exit 1; if type restorecon >/dev/null 2>&1; then restorecon -F "${AUTH_KEY_DIR}" "${AUTH_KEY_FILE}"; fi '
 ```
 
 Note the space after `sh -c '` (the here-document's first line was empty) and
 the trailing `; fi '`. Both are upstream's, and both are reproduced.
+
+### Upstream moves, and what that costs a byte-for-byte claim
+
+The copy of the script **installed on a machine** is not always the current
+one. Two copies were measured, and they differ in exactly two clauses of that
+one command:
+
+| clause | older copy (the one on this machine) | current upstream |
+|---|---|---|
+| OpenWrt | `&& [ "$LOGNAME" = "root" ] &&` | `&& { [ "$LOGNAME" = "root" ] \|\| [ "$(id -u)" = "0" ]; } &&` |
+| Haiku | *not there* | `[ "`uname -s`" = "Haiku" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys;` |
+
+So the gate takes those two clauses out of **both** sides and compares
+everything else byte for byte — and then checks the two clauses *separately*:
+ours has to be upstream's current text, and when the copy on the machine is
+new enough to have the same shape, ours has to be its bytes too. A shape the
+gate does not know is a **failure**, because it means upstream moved again and
+the command has to be measured again.
+
+This build follows upstream's current command, so on an old remote it is one
+clause ahead of the old upstream — and on a current remote it is exactly
+upstream.
 
 ## 2. What upstream does on a Windows server — measured
 
@@ -119,7 +142,7 @@ is why it can exit 0 on a server where nothing was written.
 
 ## 5. The gate
 
-`host/verify_loop103.mjs` — **42 checks**, all green.
+`host/verify_loop103.mjs` — **45 checks**, all green.
 
 The oracle is the real upstream script, run twice:
 
@@ -141,13 +164,16 @@ What the gate asserts:
 1. the install run, the dry run and the "already installed" run are byte for
    byte upstream's own output;
 2. the POSIX remote command in the source is byte for byte the command upstream
-   built in the same run;
-3. the Windows command on the wire is the base64 form, and the visible part of
+   built in the same run — outside the two clauses upstream has changed, which
+   are checked separately against upstream's current text (see §1);
+3. the readable copy of that command in the source comment is the same bytes as
+   the escaped literal the code actually builds;
+4. the Windows command on the wire is the base64 form, and the visible part of
    the decoded script is the beginning of the script this build makes;
-4. `authorized_keys` grew by exactly the `.pub` file's bytes, and those bytes
+5. `authorized_keys` grew by exactly the `.pub` file's bytes, and those bytes
    are the `.pub` file's bytes;
-5. the new key **authenticates** afterwards — with the real `ssh.exe`;
-6. upstream, on the same server, claims the key was added, changes nothing, and
+6. the new key **authenticates** afterwards — with the real `ssh.exe`;
+7. upstream, on the same server, claims the key was added, changes nothing, and
    the key does not authenticate.
 
 ### Two limits the gate states out loud
@@ -165,7 +191,39 @@ What the gate asserts:
   this repository builds. The rest of the script is pinned by the unit test and
   by the effect.
 
-## 6. What is still missing
+## 6. A compiler fact, and why the command looks escaped
+
+The POSIX command cannot be written as a plain MoonBit string literal, and the
+reason is the **JS backend**, not the shell.
+
+MoonBit's JS backend emits a string literal that contains `${` or a backtick as
+a JavaScript **template literal**, and a template literal interpolates `${...}`.
+Measured, not guessed: with the command written plainly,
+
+```
+moon test -p src/sshcopyid --target js
+  -> ReferenceError: AUTH_KEY_FILE is not defined
+```
+
+The shell's own `${AUTH_KEY_FILE}` was read as a JavaScript expression. The same
+literal is fine on `native`, so the failure only shows up on the other targets —
+which is exactly the kind of bug that a native-only tool ships with and nobody
+sees until somebody runs the whole module's tests on `js`.
+
+Two things fix it, and both are in `src/sshcopyid/install.mbt`:
+
+- the dollars are written `\u{24}` and the backticks `\u{60}`, so the *source*
+  contains no `${` and no backtick, the backend emits a double-quoted
+  JavaScript string, and the bytes at run time are the same on every target;
+- the target path is substituted at run time with `replace`, not with `+`,
+  because a `+` with a variable is folded into a template literal by the same
+  backend — and the command contains the `${AUTH_KEY_FILE}` that would then be
+  interpolated.
+
+The readable form of the command is in the source comment, and the gate checks
+that the comment and the literal are the same bytes.
+
+## 7. What is still missing
 
 - `-s` (install over sftp) is **refused**, with a sentence of our own. Upstream
   can do it; this build has no sftp install path, and pretending otherwise

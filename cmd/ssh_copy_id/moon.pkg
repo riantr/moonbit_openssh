@@ -17,6 +17,7 @@ pkgtype(kind: "executable")
 /// disk through `src/scp`'s Win32 bindings.  The library it drives
 /// (`src/sshcopyid`) still builds on all four targets -- that is where the
 /// rules live and where the tests run.
+
 options(
   supported_targets: "+native",
 )

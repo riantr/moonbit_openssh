@@ -12565,3 +12565,76 @@ other four steps cannot see.
   interrupted; the cancel is answered after the connection ends.
 * The binding address the server listens on is chosen by the driver, not by
   `GatewayPorts`.
+
+---
+
+## Loop #103: `ssh-copy-id`
+
+### What was missing
+
+The goal list's last OpenSSH tool.  Upstream's `ssh-copy-id` is a POSIX shell
+script, and on a Windows server it **reports a key it never installed**: it
+exits 0, it prints `Number of key(s) added: 1`, and `authorized_keys` did not
+change -- because a Windows `sshd` runs remote commands through
+`cmd.exe /c "..."` and upstream's `exec sh -c '...'` is not a command there.
+Measured, not guessed (the gate still measures it every run).
+
+So the tool is in `src/sshcopyid` (the rules) with a driver in
+`cmd/ssh_copy_id` (the transport), and the one deliberate difference is that
+this build **authenticates with the key it just installed** and says so --
+and exits 1 -- when the server does not accept it.
+
+### The oracle: the real script, with a stand-in for `ssh`
+
+`host/copyid_probe.sh` puts a fake `ssh` on the PATH that records every call
+and answers `Permission denied`; the real upstream script then runs to
+completion and every byte it produces is captured: stdout, stderr, and the
+remote command it built.  That is where the golden sentences and the golden
+POSIX command come from, and `host/verify_loop103.mjs` compares both sides
+**in the same run**, with the same arguments, from the same directory, with a
+relative `-i` (so even the path quoted in the closing sentence comes out the
+same) and the program name normalised to `<prog>`.
+
+### Upstream moves, and what a byte-for-byte claim can survive
+
+The copy of the script that is **installed** is not always the current one.
+Two copies were measured and they differ in exactly two clauses of the one
+remote command:
+
+| clause | older copy | current upstream (master) |
+|---|---|---|
+| OpenWrt | `&& [ "$LOGNAME" = "root" ] &&` | `&& { [ "$LOGNAME" = "root" ] \|\| [ "$(id -u)" = "0" ]; } &&` |
+| Haiku | not there | `[ "`uname -s`" = "Haiku" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys;` |
+
+The cloud CI run 45741536394 is where this showed up: the gate compared our
+command with the command the runner's newer copy built, byte for byte, and the
+two differ -- upstream changed, not us.  So the gate now takes those two
+clauses out of BOTH sides, compares the rest byte for byte, and then checks
+the two clauses SEPARATELY: ours has to be upstream's current text, and when
+the copy on the machine is new enough to have the same shape, ours has to be
+its bytes too.  A shape the gate does not know is a FAIL, because it means
+upstream moved again.
+
+This build follows upstream's **current** command.
+
+### A compiler fact: the JS backend turns `${` into an interpolation
+
+MoonBit's **JS backend** emits a string literal that contains `${` or a
+backtick as a JavaScript **template literal**, and a template literal
+interpolates `${...}`.  Measured: `moon test -p src/sshcopyid --target js`
+died with `ReferenceError: AUTH_KEY_FILE is not defined` -- the shell's own
+`${AUTH_KEY_FILE}` was read as a JavaScript expression.  The same literal is
+fine on `native`, so only the other targets see it, and only a gate that runs
+the whole module's tests on `js` (Loop #90's) finds it.
+
+Two rules follow, and both are now in `src/sshcopyid/install.mbt`:
+
+* the dollars are written `\u{24}` and the backticks `\u{60}` -- then the
+  source holds no `${` and no backtick, the backend emits a double-quoted
+  JavaScript string, and the bytes are the same on every target;
+* a string is not built with `+` and a variable, because that is folded into
+  a template literal by the same backend.  The target path is substituted at
+  run time with `replace` instead.
+
+`\$` and `` \` `` are NOT escapes in MoonBit -- the compiler rejects both --
+so `\u{...}` is the only way to write them.

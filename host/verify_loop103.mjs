@@ -61,6 +61,13 @@
 //     `src/sshcopyid/install.mbt` and compares it with the bytes upstream
 //     built in the same run.  The unit test pins the function's return
 //     value to the same literal, so the two together close the loop.
+//   * **Two clauses of that POSIX command**, and only those two: upstream's
+//     OpenWrt clause and its Haiku clause, both of which upstream has
+//     changed since the copy of the script that measured the sentences was
+//     written.  They are taken out of BOTH sides before the comparison and
+//     checked separately, against upstream's current text -- see the
+//     section at the end of this file for why that is stated here rather
+//     than left implicit.
 //
 // ## What runs where
 //
@@ -69,7 +76,7 @@
 // rather than quietly passed -- a machine that cannot run a check has not
 // run it.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -97,11 +104,43 @@ const skip = (name, why) => {
 
 // ---- the tools we need -------------------------------------------------
 
-const GIT_DIR = "C:\\Program Files\\Git";
-const UPSTREAM = path.join(GIT_DIR, "usr", "bin", "ssh-copy-id");
-const BASH = path.join(GIT_DIR, "bin", "bash.exe");
-const REAL_SSH = "C:\\Windows\\System32\\OpenSSH\\ssh.exe";
-const KEYGEN = "C:\\Windows\\System32\\OpenSSH\\ssh-keygen.exe";
+// machine-path-exempt: each entry below is a CANDIDATE, probed in order
+// until one exists; none is asserted to exist, and when none does the gate
+// names all of them and fails. verify_loop71.mjs flags any drive-letter path
+// it finds in code; this marker says "a probe, not a claim", with a reason.
+const GIT_DIRS = [
+  "C:\\Program Files\\Git",
+  "C:\\Program Files (x86)\\Git",
+];
+const OPENSSH_DIRS = [
+  "C:\\Windows\\System32\\OpenSSH",
+  "C:\\Program Files\\OpenSSH",
+  "C:\\Program Files\\OpenSSH-Win64",
+];
+
+// `where git` knows where Git is on a machine that installed it somewhere
+// else; the root is two levels up from `<root>\cmd\git.exe`.
+const gitCandidates = [...GIT_DIRS];
+try {
+  const where = execFileSync("where", ["git"], { encoding: "utf8" });
+  for (const line of where.split(/\r?\n/)) {
+    const p = line.trim();
+    if (p.toLowerCase().endsWith("git.exe")) {
+      gitCandidates.push(path.resolve(path.dirname(p), "..", ".."));
+    }
+  }
+} catch {
+  // no git on PATH: the candidate list above is all there is
+}
+
+const GIT_DIR =
+  gitCandidates.find((d) => fs.existsSync(path.join(d, "usr", "bin", "ssh-copy-id"))) || null;
+const UPSTREAM = GIT_DIR ? path.join(GIT_DIR, "usr", "bin", "ssh-copy-id") : "";
+const BASH = GIT_DIR ? path.join(GIT_DIR, "bin", "bash.exe") : "";
+const pick = (name) =>
+  OPENSSH_DIRS.map((d) => path.join(d, name)).find((p) => fs.existsSync(p)) || "";
+const REAL_SSH = pick("ssh.exe");
+const KEYGEN = pick("ssh-keygen.exe");
 const OUR_EXE = path.join(
   ROOT,
   "_build",
@@ -186,10 +225,41 @@ function unescapeMoonBit(s) {
       if (d === "\\") { out += "\\"; i++; continue; }
       if (d === '"') { out += '"'; i++; continue; }
       if (d === "'") { out += "'"; i++; continue; }
+      // `\u{24}` is a dollar sign, and the source has to write it that way:
+      // MoonBit's JS backend emits a string literal that contains `${` as a
+      // JavaScript template literal, and a template literal interpolates.
+      if (d === "u" && s[i + 2] === "{") {
+        const end = s.indexOf("}", i + 3);
+        if (end > 0) {
+          out += String.fromCodePoint(parseInt(s.slice(i + 3, end), 16));
+          i = end;
+          continue;
+        }
+      }
     }
     out += c;
   }
   return out;
+}
+
+/** The POSIX command template, read out of the source.  The literal in
+ *  `install.mbt` carries the escaped dollars and backticks; undone, it is
+ *  the command upstream sends, with `@TARGET@` where the target goes. */
+function posixTemplate() {
+  const src = fs.readFileSync(path.join(ROOT, "src", "sshcopyid", "install.mbt"), "utf8");
+  const m = /const POSIX_COMMAND_TEMPLATE : String = "((?:[^"\\]|\\.)*)"/.exec(src);
+  return m ? unescapeMoonBit(m[1]) : "";
+}
+
+/** The same command as the source comment writes it -- with the real
+ *  dollars and the real backticks, which is where a human reads it. */
+function readableCommandFromComment() {
+  const src = fs.readFileSync(path.join(ROOT, "src", "sshcopyid", "install.mbt"), "utf8");
+  for (const line of src.split(/\r?\n/)) {
+    const t = line.trim().replace(/^(?:\/\/\/|\/\/)\s*/, "");
+    if (t.startsWith("exec sh -c '")) return t;
+  }
+  return "";
 }
 
 /** The bytes as the shell that runs upstream would hand them over: CRLF
@@ -609,20 +679,89 @@ if (execLines.length > 0) {
 
 section("the posix command");
 
+// The two clauses upstream has changed since the copy of the script that
+// measured the sentences was written.
+//
+// A byte-for-byte comparison against whichever copy of `ssh-copy-id` is
+// installed cannot be the whole claim, because the copies are not all the
+// same age: the OpenWrt clause grew a second test (root by uid as well as
+// by name) and the Haiku clause did not exist at all in the older copy.
+// So the two clauses are taken out of BOTH sides, and what is left --
+// umask, the target, the directory, the trailing-newline check, the
+// append, the SELinux restore -- is compared byte for byte.
+//
+// The two clauses are not simply waved through: each one is checked
+// against upstream's CURRENT text, and against the copy on this machine
+// when that copy is new enough to have the same shape.  A shape this gate
+// does not know is a failure, because it means upstream moved again and
+// the command here has to be measured again.
+const VOLATILE_CLAUSES = [
+  {
+    name: "the OpenWrt clause",
+    re: /(\[ -f \/etc\/openwrt_release \].*?AUTH_KEY_FILE=\/etc\/dropbear\/authorized_keys;) ?/,
+    current:
+      '[ -f /etc/openwrt_release ] && { [ "$LOGNAME" = "root" ] || [ "$(id -u)" = "0" ]; } && AUTH_KEY_FILE=/etc/dropbear/authorized_keys;',
+    older:
+      '[ -f /etc/openwrt_release ] && [ "$LOGNAME" = "root" ] && AUTH_KEY_FILE=/etc/dropbear/authorized_keys;',
+  },
+  {
+    name: "the Haiku clause",
+    re: /(\[ "`uname -s`" = "Haiku" \].*?AUTH_KEY_FILE=config\/settings\/ssh\/authorized_keys;) ?/,
+    current:
+      '[ "`uname -s`" = "Haiku" ] && AUTH_KEY_FILE=config/settings/ssh/authorized_keys;',
+    older: null,
+  },
+];
+
+/** The command with the two clauses upstream has changed taken out. */
+const canonical = (s) =>
+  VOLATILE_CLAUSES.reduce((acc, c) => acc.replace(c.re, ""), s);
+
 if (!up.installCommand) {
   skip("the posix command", "upstream's remote command was not captured");
 } else {
-  // The command our source builds, read out of the source: the pieces of
-  // the literal in `install_command_posix`, joined with the place where
-  // the target path goes.
-  const pieces = literalsOf("install_command_posix");
-  const oursCommand = pieces.join("<TARGET>");
-  ok("our source builds one command out of literal pieces", pieces.length > 0,
-    `${pieces.length} pieces`);
+  const oursCommand = posixTemplate().split("@TARGET@").join("<TARGET>");
+  ok("our source builds one command out of one literal", oursCommand.length > 0,
+    `${oursCommand.length} chars`);
+
+  // The readable copy in the source comment has to be the same command:
+  // the comment is where a human reads it, so a drift between the two
+  // would be a lie told to whoever reads the file.
+  const readable = readableCommandFromComment();
+  ok("the readable command in the source comment is the command the code builds",
+    readable !== "" && readable.split(".ssh/authorized_keys").join("<TARGET>") === oursCommand,
+    JSON.stringify(readable.slice(0, 160)));
+
   const upstreamCommand = up.installCommand.split(target).join("<TARGET>");
-  ok("the command our source builds is upstream's own bytes, byte for byte",
-    oursCommand === upstreamCommand,
-    JSON.stringify(oursCommand.slice(0, 200)) + " vs " + JSON.stringify(upstreamCommand.slice(0, 200)));
+  // The whole upstream command, in the log, every run: a gate that only
+  // prints a difference leaves a reader guessing which side moved.
+  console.log(`  upstream's own command was: ${up.installCommand}`);
+
+  ok("the command our source builds is upstream's own bytes, byte for byte -- outside the two clauses upstream has changed",
+    canonical(oursCommand) === canonical(upstreamCommand),
+    JSON.stringify(canonical(oursCommand).slice(0, 200)) +
+      " vs " + JSON.stringify(canonical(upstreamCommand).slice(0, 200)));
+
+  for (const c of VOLATILE_CLAUSES) {
+    const ours = c.re.exec(oursCommand);
+    ok(`our command carries upstream's current ${c.name}`,
+      ours !== null && ours[1] === c.current,
+      ours ? ours[1] : "(not found in our command)");
+    const theirs = c.re.exec(upstreamCommand);
+    if (theirs && theirs[1] === c.current) {
+      ok(`our ${c.name} is the copy on this machine, byte for byte`,
+        ours !== null && ours[1] === theirs[1],
+        JSON.stringify(theirs[1]));
+    } else if (!theirs && c.older === null) {
+      console.log(`  NOTE  the upstream on this machine predates ${c.name}; ours is upstream's current one`);
+    } else if (theirs && theirs[1] === c.older) {
+      console.log(`  NOTE  the upstream on this machine has the older ${c.name}; ours is upstream's current one`);
+    } else {
+      ok(`the upstream on this machine has a ${c.name} this gate does not know`,
+        false,
+        theirs ? theirs[1] : "(no clause at all, and none is expected)");
+    }
+  }
 }
 
 // ---- done --------------------------------------------------------------

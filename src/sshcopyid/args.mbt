@@ -1,4 +1,5 @@
-///| Loop #103: upstream's option table.
+///|
+/// Loop #103: upstream's option table.
 ///
 /// Upstream's getopts string is `"io:p:F:t:fnsxh?"`, which says three things
 /// that are easy to get wrong:
@@ -91,7 +92,9 @@ pub fn parse_args(
           // take it.
           let has_next = i + 1 < n
           let next = if has_next { args[i + 1] } else { "" }
-          if has_next && next == args[n - 1] && looks_like_key_file(next, is_key_file) {
+          if has_next &&
+            next == args[n - 1] &&
+            looks_like_key_file(next, is_key_file) {
             return Err(CopyIdArgError::MissingHostname(next))
           }
           if has_next && !looks_like_option(next) {
@@ -111,12 +114,12 @@ pub fn parse_args(
             return Err(CopyIdArgError::Usage)
           }
           if c == 'o' {
-            opt_args.push({ flag: "o", value: arg })
+            opt_args.push({ flag: "o", value: arg, })
           } else if c == 'p' {
             port = parse_port(arg)
             port_given = true
           } else if c == 'F' {
-            opt_args.push({ flag: "F", value: arg })
+            opt_args.push({ flag: "F", value: arg, })
           } else {
             target_path = arg
           }
@@ -185,8 +188,18 @@ fn looks_like_option(word : String) -> Bool {
     return false
   }
   let c = word[1]
-  c == 'i' || c == 'o' || c == 'p' || c == 'F' || c == 't' || c == 'f' ||
-  c == 'n' || c == 's' || c == 'x' || c == 'h' || c == '?' || c == '-'
+  c == 'i' ||
+  c == 'o' ||
+  c == 'p' ||
+  c == 'F' ||
+  c == 't' ||
+  c == 'f' ||
+  c == 'n' ||
+  c == 's' ||
+  c == 'x' ||
+  c == 'h' ||
+  c == '?' ||
+  c == '-'
 }
 
 ///|
@@ -195,15 +208,13 @@ fn looks_like_option(word : String) -> Bool {
 /// Upstream's test is `[ -r "$nextarg" ] && grep -iq ssh "$nextarg"`, and
 /// the rules cannot reach the disk, so the driver answers it.  A file that
 /// does not exist answers "no", which is what upstream's `-r` says.
-fn looks_like_key_file(
-  word : String,
-  probe : (String) -> Bool,
-) -> Bool {
+fn looks_like_key_file(word : String, probe : (String) -> Bool) -> Bool {
   probe(word)
 }
 
 ///|
 /// `[from, to)` of a string.
+
 ///|
 /// A port number, or upstream's default when the word is not one.
 ///

@@ -156,8 +156,12 @@ measured against the **real** script before it is written:
   upstream's own bytes, captured from the real script in the same run and
   compared byte for byte; two of upstream's quirks (the `-f` sentence with an
   empty path, the "too many arguments" sentence with an empty list) are kept on
-  purpose. `host/verify_loop103.mjs` is the gate (42 checks).
-  `docs/sshcopyid/loop103-summary.md` has the measurements.
+  purpose. `host/verify_loop103.mjs` is the gate (45 checks).
+  The POSIX one-liner follows upstream's **current** source; the copy of the
+  script installed on a machine is not always that one, so the gate compares
+  the part upstream has not changed byte for byte and checks the two clauses
+  it has changed separately. `docs/sshcopyid/loop103-summary.md` has the
+  measurements.
 - `cmd/ssh_keygen`, `cmd/ssh_keyscan`, `cmd/scp` and `cmd/sftp_server` are
   already here; `ssh-agent`/`ssh-add` are the agent pair.
 
@@ -235,7 +239,7 @@ self-contained run that starts its own man in the middle, drives the client
 through it, and asserts on transcripts rather than on the client's own report.
 
 ```powershell
-node host\verify_loop103.mjs   # 42 checks -- ssh-copy-id, against the real
+node host\verify_loop103.mjs   # 45 checks -- ssh-copy-id, against the real
                                #   upstream script and a real Windows sshd
 node host\verify_loop94.mjs    # 49 checks -- the server, against a real ssh.exe
 node host\verify_loop102.mjs   # 50 checks -- the server's half of `ssh -R`,

@@ -169,7 +169,7 @@
         "rewrite_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 111,
+      "uncovered_lines": 112,
       "files_reported": 8,
       "report": true
     },
@@ -287,13 +287,23 @@
       "report": true
     },
     {
+      "package": "src/sshcopyid",
+      "test_files": [
+        "copyid_test.mbt"
+      ],
+      "exit": 0,
+      "uncovered_lines": 91,
+      "files_reported": 5,
+      "report": true
+    },
+    {
       "package": "src/sshd",
       "test_files": [
         "sshd_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 115,
-      "files_reported": 5,
+      "uncovered_lines": 372,
+      "files_reported": 8,
       "report": true
     },
     {
@@ -303,7 +313,7 @@
         "subproc_stub_test.mbt"
       ],
       "exit": 0,
-      "uncovered_lines": 26,
+      "uncovered_lines": 53,
       "files_reported": 2,
       "report": true
     },
@@ -356,6 +366,7 @@
     "src/sha256",
     "src/sha512",
     "src/sshconfig",
+    "src/sshcopyid",
     "src/sshd",
     "src/subproc",
     "src/x25519"
